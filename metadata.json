@@ -1,0 +1,7 @@
+{
+  "name": "Radiohost.cloud #TEST8",
+  "description": "Wbudowany stream",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
