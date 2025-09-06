@@ -331,7 +331,7 @@ const Header: React.FC<HeaderProps> = ({
                                         <span className={`w-3 h-3 rounded-full ${connectionDotClass}`}></span>
                                     </div>
                                     <span className={`px-2 py-1 text-xs font-bold text-white rounded-md ${modeBadgeClass}`}>
-                                        TRYB: {playoutMode?.toUpperCase()}
+                                        {playoutMode?.toUpperCase()}
                                     </span>
                                 </div>
                             )}
@@ -457,7 +457,7 @@ const Header: React.FC<HeaderProps> = ({
                                     <span className={`w-3 h-3 rounded-full ${connectionDotClass}`}></span>
                                 </div>
                                 <span className={`px-2 py-1 text-xs font-bold text-white rounded-md ${modeBadgeClass}`}>
-                                    TRYB: {playoutMode?.toUpperCase()}
+                                    {playoutMode?.toUpperCase()}
                                 </span>
                             </div>
                         )}

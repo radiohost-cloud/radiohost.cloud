@@ -1,4 +1,6 @@
 
+
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast } from './types';
 import Header from './components/Header';
@@ -775,6 +777,56 @@ const App: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
         return () => navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
 
     }, []);
+
+    // FIX: This hook initializes and manages the WebSocket connection for HOST mode.
+    // It was previously missing, causing the connection status to be permanently 'disconnected'.
+    useEffect(() => {
+        const appMode = sessionStorage.getItem('appMode');
+        if (appMode !== 'HOST' || !currentUser) {
+            return;
+        }
+
+        setWsStatus('connecting');
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}?email=${encodeURIComponent(currentUser.email)}`;
+        
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+            console.log('[WebSocket] Connection established.');
+            setWsStatus('connected');
+            if (playoutPolicyRef.current.playoutMode === 'master') {
+                ws.send(JSON.stringify({ type: 'setMaster' }));
+            }
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log(`[WebSocket] Message received: ${data.type}`);
+            switch (data.type) {
+                case 'webrtc-signal':
+                    setRtcSignal(data);
+                    break;
+                // Add other message handlers here in the future (e.g., for state sync)
+            }
+        };
+
+        ws.onclose = () => {
+            console.log('[WebSocket] Connection closed.');
+            setWsStatus('disconnected');
+        };
+
+        ws.onerror = (error) => {
+            console.error('[WebSocket] Error:', error);
+            setWsStatus('disconnected');
+        };
+
+        return () => {
+            ws.close();
+            wsRef.current = null;
+        };
+    }, [currentUser]);
 
     useEffect(() => {
         const WHATS_NEW_KEY = 'radiohost_whatsNewPopupSeen_v1';
@@ -2772,7 +2824,9 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
                     <div className="h-full flex-shrink-0" style={{ width: `${displayedColumnWidths[0]}%` }}>
                         <MediaLibrary
                             rootFolder={mediaLibrary}
-                            onAddToPlaylist={handleAttemptToAddTrack}
+                            // FIX: Adapt handleAttemptToAddTrack to the expected (track: Track) => void signature
+                            // by providing null for the second argument, as adding from the library always appends to the end.
+                            onAddToPlaylist={(track) => handleAttemptToAddTrack(track, null)}
                             onAddTracksToLibrary={handleAddTracksToLibrary}
                             onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
                             onRemoveFromLibrary={handleRemoveFromLibrary}
@@ -2851,7 +2905,9 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
                             {activeRightColumnTab === 'ai' && <AiAssistant currentTrack={currentTrack} />}
                             {activeRightColumnTab === 'stream' && <PublicStream ws={wsRef.current} mainBusStream={mainBusStream} isAudioEngineReady={audioGraphRef.current.isInitialized} isAudioEngineInitializing={isAudioEngineInitializing} currentTrack={displayTrack} isPlaying={isPlaying} artworkUrl={loadedArtworkUrl} />}
                             {activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} />}
-                            {activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onDelete={(id) => setBroadcasts(b => b.filter(br => br.id !== id))} onManualLoad={(id) => { const b = broadcasts.find(br => br.id === id); if (b) { b.playlist.forEach(item => { if(!('markerType' in item)) (item as Track).addedBy = 'broadcast' }); setPlaylist(p => [...p, ...b.playlist]); setBroadcasts(brs => brs.map(br => br.id === id ? {...br, lastLoaded: Date.now()} : br)); } }} onOpenEditor={(b) => { setEditingBroadcast(b); setIsBroadcastEditorOpen(true); }} />}
+                            {/* FIX: Avoid direct mutation of state. Create a new array for the playlist
+                            items to be loaded to ensure immutability and prevent type errors. */}
+                            {activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onDelete={(id) => setBroadcasts(b => b.filter(br => br.id !== id))} onManualLoad={(id) => { const b = broadcasts.find(br => br.id === id); if (b) { const itemsToLoad = b.playlist.map(item => ('markerType' in item) ? item : { ...item, addedBy: 'broadcast' as const }); setPlaylist(p => [...p, ...itemsToLoad]); setBroadcasts(brs => brs.map(br => br.id === id ? {...br, lastLoaded: Date.now()} : br)); } }} onOpenEditor={(b) => { setEditingBroadcast(b); setIsBroadcastEditorOpen(true); }} />}
                             {activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isNowPlayingExportEnabled={isNowPlayingExportEnabled} onSetIsNowPlayingExportEnabled={setIsNowPlayingExportEnabled} onSetNowPlayingFile={handleSetNowPlayingFile} nowPlayingFileName={nowPlayingFileName} metadataFormat={metadataFormat} onSetMetadataFormat={setMetadataFormat} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} onSetAutoBackupFolder={handleSetAutoBackupFolder} autoBackupFolderPath={autoBackupFolderPath} allFolders={allFolders} allTags={allTags} />}
                         </div>
                          <div className="flex-shrink-0 border-t border-neutral-200 dark:border-neutral-800">
