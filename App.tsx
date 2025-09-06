@@ -1445,7 +1445,12 @@ const AppInternal: React.FC = () => {
             const player = e.target as HTMLAudioElement;
             const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
             if (player !== activePlayerRef.current) return;
-            setTrackProgress(player.currentTime);
+
+            // ONLY the master should update its progress state from the local audio element.
+            // The contributor's progress is updated via WebSocket messages.
+            if (playoutPolicyRef.current.playoutMode === 'master') {
+                setTrackProgress(player.currentTime);
+            }
 
             // Contributor does not control playback logic
             if (playoutPolicyRef.current.playoutMode === 'contributor') return;
@@ -2782,7 +2787,7 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
 
     useEffect(() => {
         const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
-        if (!isHostMode || !currentUser) return;
+        if (isInitialLoad || !isHostMode || !currentUser) return;
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}?email=${currentUser.email}`;
@@ -2835,7 +2840,7 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
         return () => {
             ws.close();
         };
-    }, [currentUser, playoutPolicy.playoutMode, sendStateUpdate, sendLibraryUpdate]);
+    }, [isInitialLoad, currentUser, playoutPolicy.playoutMode, sendStateUpdate, sendLibraryUpdate]);
 
     const isMaster = playoutPolicy.playoutMode === 'master';
 
