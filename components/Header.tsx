@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { UserIcon } from './icons/UserIcon';
 import { LogoutIcon } from './icons/LogoutIcon';
-import { type Track } from '../types';
+import { type Track, type PlayoutPolicy } from '../types';
 import { PlayIcon } from './icons/PlayIcon';
 import { PauseIcon } from './icons/PauseIcon';
 import { ForwardIcon } from './icons/ForwardIcon';
@@ -44,7 +44,10 @@ interface HeaderProps {
     onPlayTrack: (trackId: string) => void;
     onEject: (trackId: string) => void;
     mainPlayerAnalyser: AnalyserNode | null;
-    isContributor: boolean; // New prop
+    isContributor: boolean;
+    isHostMode: boolean;
+    connectionStatus: 'disconnected' | 'connecting' | 'connected';
+    playoutMode?: PlayoutPolicy['playoutMode'];
 }
 
 const formatDuration = (seconds: number): string => {
@@ -194,7 +197,7 @@ const Deck: React.FC<{
 const Header: React.FC<HeaderProps> = ({ 
     currentUser, onLogout, currentTrack, nextTrack, nextNextTrack, onNext, onPrevious, isPlaying, onTogglePlay, isPresenterLive = false, progress,
     logoSrc, onLogoChange, onLogoReset, headerGradient, headerTextColor, onOpenHelp, isAutoModeEnabled, onToggleAutoMode, onArtworkClick, onArtworkLoaded, headerHeight,
-    onPlayTrack, onEject, mainPlayerAnalyser, isContributor
+    onPlayTrack, onEject, mainPlayerAnalyser, isContributor, isHostMode, connectionStatus, playoutMode
 }) => {
     
     const [isLogoConfirmOpen, setIsLogoConfirmOpen] = useState(false);
@@ -287,6 +290,16 @@ const Header: React.FC<HeaderProps> = ({
     const DECK_VIEW_THRESHOLD = 180; // pixels
     const showDeckView = headerHeight >= DECK_VIEW_THRESHOLD;
 
+    const connectionDotClass = {
+        connected: 'bg-green-400',
+        connecting: 'bg-yellow-500 animate-pulse',
+        disconnected: 'bg-red-500',
+    }[connectionStatus];
+
+    const modeBadgeClass = playoutMode === 'master' 
+        ? 'bg-green-600/80' 
+        : 'bg-blue-600/80';
+
     return (
         <>
             <header 
@@ -296,7 +309,7 @@ const Header: React.FC<HeaderProps> = ({
                
                 {/* DECK VIEW */}
                 <div className={`absolute inset-0 pt-16 pb-4 px-4 flex items-stretch justify-between gap-4 transition-opacity duration-300 ${showDeckView ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                    <div className={`absolute top-0 left-0 right-0 h-12 z-20 flex items-center justify-between px-4 bg-gradient-to-b from-black/50 to-transparent`}>
+                     <div className={`absolute top-0 left-0 right-0 h-12 z-20 flex items-center justify-between px-4 bg-gradient-to-b from-black/50 to-transparent`}>
                          <div className="w-auto flex-shrink-0">
                             <input type="file" ref={logoInputRef} onChange={handleFileChange} accept="image/*" className="hidden"/>
                             {logoSrc ? (
@@ -312,10 +325,17 @@ const Header: React.FC<HeaderProps> = ({
                             <Toggle id="auto-mode-toggle-deck" checked={isAutoModeEnabled} onChange={onToggleAutoMode} />
                         </div>
                          <div className="w-auto flex justify-end items-center gap-4">
+                            {isHostMode && (
+                                <div className="flex items-center gap-3">
+                                    <div className="flex items-center gap-2" title={`Connection: ${connectionStatus}`}>
+                                        <span className={`w-3 h-3 rounded-full ${connectionDotClass}`}></span>
+                                    </div>
+                                    <span className={`px-2 py-1 text-xs font-bold text-white rounded-md ${modeBadgeClass}`}>
+                                        TRYB: {playoutMode?.toUpperCase()}
+                                    </span>
+                                </div>
+                            )}
                             <div className={secondaryTextColorClass}><Clock /></div>
-                            <a href="https://ko-fi.com/radiohostcloud" target="_blank" rel="noopener noreferrer" className="flex-shrink-0" title="Support me on Ko-fi">
-                                <img src="https://media0.giphy.com/media/v1.Y2lkPTc5MGI3NjExMHJ6NDJ2bGlmOGt4aGd3bnBtN3VtcWl0amk1d3NjNGs1Mm9oMzBwZSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/PaF9a1MpqDzovyqVKj/giphy.gif" alt="Support me on Ko-fi" className="h-9 transition-transform hover:scale-105"/>
-                            </a>
                             <button onClick={onOpenHelp} className={`p-2 rounded-md transition-colors ${iconColorClass}`} title="Help / User Manual"><QuestionMarkIcon className="w-5 h-5" /></button>
                             <button onClick={toggleFullscreen} className={`p-2 rounded-md transition-colors ${iconColorClass}`} title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}>{isFullscreen ? <ExitFullscreenIcon className="w-5 h-5" /> : <EnterFullscreenIcon className="w-5 h-5" />}</button>
                             {currentUser && <>
@@ -431,10 +451,17 @@ const Header: React.FC<HeaderProps> = ({
                     
                     {/* Right: Clock & Icons */}
                     <div className="flex-shrink-0 flex justify-end items-center gap-2 sm:gap-4">
+                        {isHostMode && (
+                            <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-2" title={`Connection: ${connectionStatus}`}>
+                                    <span className={`w-3 h-3 rounded-full ${connectionDotClass}`}></span>
+                                </div>
+                                <span className={`px-2 py-1 text-xs font-bold text-white rounded-md ${modeBadgeClass}`}>
+                                    TRYB: {playoutMode?.toUpperCase()}
+                                </span>
+                            </div>
+                        )}
                         <div className={`${secondaryTextColorClass} hidden md:block`}><Clock /></div>
-                        <a href="https://ko-fi.com/radiohostcloud" target="_blank" rel="noopener noreferrer" className="flex-shrink-0 hidden md:block" title="Support me on Ko-fi">
-                            <img src="https://media0.giphy.com/media/v1.Y2lkPTc5MGI3NjExMHJ6NDJ2bGlmOGt4aGd3bnBtN3VtcWl0amk1d3NjNGs1Mm9oMzBwZSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/PaF9a1MpqDzovyqVKj/giphy.gif" alt="Support me on Ko-fi" className="h-9 transition-transform hover:scale-105"/>
-                        </a>
                         <button onClick={onOpenHelp} className={`p-2 rounded-md transition-colors ${iconColorClass}`} title="Help / User Manual"><QuestionMarkIcon className="w-5 h-5" /></button>
                         <button onClick={toggleFullscreen} className={`p-2 rounded-md transition-colors ${iconColorClass}`} title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}>{isFullscreen ? <ExitFullscreenIcon className="w-5 h-5" /> : <EnterFullscreenIcon className="w-5 h-5" />}</button>
                         {currentUser ? (

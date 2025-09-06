@@ -6,14 +6,17 @@ import * as dataService from '../services/dataService';
 interface AuthProps {
     onLogin: (email: string) => void;
     onSignup: (email: string) => void;
+    onBack: () => void;
 }
 
-const Auth: React.FC<AuthProps> = ({ onLogin, onSignup }) => {
+const Auth: React.FC<AuthProps> = ({ onLogin, onSignup, onBack }) => {
     const [isLogin, setIsLogin] = useState(true);
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [nickname, setNickname] = useState('');
     const [error, setError] = useState('');
+    const [role, setRole] = useState<'master' | 'contributor'>('master');
+    const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
 
     useEffect(() => {
         const checkUsers = async () => {
@@ -45,6 +48,10 @@ const Auth: React.FC<AuthProps> = ({ onLogin, onSignup }) => {
         }
 
         try {
+            if (isHostMode) {
+                sessionStorage.setItem('playoutRole', role);
+            }
+
             if (isLogin) {
                 const user = await dataService.login(email, password);
                 if (user) {
@@ -130,6 +137,16 @@ const Auth: React.FC<AuthProps> = ({ onLogin, onSignup }) => {
                         </div>
                     </div>
 
+                    {isHostMode && (
+                        <div className="pt-2">
+                            <span className="text-sm font-medium text-neutral-800 dark:text-neutral-300 block text-center mb-2">Choose your role for this session:</span>
+                            <div className="relative flex w-full p-1 bg-neutral-200 dark:bg-neutral-800 rounded-lg">
+                                <button type="button" onClick={() => setRole('master')} className={`w-1/2 rounded-md py-1.5 text-sm font-semibold transition-colors ${role === 'master' ? 'bg-white dark:bg-black shadow-sm' : 'text-neutral-600 dark:text-neutral-400'}`}>Master Playout</button>
+                                <button type="button" onClick={() => setRole('contributor')} className={`w-1/2 rounded-md py-1.5 text-sm font-semibold transition-colors ${role === 'contributor' ? 'bg-white dark:bg-black shadow-sm' : 'text-neutral-600 dark:text-neutral-400'}`}>Contributor</button>
+                            </div>
+                        </div>
+                    )}
+
                     {error && <p className="text-sm text-red-500 text-center">{error}</p>}
 
                     <div>
@@ -149,11 +166,10 @@ const Auth: React.FC<AuthProps> = ({ onLogin, onSignup }) => {
                     </button>
                 </p>
                 <div className="!mt-4 space-y-3">
-                    <p className="text-center text-xs text-neutral-500 dark:text-neutral-600">
-                        Need help? Contact us at{' '}
-                        <a href="mailto:contact@radiohost.cloud" className="font-medium text-black dark:text-white hover:underline">
-                            contact@radiohost.cloud
-                        </a>
+                     <p className="text-center text-sm text-neutral-600 dark:text-neutral-500">
+                        <button onClick={onBack} className="font-medium text-black dark:text-white hover:text-neutral-800 dark:hover:text-neutral-300">
+                            « Back to Mode Selection
+                        </button>
                     </p>
                     <div className="text-center">
                         <a 

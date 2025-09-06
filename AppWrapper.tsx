@@ -17,11 +17,17 @@ const AppWrapper: React.FC = () => {
         setMode(selectedMode);
     };
 
+    const handleBackToModeSelection = () => {
+        sessionStorage.removeItem('appMode');
+        sessionStorage.removeItem('playoutRole');
+        setMode(null);
+    };
+
     if (!mode) {
         return <ModeSelector onModeSelect={handleModeSelect} />;
     }
 
-    return <App />;
+    return <App onBackToModeSelection={handleBackToModeSelection} />;
 };
 
 export default AppWrapper;

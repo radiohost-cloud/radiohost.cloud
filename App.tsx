@@ -329,8 +329,11 @@ const getAllTags = (node: Folder): string[] => {
 };
 
 // --- App Component ---
+interface AppInternalProps {
+    onBackToModeSelection: () => void;
+}
 
-const AppInternal: React.FC = () => {
+const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
     const [currentUser, setCurrentUser] = useState<{ email: string; nickname: string; } | null>(null);
     const [mediaLibrary, setMediaLibrary] = useState<Folder>(createInitialLibrary());
     const [playlist, setPlaylist] = useState<SequenceItem[]>([]);
@@ -455,6 +458,7 @@ const AppInternal: React.FC = () => {
     // --- NEW: WebSocket and WebRTC state for real-time collaboration ---
     const wsRef = useRef<WebSocket | null>(null);
     const [rtcSignal, setRtcSignal] = useState<any>(null); // To pass signals to RemoteStudio
+    const [wsStatus, setWsStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
 
     // --- AUDIO WORKLET ---
     // This code runs in a separate, high-priority audio thread to prevent UI lag from affecting playback.
@@ -647,7 +651,14 @@ const AppInternal: React.FC = () => {
             setBroadcasts(initialUserData?.broadcasts || []);
 
             const initialSettings = initialUserData?.settings || {};
-            setPlayoutPolicy({ ...defaultPlayoutPolicy, ...initialSettings.playoutPolicy });
+            
+            const savedRole = sessionStorage.getItem('playoutRole') as 'master' | 'contributor' | null;
+            const finalPolicy = { ...defaultPlayoutPolicy, ...initialSettings.playoutPolicy };
+            if (savedRole && sessionStorage.getItem('appMode') === 'HOST') {
+                finalPolicy.playoutMode = savedRole;
+            }
+            setPlayoutPolicy(finalPolicy);
+
             setLogoSrc(initialSettings.logoSrc || null);
             setLogoHeaderGradient(initialSettings.headerGradient || null);
             setLogoHeaderTextColor(initialSettings.headerTextColor || 'white');
@@ -2809,7 +2820,8 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
     useEffect(() => {
         const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
         if (isInitialLoad || !isHostMode || !currentUser) return;
-
+        
+        setWsStatus('connecting');
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}?email=${currentUser.email}`;
         
@@ -2818,6 +2830,7 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
 
         ws.onopen = () => {
             console.log('[WebSocket] Connected');
+            setWsStatus('connected');
             if (playoutPolicyRef.current.playoutMode === 'master') {
                 ws.send(JSON.stringify({ type: 'setMaster' }));
             } else {
@@ -2855,8 +2868,14 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
             }
         };
 
-        ws.onclose = () => console.log('[WebSocket] Disconnected');
-        ws.onerror = (error) => console.error('[WebSocket] Error:', error);
+        ws.onclose = () => {
+            console.log('[WebSocket] Disconnected');
+            setWsStatus('disconnected');
+        };
+        ws.onerror = (error) => {
+            console.error('[WebSocket] Error:', error);
+            setWsStatus('disconnected');
+        };
 
         return () => {
             ws.close();
@@ -2864,11 +2883,12 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
     }, [isInitialLoad, currentUser, playoutPolicy.playoutMode, sendStateUpdate, sendLibraryUpdate]);
 
     const isMaster = playoutPolicy.playoutMode === 'master';
+    const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
 
     return (
         <div className="flex flex-col h-screen bg-white dark:bg-black text-black dark:text-white font-sans overflow-hidden">
             {!currentUser ? (
-                <Auth onLogin={handleLogin} onSignup={handleSignup} />
+                <Auth onLogin={handleLogin} onSignup={handleSignup} onBack={onBackToModeSelection} />
             ) : (
                 <>
                     <div
@@ -2902,7 +2922,10 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
                             onPlayTrack={handlePlayTrack}
                             onEject={handleRemoveFromPlaylist}
                             mainPlayerAnalyser={audioGraphRef.current.analysers?.mainPlayer || null}
-                            isContributor={playoutPolicy.playoutMode === 'contributor'}
+                            isContributor={!isMaster}
+                            isHostMode={isHostMode}
+                            connectionStatus={wsStatus}
+                            playoutMode={playoutPolicy.playoutMode}
                         />
                     </div>
                     <VerticalResizer
@@ -2956,7 +2979,7 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
                                 onUpdateTimeMarker={handleUpdateTimeMarker}
                                 onInsertVoiceTrack={handleInsertVoiceTrack}
                                 policy={playoutPolicy}
-                                isContributor={playoutPolicy.playoutMode === 'contributor'}
+                                isContributor={!isMaster}
                             />
                         </div>
 
@@ -3011,7 +3034,7 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
                                             onStreamAvailable={handleMicStream}
                                             ws={wsRef.current}
                                             currentUser={currentUser}
-                                            isMaster={playoutPolicy.playoutMode === 'master'}
+                                            isMaster={!isMaster}
                                             incomingSignal={rtcSignal}
                                         />
                                     </div>
