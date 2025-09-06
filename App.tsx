@@ -1,8 +1,4 @@
 
-
-
-
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast } from './types';
 import Header from './components/Header';
@@ -208,4 +204,345 @@ const removeItemsFromTree = (node: Folder, itemIdsToRemove: Set<string>): Folder
     return { ...node, children: newChildren };
 };
 
-const updateFolderInTree = (node: Folder, folderId: string, updateFn: (folder: Folder) =>
+const updateFolderInTree = (node: Folder, folderId: string, updateFn: (folder: Folder) => Folder): Folder => {
+    if (node.id === folderId) {
+        return updateFn(node);
+    }
+    return {
+        ...node,
+        children: node.children.map(child =>
+            child.type === 'folder' ? updateFolderInTree(child, folderId, updateFn) : child
+        ),
+    };
+};
+
+const updateTrackInTree = (node: Folder, trackId: string, updateFn: (track: Track) => Track): Folder => {
+    return {
+        ...node,
+        children: node.children.map(child => {
+            if (child.type !== 'folder' && child.id === trackId) {
+                return updateFn(child as Track);
+            }
+            if (child.type === 'folder') {
+                return updateTrackInTree(child, trackId, updateFn);
+            }
+            return child;
+        }),
+    };
+};
+
+const findItemInTree = (node: Folder, itemId: string): LibraryItem | null => {
+    if (node.id === itemId) return node;
+    for (const child of node.children) {
+        if (child.id === itemId) return child;
+        if (child.type === 'folder') {
+            const found = findItemInTree(child, itemId);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+const findParent = (node: Folder, childId: string): Folder | null => {
+    for (const child of node.children) {
+        if (child.id === childId) {
+            return node;
+        }
+        if (child.type === 'folder') {
+            const found = findParent(child, childId);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+const moveItemInTree = (root: Folder, itemId: string, newParentId: string): Folder => {
+    const itemToMove = findItemInTree(root, itemId);
+
+    if (!itemToMove || itemId === newParentId) {
+        return root;
+    }
+
+    if (itemToMove.type === 'folder') {
+        let parent = findItemInTree(root, newParentId);
+        while(parent) {
+            if (parent.id === itemId) return root; // Trying to move into a child
+            const parentOfParent = findParent(root, parent.id);
+            parent = parentOfParent ? findItemInTree(root, parentOfParent.id) as Folder : null;
+        }
+    }
+
+    const rootWithoutItem = removeItemFromTree(root, itemId);
+    return addItemToTree(rootWithoutItem, newParentId, itemToMove);
+};
+
+const applyTagsToFolderContents = (node: Folder, tags: string[]): Folder => {
+    const applyRecursively = (item: LibraryItem): LibraryItem => {
+        const newItem = { ...item, tags };
+        if (newItem.type === 'folder') {
+            newItem.children = newItem.children.map(applyRecursively);
+        }
+        return newItem;
+    };
+
+    return {
+        ...node,
+        children: node.children.map(applyRecursively)
+    };
+};
+
+interface AppProps {
+    onBackToModeSelection: () => void;
+}
+
+const App: React.FC<AppProps> = ({ onBackToModeSelection }) => {
+    // --- AUTH STATE ---
+    const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [currentUser, setCurrentUser] = useState<{ email: string; nickname: string; } | null>(null);
+
+    // --- DATA STATE ---
+    const [rootFolder, setRootFolder] = useState<Folder>(createInitialLibrary());
+    const [playlist, setPlaylist] = useState<SequenceItem[]>([]);
+    const [policy, setPolicy] = useState<PlayoutPolicy>(defaultPlayoutPolicy);
+    const [playoutHistory, setPlayoutHistory] = useState<PlayoutHistoryEntry[]>([]);
+    const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
+    const [audioBuses, setAudioBuses] = useState<AudioBus[]>(initialBuses);
+    const [cartwallPages, setCartwallPages] = useState<CartwallPage[]>([{ id: 'default', name: 'Page 1', items: Array(16).fill(null) }]);
+    const [activeCartwallPageId, setActiveCartwallPageId] = useState('default');
+    const [broadcasts, setBroadcasts] = useState<Broadcast[]>([]);
+
+    // --- PLAYER STATE ---
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [currentPlayingItemId, setCurrentPlayingItemId] = useState<string | null>(null);
+    const [trackProgress, setTrackProgress] = useState(0);
+    const [stopAfterTrackId, setStopAfterTrackId] = useState<string | null>(null);
+
+    // --- PFL STATE ---
+    const [pflTrackId, setPflTrackId] = useState<string | null>(null);
+    const [isPflPlaying, setIsPflPlaying] = useState(false);
+    const [pflProgress, setPflProgress] = useState(0);
+    
+    // --- UI STATE ---
+    const [leftPanelWidth, setLeftPanelWidth] = useState(30);
+    const [rightPanelWidth, setRightPanelWidth] = useState(30);
+    const [bottomPanelHeight, setBottomPanelHeight] = useState(30);
+    const [headerHeight, setHeaderHeight] = useState(100);
+    const [activeTab, setActiveTab] = useState('cartwall');
+    const [isMetadataModalOpen, setIsMetadataModalOpen] = useState(false);
+    const [folderForMetadata, setFolderForMetadata] = useState<Folder | null>(null);
+    const [trackForMetadata, setTrackForMetadata] = useState<Track | null>(null);
+    const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
+    const [isPwaModalOpen, setIsPwaModalOpen] = useState(false);
+    const [isWhatsNewOpen, setIsWhatsNewOpen] = useState(false);
+    const [isArtworkModalOpen, setIsArtworkModalOpen] = useState(false);
+    const [enlargedArtworkUrl, setEnlargedArtworkUrl] = useState<string | null>(null);
+    const [editingBroadcast, setEditingBroadcast] = useState<Broadcast | null>(null);
+    const [isBroadcastEditorOpen, setIsBroadcastEditorOpen] = useState(false);
+    const [headerGradient, setHeaderGradient] = useState<string | null>(null);
+    const [headerTextColor, setHeaderTextColor] = useState<'white' | 'black'>('white');
+    const [logoSrc, setLogoSrc] = useState<string | null>(null);
+    const [isAutoModeEnabled, setIsAutoModeEnabled] = useState(false);
+
+    // --- REFS ---
+    const audioRef = useRef<HTMLAudioElement>(null);
+    const progressIntervalRef = useRef<number | null>(null);
+
+    // This is a placeholder, a full audio engine would be much more complex
+    // For simplicity, we'll just handle basic playback here.
+    const handleTogglePlay = () => setIsPlaying(p => !p);
+
+    // A placeholder for the actual logic
+    const timeline = useMemo(() => new Map<string, { startTime: Date, endTime: Date, duration: number }>(), []);
+
+    // --- Handlers ---
+    const handleLogin = (email: string) => {
+        // In a real app, you would fetch user data here.
+        setIsAuthenticated(true);
+        setCurrentUser({ email, nickname: 'User' });
+    };
+
+    const handleLogout = () => {
+        setIsAuthenticated(false);
+        setCurrentUser(null);
+        // Also needs to handle going back to mode selection if that's the flow.
+        onBackToModeSelection();
+    };
+    
+    const handlePlayTrack = (itemId: string) => {
+        setCurrentPlayingItemId(itemId);
+        setIsPlaying(true);
+    }
+    
+    const handleAddToPlaylist = (track: Track) => {
+        setPlaylist(prev => [...prev, track]);
+    };
+    
+    // --- Placeholder handlers for all components ---
+    const onEject = (trackId: string) => {
+        setPlaylist(p => p.filter(t => t.id !== trackId));
+    };
+
+    // --- Simple effect to check for "first run" for the "What's New" popup ---
+    useEffect(() => {
+        const hasSeenWhatsNew = localStorage.getItem('whatsNewSeen_2'); // Increment version for new updates
+        if (!hasSeenWhatsNew) {
+            setIsWhatsNewOpen(true);
+            localStorage.setItem('whatsNewSeen_2', 'true');
+        }
+    }, []);
+
+    // --- Main Render ---
+    if (!isAuthenticated) {
+        return <Auth onLogin={handleLogin} onSignup={handleLogin} onBack={onBackToModeSelection} />;
+    }
+
+    const currentTrack = playlist.find(item => item.id === currentPlayingItemId && item.type !== 'marker') as Track | undefined;
+    const currentTrackIndex = playlist.findIndex(item => item.id === currentPlayingItemId);
+    const nextTrack = playlist.slice(currentTrackIndex + 1).find(item => item.type !== 'marker') as Track | undefined;
+    const nextNextTrack = playlist.slice(currentTrackIndex + 2).find(item => item.type !== 'marker') as Track | undefined;
+
+
+    return (
+        <div className="flex flex-col h-screen overflow-hidden bg-white dark:bg-black">
+            <div style={{ height: `${headerHeight}px` }}>
+                <Header
+                    currentUser={currentUser}
+                    onLogout={handleLogout}
+                    currentTrack={currentTrack}
+                    nextTrack={nextTrack}
+                    nextNextTrack={nextNextTrack}
+                    isPlaying={isPlaying}
+                    onTogglePlay={handleTogglePlay}
+                    progress={trackProgress}
+                    onNext={() => {}}
+                    onPrevious={() => {}}
+                    logoSrc={logoSrc}
+                    onLogoChange={() => {}}
+                    onLogoReset={() => {}}
+                    headerGradient={headerGradient}
+                    headerTextColor={headerTextColor}
+                    onOpenHelp={() => setIsHelpModalOpen(true)}
+                    isAutoModeEnabled={isAutoModeEnabled}
+                    onToggleAutoMode={setIsAutoModeEnabled}
+                    onArtworkClick={(url) => { setEnlargedArtworkUrl(url); setIsArtworkModalOpen(true); }}
+                    onArtworkLoaded={(url) => {}}
+                    headerHeight={headerHeight}
+                    onPlayTrack={handlePlayTrack}
+                    onEject={onEject}
+                    mainPlayerAnalyser={null}
+                    isPresenter={false}
+                    isHostMode={false}
+                    connectionStatus="connected"
+                    playoutMode="master"
+                />
+            </div>
+            <VerticalResizer onMouseDown={() => {}} onDoubleClick={() => {}}/>
+            <div className="flex flex-grow overflow-hidden">
+                <div style={{ width: `${leftPanelWidth}%` }}>
+                    <MediaLibrary
+                        rootFolder={rootFolder}
+                        onAddToPlaylist={handleAddToPlaylist}
+                        onAddTracksToLibrary={(tracks, destId) => setRootFolder(r => addMultipleItemsToTree(r, destId, tracks))}
+                        onAddUrlTrackToLibrary={(track, destId) => setRootFolder(r => addItemToTree(r, destId, track))}
+                        onRemoveFromLibrary={(id) => setRootFolder(r => removeItemFromTree(r, id))}
+                        onRemoveMultipleFromLibrary={(ids) => setRootFolder(r => removeItemsFromTree(r, new Set(ids)))}
+                        onCreateFolder={(parentId, name) => {
+                            const newFolder: Folder = { id: `f-${Date.now()}`, name, type: 'folder', children: [] };
+                            setRootFolder(r => addItemToTree(r, parentId, newFolder));
+                        }}
+                        onMoveItem={(itemId, destId) => setRootFolder(r => moveItemInTree(r, itemId, destId))}
+                        onOpenMetadataSettings={(folder) => { setFolderForMetadata(folder); setIsMetadataModalOpen(true); }}
+                        onOpenTrackMetadataEditor={(track) => setTrackForMetadata(track)}
+                        onUpdateTrackTags={(trackId, tags) => setRootFolder(r => updateTrackInTree(r, trackId, t => ({ ...t, tags })))}
+                        onUpdateFolderTags={(folderId, tags) => {
+                            const newRoot = updateFolderInTree(rootFolder, folderId, f => ({ ...f, tags }));
+                            setRootFolder(applyTagsToFolderContents(newRoot, tags));
+                        }}
+                        onPflTrack={setPflTrackId}
+                        pflTrackId={pflTrackId}
+                        onLibraryUpdate={setRootFolder}
+                    />
+                </div>
+                <Resizer onMouseDown={() => {}} />
+                <div className="flex-grow">
+                    <Playlist
+                        items={playlist}
+                        currentPlayingItemId={currentPlayingItemId}
+                        onRemove={(id) => setPlaylist(p => p.filter(i => i.id !== id))}
+                        onReorder={() => {}}
+                        onPlayTrack={handlePlayTrack}
+                        onInsertTrack={(track, beforeId) => {}}
+                        onInsertTimeMarker={() => {}}
+                        onUpdateTimeMarker={() => {}}
+                        onInsertVoiceTrack={async () => {}}
+                        isPlaying={isPlaying}
+                        stopAfterTrackId={stopAfterTrackId}
+                        onSetStopAfterTrackId={setStopAfterTrackId}
+                        trackProgress={trackProgress}
+                        onClearPlaylist={() => setPlaylist([])}
+                        onPflTrack={setPflTrackId}
+                        pflTrackId={pflTrackId}
+                        isPflPlaying={isPflPlaying}
+                        pflProgress={pflProgress}
+                        mediaLibrary={rootFolder}
+                        timeline={timeline}
+                        policy={policy}
+                        isPresenter={false}
+                    />
+                </div>
+                <Resizer onMouseDown={() => {}} />
+                <div style={{ width: `${rightPanelWidth}%` }} className="flex flex-col">
+                    <div className="flex-shrink-0 border-b border-neutral-200 dark:border-neutral-800">
+                        {/* Tab buttons here */}
+                        <button onClick={() => setActiveTab('cartwall')}>Cartwall</button>
+                        <button onClick={() => setActiveTab('ai')}>AI</button>
+                        <button onClick={() => setActiveTab('stream')}>Stream</button>
+                        <button onClick={() => setActiveTab('mixer')}>Mixer</button>
+                        <button onClick={() => setActiveTab('scheduler')}>Scheduler</button>
+                        <button onClick={() => setActiveTab('settings')}>Settings</button>
+                    </div>
+                    <div className="flex-grow overflow-y-auto">
+                        {activeTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={policy.cartwallGrid} onGridConfigChange={() => {}} audioContext={null} destinationNode={null} onActivePlayerCountChange={() => {}} />}
+                        {activeTab === 'ai' && <div className="flex flex-col h-full"><AiPlaylist mediaLibrary={rootFolder} allTags={[]} onAddToPlaylist={() => {}} /><hr/><AiAssistant currentTrack={currentTrack} /></div>}
+                        {activeTab === 'stream' && <PublicStream ws={null} mainBusStream={null} isAudioEngineReady={false} isAudioEngineInitializing={false} currentTrack={currentTrack} isPlaying={isPlaying} artworkUrl={null}/>}
+                        {activeTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={[]} policy={policy} onUpdatePolicy={setPolicy} audioLevels={{}}/>}
+                        {activeTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={(b) => {setEditingBroadcast(b); setIsBroadcastEditorOpen(true);}} onDelete={(id) => setBroadcasts(bs => bs.filter(b => b.id !== id))} onManualLoad={() => {}}/>}
+                        {activeTab === 'settings' && <Settings policy={policy} onUpdatePolicy={setPolicy} currentUser={currentUser} onImportData={() => {}} onExportData={() => {}} isNowPlayingExportEnabled={false} onSetIsNowPlayingExportEnabled={() => {}} onSetNowPlayingFile={async () => {}} nowPlayingFileName={null} metadataFormat={"%artist% - %title%"} onSetMetadataFormat={() => {}} isAutoBackupEnabled={false} onSetIsAutoBackupEnabled={() => {}} isAutoBackupOnStartupEnabled={false} onSetIsAutoBackupOnStartupEnabled={()=>{}} autoBackupInterval={1} onSetAutoBackupInterval={()=>{}} onSetAutoBackupFolder={async()=>{}} autoBackupFolderPath={null} allFolders={[]} allTags={[]} />}
+                    </div>
+                    <div className="flex-shrink-0 border-t border-neutral-200 dark:border-neutral-800" style={{ height: `${bottomPanelHeight}%` }}>
+                        <RemoteStudio mixerConfig={mixerConfig} onMixerChange={setMixerConfig} onStreamAvailable={() => {}} ws={null} currentUser={currentUser} isMaster={true} incomingSignal={null} />
+                    </div>
+                </div>
+            </div>
+             {/* Modals */}
+            <MetadataSettingsModal folder={folderForMetadata} onClose={() => setFolderForMetadata(null)} onSave={() => {}} />
+            <TrackMetadataModal track={trackForMetadata} onClose={() => setTrackForMetadata(null)} onSave={() => {}} />
+            <HelpModal isOpen={isHelpModalOpen} onClose={() => setIsHelpModalOpen(false)} />
+            <PwaInstallModal isOpen={isPwaModalOpen} onClose={() => setIsPwaModalOpen(false)} />
+            <WhatsNewPopup isOpen={isWhatsNewOpen} onClose={() => setIsWhatsNewOpen(false)} />
+            <ArtworkModal isOpen={isArtworkModalOpen} artworkUrl={enlargedArtworkUrl} onClose={() => setIsArtworkModalOpen(false)} />
+            <BroadcastEditor 
+                isOpen={isBroadcastEditorOpen}
+                onClose={() => setIsBroadcastEditorOpen(false)}
+                onSave={(b) => {
+                    setBroadcasts(bs => {
+                        const index = bs.findIndex(br => br.id === b.id);
+                        if (index > -1) {
+                            const newBs = [...bs];
+                            newBs[index] = b;
+                            return newBs;
+                        }
+                        return [...bs, b];
+                    });
+                    setIsBroadcastEditorOpen(false);
+                }}
+                existingBroadcast={editingBroadcast}
+                mediaLibrary={rootFolder}
+                onVoiceTrackCreate={async (vt) => vt}
+                policy={policy}
+            />
+        </div>
+    );
+};
+
+export default App;
