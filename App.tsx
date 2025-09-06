@@ -1284,8 +1284,10 @@ const AppInternal: React.FC = () => {
         const loadAndPlay = async () => {
              if (isPlaying) stopPfl();
             if (!currentTrack) {
-                if (isPlaying) setIsPlaying(false);
-                 setCurrentPlayingItemId(null);
+                if (isPlaying && playoutPolicyRef.current.playoutMode === 'master') {
+                    setIsPlaying(false);
+                }
+                setCurrentPlayingItemId(null);
                 return;
             }
 
@@ -1328,7 +1330,9 @@ const AppInternal: React.FC = () => {
 
                 } catch (e) {
                     console.error("Playback failed:", e);
-                    setIsPlaying(false);
+                    if (playoutPolicyRef.current.playoutMode === 'master') {
+                        setIsPlaying(false);
+                    }
                     setCurrentPlayingItemId(null);
                 }
             } else if (!isPlaying && !currentPlayer.paused) {
@@ -1339,6 +1343,22 @@ const AppInternal: React.FC = () => {
         loadAndPlay();
         
     }, [currentTrack, isPlaying, activePlayer, handleNext, getTrackSrc, stopPfl]);
+
+    // This effect ensures a contributor's player time is always in sync with the master's state
+    useEffect(() => {
+        if (playoutPolicy.playoutMode === 'contributor' && isPlaying) {
+            const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
+            const player = activePlayerRef.current;
+            if (player && player.src) {
+                // If desynced by more than 0.5s, force a sync.
+                // This threshold prevents stuttering from minor network latency
+                // while correcting larger drifts.
+                if (Math.abs(player.currentTime - trackProgress) > 0.5) {
+                    player.currentTime = trackProgress;
+                }
+            }
+        }
+    }, [trackProgress, isPlaying, activePlayer, playoutPolicy.playoutMode]);
 
     const timeline = useMemo(() => {
         const timelineMap = new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>();
@@ -1446,13 +1466,10 @@ const AppInternal: React.FC = () => {
             const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
             if (player !== activePlayerRef.current) return;
 
-            // ONLY the master should update its progress state from the local audio element.
-            // The contributor's progress is updated via WebSocket messages.
             if (playoutPolicyRef.current.playoutMode === 'master') {
                 setTrackProgress(player.currentTime);
             }
 
-            // Contributor does not control playback logic
             if (playoutPolicyRef.current.playoutMode === 'contributor') return;
 
             if (isCrossfadingRef.current || player.duration <= 0) return;
@@ -1490,7 +1507,6 @@ const AppInternal: React.FC = () => {
 
         const handleEnded = (e: Event) => {
             const player = e.target as HTMLAudioElement;
-            // Contributor does not control playback logic
             if (playoutPolicyRef.current.playoutMode === 'contributor') return;
 
             if (!isNaN(player.duration) && player.duration > 2 && player.currentTime < player.duration - 2) {
@@ -1986,7 +2002,9 @@ const AppInternal: React.FC = () => {
         setPlaylist(newPlaylist);
         if (currentPlayingItemId) {
             if (currentPlayingItemId === itemIdToRemove) {
-                setIsPlaying(false);
+                if (playoutPolicyRef.current.playoutMode === 'master') {
+                    setIsPlaying(false);
+                }
                 setCurrentPlayingItemId(null);
                 const firstPlayable = findNextPlayableIndex(-1, 1);
                 setCurrentTrackIndex(firstPlayable > -1 ? firstPlayable : 0);
@@ -2026,7 +2044,9 @@ const AppInternal: React.FC = () => {
             setPlaylist([]);
             setCurrentTrackIndex(0);
             setCurrentPlayingItemId(null);
-            setIsPlaying(false);
+            if (playoutPolicyRef.current.playoutMode === 'master') {
+                setIsPlaying(false);
+            }
             setTrackProgress(0);
             setStopAfterTrackId(null);
         }
