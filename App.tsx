@@ -1332,8 +1332,9 @@ const AppInternal: React.FC = () => {
                     console.error("Playback failed:", e);
                     if (playoutPolicyRef.current.playoutMode === 'master') {
                         setIsPlaying(false);
+                        setCurrentPlayingItemId(null);
                     }
-                    setCurrentPlayingItemId(null);
+                    // A contributor does nothing on play failure; it waits for the next state update from master.
                 }
             } else if (!isPlaying && !currentPlayer.paused) {
                 currentPlayer.pause();
