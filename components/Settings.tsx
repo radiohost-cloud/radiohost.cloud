@@ -122,13 +122,13 @@ const Settings: React.FC<SettingsProps> = ({
                                 className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-black dark:text-white"
                             >
                                 <option value="master">Master Playout</option>
-                                <option value="contributor">Contributor</option>
+                                <option value="presenter">Presenter</option>
                             </select>
                             <div className="mt-2 text-xs text-neutral-600 dark:text-neutral-400 p-2 bg-neutral-200 dark:bg-neutral-800 rounded-md">
                                 {policy.playoutMode === 'master' ? (
-                                    <span><b>Master Playout:</b> You have full control of the playlist and player. Your actions are broadcast to all contributors.</span>
+                                    <span><b>Master Playout:</b> You have full control of the playlist and player. Your actions are broadcast to all presenters.</span>
                                 ) : (
-                                    <span><b>Contributor:</b> You see a real-time view of the master playlist. You can only contribute your microphone audio.</span>
+                                    <span><b>Presenter:</b> You see a real-time view of the master playlist. You can only contribute your microphone audio.</span>
                                 )}
                             </div>
                         </div>

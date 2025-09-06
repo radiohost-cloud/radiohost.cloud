@@ -44,7 +44,7 @@ interface HeaderProps {
     onPlayTrack: (trackId: string) => void;
     onEject: (trackId: string) => void;
     mainPlayerAnalyser: AnalyserNode | null;
-    isContributor: boolean;
+    isPresenter: boolean;
     isHostMode: boolean;
     connectionStatus: 'disconnected' | 'connecting' | 'connected';
     playoutMode?: PlayoutPolicy['playoutMode'];
@@ -100,8 +100,8 @@ const Deck: React.FC<{
     onPlayTrack: (trackId: string) => void;
     onEject: (trackId: string) => void;
     analyserNode?: AnalyserNode | null;
-    isContributor?: boolean;
-}> = ({ track, artworkUrl, label, isCurrent, progress, onArtworkClick, onTogglePlay, onNext, onPrevious, isPlaying, onPlayTrack, onEject, analyserNode, isContributor }) => {
+    isPresenter?: boolean;
+}> = ({ track, artworkUrl, label, isCurrent, progress, onArtworkClick, onTogglePlay, onNext, onPrevious, isPlaying, onPlayTrack, onEject, analyserNode, isPresenter }) => {
     
     const progressPercentage = (track?.duration && progress) ? (progress / track.duration) * 100 : 0;
     const isThisTrackPlaying = !!(isCurrent && isPlaying);
@@ -114,7 +114,7 @@ const Deck: React.FC<{
 
     const handlePlayPauseClick = (e: React.MouseEvent) => {
         e.stopPropagation();
-        if (isContributor) return;
+        if (isPresenter) return;
         if (isCurrent) {
             onTogglePlay?.();
         } else if (track) {
@@ -146,16 +146,16 @@ const Deck: React.FC<{
                         <button 
                             onClick={handlePlayPauseClick}
                             className="p-2 bg-black/40 backdrop-blur-sm rounded-full hover:bg-black/60 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                            title={isContributor ? "Controls disabled" : (isThisTrackPlaying ? "Pause" : "Play")}
-                            disabled={isContributor}
+                            title={isPresenter ? "Controls disabled" : (isThisTrackPlaying ? "Pause" : "Play")}
+                            disabled={isPresenter}
                         >
                             {isThisTrackPlaying ? <PauseIcon className="w-4 h-4" /> : <PlayIcon className="w-4 h-4" />}
                         </button>
                         <button 
                             onClick={(e) => { e.stopPropagation(); track && onEject(track.id); }}
                             className="p-2 bg-black/40 backdrop-blur-sm rounded-full hover:bg-black/60 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                            title={isContributor ? "Controls disabled" : "Eject from playlist"}
-                            disabled={isContributor}
+                            title={isPresenter ? "Controls disabled" : "Eject from playlist"}
+                            disabled={isPresenter}
                         >
                             <EjectIcon className="w-4 h-4" />
                         </button>
@@ -174,13 +174,13 @@ const Deck: React.FC<{
             {isCurrent && track && (
                 <div className="relative p-4 z-10 space-y-3">
                     <div className="flex items-center justify-center gap-4">
-                        <button onClick={onPrevious} className="p-3 bg-white/10 backdrop-blur-sm rounded-full hover:bg-white/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled={isContributor}>
+                        <button onClick={onPrevious} className="p-3 bg-white/10 backdrop-blur-sm rounded-full hover:bg-white/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled={isPresenter}>
                             <BackwardIcon className="w-6 h-6" />
                         </button>
-                        <button onClick={onTogglePlay} className="p-4 bg-white/20 backdrop-blur-sm rounded-full hover:bg-white/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled={isContributor}>
+                        <button onClick={onTogglePlay} className="p-4 bg-white/20 backdrop-blur-sm rounded-full hover:bg-white/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled={isPresenter}>
                             {isPlaying ? <PauseIcon className="w-8 h-8" /> : <PlayIcon className="w-8 h-8" />}
                         </button>
-                        <button onClick={onNext} className="p-3 bg-white/10 backdrop-blur-sm rounded-full hover:bg-white/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled={isContributor}>
+                        <button onClick={onNext} className="p-3 bg-white/10 backdrop-blur-sm rounded-full hover:bg-white/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled={isPresenter}>
                             <ForwardIcon className="w-6 h-6" />
                         </button>
                     </div>
@@ -197,7 +197,7 @@ const Deck: React.FC<{
 const Header: React.FC<HeaderProps> = ({ 
     currentUser, onLogout, currentTrack, nextTrack, nextNextTrack, onNext, onPrevious, isPlaying, onTogglePlay, isPresenterLive = false, progress,
     logoSrc, onLogoChange, onLogoReset, headerGradient, headerTextColor, onOpenHelp, isAutoModeEnabled, onToggleAutoMode, onArtworkClick, onArtworkLoaded, headerHeight,
-    onPlayTrack, onEject, mainPlayerAnalyser, isContributor, isHostMode, connectionStatus, playoutMode
+    onPlayTrack, onEject, mainPlayerAnalyser, isPresenter, isHostMode, connectionStatus, playoutMode
 }) => {
     
     const [isLogoConfirmOpen, setIsLogoConfirmOpen] = useState(false);
@@ -359,7 +359,7 @@ const Header: React.FC<HeaderProps> = ({
                         onPlayTrack={onPlayTrack}
                         onEject={onEject}
                         analyserNode={mainPlayerAnalyser}
-                        isContributor={isContributor}
+                        isPresenter={isPresenter}
                     />
                     <Deck 
                         track={nextTrack} 
@@ -368,7 +368,7 @@ const Header: React.FC<HeaderProps> = ({
                         onArtworkClick={handleArtworkClick} 
                         onPlayTrack={onPlayTrack}
                         onEject={onEject}
-                        isContributor={isContributor}
+                        isPresenter={isPresenter}
                     />
                     <Deck 
                         track={nextNextTrack} 
@@ -377,7 +377,7 @@ const Header: React.FC<HeaderProps> = ({
                         onArtworkClick={handleArtworkClick}
                         onPlayTrack={onPlayTrack}
                         onEject={onEject} 
-                        isContributor={isContributor}
+                        isPresenter={isPresenter}
                     />
                 </div>
 
@@ -403,13 +403,13 @@ const Header: React.FC<HeaderProps> = ({
                             <Toggle id="auto-mode-toggle-compact" checked={isAutoModeEnabled} onChange={onToggleAutoMode} />
                         </div>
                         <div className="flex items-center gap-2 sm:gap-4">
-                             <button onClick={onPrevious} className={`p-2 backdrop-blur-sm rounded-full transition-colors [text-shadow:none] ${textColorClass} ${buttonBgClass} ${disabledButtonClasses}`} disabled={!currentTrack || isPresenterLive || isContributor} title={isContributor ? "Controls disabled" : (isPresenterLive ? 'Cannot skip during live broadcast' : 'Previous Track')}>
+                             <button onClick={onPrevious} className={`p-2 backdrop-blur-sm rounded-full transition-colors [text-shadow:none] ${textColorClass} ${buttonBgClass} ${disabledButtonClasses}`} disabled={!currentTrack || isPresenterLive || isPresenter} title={isPresenter ? "Controls disabled" : (isPresenterLive ? 'Cannot skip during live broadcast' : 'Previous Track')}>
                                 <BackwardIcon className="w-6 h-6" />
                             </button>
-                             <button onClick={onTogglePlay} className={`p-3 backdrop-blur-sm rounded-full transition-colors [text-shadow:none] ${textColorClass} ${buttonBgClass} ${disabledButtonClasses}`} disabled={!currentTrack || isPresenterLive || isContributor} title={isContributor ? "Controls disabled" : (isPresenterLive ? 'Playback paused during live broadcast' : (isPlaying ? 'Pause' : 'Play'))}>
+                             <button onClick={onTogglePlay} className={`p-3 backdrop-blur-sm rounded-full transition-colors [text-shadow:none] ${textColorClass} ${buttonBgClass} ${disabledButtonClasses}`} disabled={!currentTrack || isPresenterLive || isPresenter} title={isPresenter ? "Controls disabled" : (isPresenterLive ? 'Playback paused during live broadcast' : (isPlaying ? 'Pause' : 'Play'))}>
                                 {isPlaying ? <PauseIcon className="w-8 h-8" /> : <PlayIcon className="w-8 h-8" />}
                             </button>
-                            <button onClick={handleNext} className={`p-2 backdrop-blur-sm rounded-full transition-colors [text-shadow:none] ${textColorClass} ${buttonBgClass} ${disabledButtonClasses}`} disabled={!currentTrack || isPresenterLive || isContributor} title={isContributor ? "Controls disabled" : (isPresenterLive ? 'Cannot skip during live broadcast' : 'Next Track')}>
+                            <button onClick={handleNext} className={`p-2 backdrop-blur-sm rounded-full transition-colors [text-shadow:none] ${textColorClass} ${buttonBgClass} ${disabledButtonClasses}`} disabled={!currentTrack || isPresenterLive || isPresenter} title={isPresenter ? "Controls disabled" : (isPresenterLive ? 'Cannot skip during live broadcast' : 'Next Track')}>
                                 <ForwardIcon className="w-6 h-6" />
                             </button>
                         </div>

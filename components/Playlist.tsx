@@ -38,7 +38,7 @@ interface PlaylistProps {
     mediaLibrary: Folder;
     timeline: Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>;
     policy: PlayoutPolicy;
-    isContributor: boolean; // New prop
+    isPresenter: boolean; // New prop
 }
 
 const formatDuration = (seconds: number): string => {
@@ -82,7 +82,7 @@ const isDuplicateCheckSuppressed = (trackId: string, library: Folder): boolean =
 
 // --- Memoized List Item Components for Performance ---
 
-const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWarning, isSkipped, trackProgress, stopAfterTrackId, timelineData, onPlayTrack, onSetStopAfterTrackId, onRemove, onDragStart, onDragEnd, onDragOver, onDragEnter, onDrop, draggedId, onPflTrack, pflTrackId, isPflPlaying, pflProgress, isContributor }: {
+const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWarning, isSkipped, trackProgress, stopAfterTrackId, timelineData, onPlayTrack, onSetStopAfterTrackId, onRemove, onDragStart, onDragEnd, onDragOver, onDragEnter, onDrop, draggedId, onPflTrack, pflTrackId, isPflPlaying, pflProgress, isPresenter }: {
     track: Track;
     isCurrentlyPlaying: boolean;
     isDuplicateWarning: boolean;
@@ -103,7 +103,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
     pflTrackId: string | null;
     isPflPlaying: boolean;
     pflProgress: number;
-    isContributor: boolean;
+    isPresenter: boolean;
 }) => {
     const trackDuration = timelineData ? timelineData.duration : track.duration;
     const progressPercentage = isCurrentlyPlaying && trackDuration > 0
@@ -158,7 +158,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
 
     return (
         <li
-            draggable={!isContributor}
+            draggable={!isPresenter}
             onDragStart={onDragStart}
             onDragEnd={onDragEnd}
             onDragOver={onDragOver}
@@ -184,7 +184,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
                 style={{ width: `${progressPercentage}%` }}
             />
              <div className="flex-shrink-0 flex items-center gap-4">
-                <div className={`${tertiaryTextColorClass} ${isSkipped || isContributor ? 'cursor-not-allowed' : 'cursor-grab'}`} title={isContributor ? "" : "Drag to reorder"}>
+                <div className={`${tertiaryTextColorClass} ${isSkipped || isPresenter ? 'cursor-not-allowed' : 'cursor-grab'}`} title={isPresenter ? "" : "Drag to reorder"}>
                     <GrabHandleIcon className="w-5 h-5" />
                 </div>
                 <div className={`w-16 font-mono text-sm ${secondaryTextColorClass} pt-0.5 text-right pr-2`}>{formatTime(timelineData?.startTime)}</div>
@@ -193,7 +193,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
             <div className="flex-grow flex items-center gap-4 overflow-hidden">
                 <div className="w-6 text-center">
                     {isCurrentlyPlaying ? (
-                         <div onClick={onPlayTrack} className={isContributor ? 'cursor-default' : 'cursor-pointer'}>
+                         <div onClick={onPlayTrack} className={isPresenter ? 'cursor-default' : 'cursor-pointer'}>
                             <NowPlayingIcon className={`w-4 h-4 mx-auto ${textColorClass}`} />
                          </div>
                     ) : (
@@ -202,7 +202,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
                                 onClick={onPlayTrack}
                                 className="absolute inset-0 flex items-center justify-center text-black dark:text-white"
                                 aria-label={`Play ${track.title}`}
-                                disabled={isSkipped || isContributor}
+                                disabled={isSkipped || isPresenter}
                             >
                                 <PlayIcon className="w-5 h-5" />
                             </button>
@@ -234,7 +234,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
                     onClick={onSetStopAfterTrackId}
                     className={`p-1 transition-colors ${getStopButtonClasses()}`}
                     title="Stop after this track and enable mic"
-                    disabled={isSkipped || isContributor}
+                    disabled={isSkipped || isPresenter}
                 >
                     <StopAfterTrackIcon className="w-5 h-5" />
                 </button>
@@ -242,7 +242,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
                     onClick={onRemove}
                     className={`p-1 transition-colors ${getTrashButtonClasses()}`}
                     title="Remove from playlist"
-                    disabled={isContributor}
+                    disabled={isPresenter}
                 >
                     <TrashIcon className="w-5 h-5" />
                 </button>
@@ -251,7 +251,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
     );
 });
 
-const PlaylistItemMarker = React.memo(({ marker, onRemove, onEdit, onDragStart, onDragEnd, onDragOver, onDragEnter, onDrop, draggedId, isContributor }: {
+const PlaylistItemMarker = React.memo(({ marker, onRemove, onEdit, onDragStart, onDragEnd, onDragOver, onDragEnter, onDrop, draggedId, isPresenter }: {
     marker: TimeMarker;
     onRemove: () => void;
     onEdit: () => void;
@@ -261,14 +261,14 @@ const PlaylistItemMarker = React.memo(({ marker, onRemove, onEdit, onDragStart, 
     onDragEnter: (e: React.DragEvent<HTMLLIElement>) => void;
     onDrop: (e: React.DragEvent<HTMLLIElement>) => void;
     draggedId: string | null;
-    isContributor: boolean;
+    isPresenter: boolean;
 }) => {
     const isHard = marker.markerType === TimeMarkerType.HARD;
     const markerTime = new Date(marker.time);
 
     return (
         <li
-            draggable={!isContributor}
+            draggable={!isPresenter}
             onDragStart={onDragStart}
             onDragEnd={onDragEnd}
             onDragOver={onDragOver}
@@ -281,7 +281,7 @@ const PlaylistItemMarker = React.memo(({ marker, onRemove, onEdit, onDragStart, 
             `}
         >
             <div className="flex items-center gap-4">
-                <div className={`text-neutral-400 dark:text-neutral-500 ${isContributor ? 'cursor-not-allowed' : 'cursor-grab'}`} title={isContributor ? "" : "Drag to reorder"}>
+                <div className={`text-neutral-400 dark:text-neutral-500 ${isPresenter ? 'cursor-not-allowed' : 'cursor-grab'}`} title={isPresenter ? "" : "Drag to reorder"}>
                     <GrabHandleIcon className="w-5 h-5" />
                 </div>
                 <div className="flex items-center gap-3">
@@ -295,7 +295,7 @@ const PlaylistItemMarker = React.memo(({ marker, onRemove, onEdit, onDragStart, 
                  <span className={`px-2 py-0.5 text-xs font-bold rounded-full ${isHard ? 'bg-red-200 text-red-800 dark:bg-red-900/50 dark:text-red-300' : 'bg-blue-200 text-blue-800 dark:bg-blue-900/50 dark:text-blue-300'}`}>
                     {isHard ? 'HARD' : 'SOFT'}
                 </span>
-                <div className={`transition-opacity flex items-center ${isContributor ? 'opacity-0' : 'opacity-0 group-hover:opacity-100'}`}>
+                <div className={`transition-opacity flex items-center ${isPresenter ? 'opacity-0' : 'opacity-0 group-hover:opacity-100'}`}>
                     <button onClick={onEdit} className="p-1 text-neutral-500 hover:text-black dark:hover:text-white" title="Edit Marker">
                         <EditIcon className="w-5 h-5"/>
                     </button>
@@ -309,7 +309,7 @@ const PlaylistItemMarker = React.memo(({ marker, onRemove, onEdit, onDragStart, 
 });
 
 
-const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemove, onReorder, onPlayTrack, onInsertTrack, onInsertTimeMarker, onUpdateTimeMarker, onInsertVoiceTrack, isPlaying, stopAfterTrackId, onSetStopAfterTrackId, trackProgress, onClearPlaylist, onPflTrack, pflTrackId, isPflPlaying, pflProgress, mediaLibrary, timeline, policy, isContributor }) => {
+const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemove, onReorder, onPlayTrack, onInsertTrack, onInsertTimeMarker, onUpdateTimeMarker, onInsertVoiceTrack, isPlaying, stopAfterTrackId, onSetStopAfterTrackId, trackProgress, onClearPlaylist, onPflTrack, pflTrackId, isPflPlaying, pflProgress, mediaLibrary, timeline, policy, isPresenter }) => {
     const totalDuration = useMemo(() => items.reduce((sum, item) => {
         if ('markerType' in item) return sum;
         const timelineData = timeline.get(item.id);
@@ -380,7 +380,7 @@ const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemo
     };
 
     const handleDragStart = (e: React.DragEvent, itemId: string) => {
-        if (isContributor) return;
+        if (isPresenter) return;
         e.dataTransfer.setData('dragged-item-id', itemId);
         e.dataTransfer.effectAllowed = 'move';
         setTimeout(() => setDraggedId(itemId), 0);
@@ -393,7 +393,7 @@ const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemo
 
     const handleDragOver = (e: React.DragEvent<HTMLElement>) => {
         e.preventDefault();
-        if (isContributor) {
+        if (isPresenter) {
             e.dataTransfer.dropEffect = 'none';
             return;
         }
@@ -413,7 +413,7 @@ const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemo
     const handleDrop = (e: React.DragEvent, dropTargetId: string | null) => {
         e.preventDefault();
         e.stopPropagation();
-        if (isContributor) return;
+        if (isPresenter) return;
         
         const draggedItemId = e.dataTransfer.getData('dragged-item-id');
         const trackJson = e.dataTransfer.getData('application/json');
@@ -484,7 +484,7 @@ const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemo
                         <div className="h-4 border-l border-neutral-300 dark:border-neutral-700"></div>
                         <button
                             onClick={() => setIsClearConfirmOpen(true)}
-                            disabled={items.length === 0 || isContributor}
+                            disabled={items.length === 0 || isPresenter}
                             className="p-1.5 text-neutral-500 dark:text-neutral-400 hover:text-black dark:hover:text-white disabled:text-neutral-300 dark:disabled:text-neutral-600 disabled:cursor-not-allowed transition-colors"
                             title="Clear Playlist"
                         >
@@ -492,7 +492,7 @@ const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemo
                         </button>
                     </div>
                  </div>
-                 {!isContributor && <div className="flex items-center justify-end gap-4 text-sm">
+                 {!isPresenter && <div className="flex items-center justify-end gap-4 text-sm">
                     <div className="flex items-center gap-2">
                          <label htmlFor="vt-mode-toggle" className="font-medium text-neutral-600 dark:text-neutral-400 cursor-pointer">
                             Add VT Mode
@@ -511,8 +511,8 @@ const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemo
                 <ul className="p-2 space-y-1">
                      {items.map((item, index) => {
                         const prevItem = index > 0 ? items[index-1] : null;
-                        const showAddMarkerButton = isMarkerModeActive && !isContributor && index > 0 && (!prevItem || (!('markerType' in prevItem) && prevItem.type !== TrackType.VOICETRACK)) && !('markerType' in item) && item.type !== TrackType.VOICETRACK;
-                        const showAddVtButton = isVtModeActive && !isContributor && !('markerType' in item) && item.type !== TrackType.VOICETRACK && index > 0 && prevItem && !('markerType' in prevItem) && prevItem.type !== TrackType.VOICETRACK;
+                        const showAddMarkerButton = isMarkerModeActive && !isPresenter && index > 0 && (!prevItem || (!('markerType' in prevItem) && prevItem.type !== TrackType.VOICETRACK)) && !('markerType' in item) && item.type !== TrackType.VOICETRACK;
+                        const showAddVtButton = isVtModeActive && !isPresenter && !('markerType' in item) && item.type !== TrackType.VOICETRACK && index > 0 && prevItem && !('markerType' in prevItem) && prevItem.type !== TrackType.VOICETRACK;
 
                         return (
                            <React.Fragment key={item.id}>
@@ -553,7 +553,7 @@ const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemo
                                         onDragEnter={() => {}}
                                         onDrop={(e) => handleDrop(e, item.id)}
                                         draggedId={draggedId}
-                                        isContributor={isContributor}
+                                        isPresenter={isPresenter}
                                     />
                                ) : (
                                     <PlaylistItemTrack
@@ -577,13 +577,13 @@ const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemo
                                         pflTrackId={pflTrackId}
                                         isPflPlaying={isPflPlaying}
                                         pflProgress={pflProgress}
-                                        isContributor={isContributor}
+                                        isPresenter={isPresenter}
                                    />
                                )}
                            </React.Fragment>
                         );
                      })}
-                     {(isMarkerModeActive || isVtModeActive) && !isContributor && (items.length === 0 || !('markerType' in items[items.length - 1])) && (
+                     {(isMarkerModeActive || isVtModeActive) && !isPresenter && (items.length === 0 || !('markerType' in items[items.length - 1])) && (
                         <li className="flex justify-center items-center h-4 my-1 group">
                             <div className="w-full h-px bg-neutral-200 dark:bg-neutral-800 relative">
                                 <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-2">
@@ -611,7 +611,7 @@ const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemo
                     )}
                      {items.length === 0 && (
                         <li className="text-center text-neutral-400 dark:text-neutral-500 p-8">
-                            {isContributor ? 'Waiting for master to build playlist...' : 'Playlist is empty. Add or drag tracks here from the library.'}
+                            {isPresenter ? 'Waiting for master to build playlist...' : 'Playlist is empty. Add or drag tracks here from the library.'}
                         </li>
                     )}
                 </ul>

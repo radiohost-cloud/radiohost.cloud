@@ -92,7 +92,7 @@ export interface StreamingConfig {
 }
 
 export interface PlayoutPolicy {
-  playoutMode?: 'master' | 'contributor'; // New: Role for real-time collaboration
+  playoutMode?: 'master' | 'presenter'; // New: Role for real-time collaboration
   artistSeparation: number; // in minutes
   titleSeparation: number; // in minutes
   removePlayedTracks: boolean;

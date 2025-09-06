@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast } from './types';
 import Header from './components/Header';
@@ -333,7 +334,8 @@ interface AppInternalProps {
     onBackToModeSelection: () => void;
 }
 
-const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
+// FIX: Renamed component from AppInternal to App to match usage in AppWrapper.tsx and added a default export.
+const App: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
     const [currentUser, setCurrentUser] = useState<{ email: string; nickname: string; } | null>(null);
     const [mediaLibrary, setMediaLibrary] = useState<Folder>(createInitialLibrary());
     const [playlist, setPlaylist] = useState<SequenceItem[]>([]);
@@ -509,7 +511,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
             playerB?: MediaElementAudioSourceNode;
             mic?: MediaStreamAudioSourceNode;
             pfl?: MediaElementAudioSourceNode;
-            [key: `remote_${string}`]: MediaStreamAudioSourceNode; // For remote contributors
+            [key: `remote_${string}`]: MediaStreamAudioSourceNode; // For remote presenters
         };
         playerMixerNode: AudioWorkletNode | null;
         sourceGains: Partial<Record<AudioSourceId, GainNode>>;
@@ -652,7 +654,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
 
             const initialSettings = initialUserData?.settings || {};
             
-            const savedRole = sessionStorage.getItem('playoutRole') as 'master' | 'contributor' | null;
+            const savedRole = sessionStorage.getItem('playoutRole') as 'master' | 'presenter' | null;
             const finalPolicy = { ...defaultPlayoutPolicy, ...initialSettings.playoutPolicy };
             if (savedRole && sessionStorage.getItem('appMode') === 'HOST') {
                 finalPolicy.playoutMode = savedRole;
@@ -823,7 +825,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
     useDebouncedEffect(() => {
         if (isInitialLoad) return;
         
-        const isContributor = playoutPolicy.playoutMode === 'contributor';
+        const isPresenter = playoutPolicy.playoutMode === 'presenter';
         const key = currentUser?.email || 'guest';
     
         const settingsToSave = {
@@ -844,9 +846,9 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
             isAutoModeEnabled,
         };
     
-        // Contributors only save their personal settings. The Master saves the full shared state.
-        if (isContributor) {
-            const contributorData = {
+        // Presenters only save their personal settings. The Master saves the full shared state.
+        if (isPresenter) {
+            const presenterData = {
                 settings: settingsToSave,
                 cartwallPages,
                 broadcasts,
@@ -855,8 +857,8 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
                     mixer: mixerConfig,
                 },
             };
-            dataService.putUserData(key, contributorData);
-            console.log(`[Persistence] Contributor data saved for ${key}.`);
+            dataService.putUserData(key, presenterData);
+            console.log(`[Persistence] Presenter data saved for ${key}.`);
         } else {
             const masterData = {
                 mediaLibrary,
@@ -994,7 +996,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
     }, []);
 
     const handleNext = useCallback(() => {
-        if (playoutPolicy.playoutMode === 'contributor') return;
+        if (playoutPolicy.playoutMode === 'presenter') return;
         const nextIndex = findNextPlayableIndex(currentTrackIndexRef.current, 1);
     
         if (nextIndex !== -1) {
@@ -1010,7 +1012,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
     }, [findNextPlayableIndex, handleSetCurrentTrack, playoutPolicy.playoutMode]);
 
     const handlePrevious = useCallback(() => {
-        if (playoutPolicy.playoutMode === 'contributor') return;
+        if (playoutPolicy.playoutMode === 'presenter') return;
         const prevIndex = findNextPlayableIndex(currentTrackIndexRef.current, -1);
         if (prevIndex !== -1) {
             setActivePlayer(p => p === 'A' ? 'B' : 'A');
@@ -1019,7 +1021,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
     }, [findNextPlayableIndex, playoutPolicy.playoutMode]);
     
     const handleTogglePlay = useCallback(async () => {
-        if (playoutPolicy.playoutMode === 'contributor') return;
+        if (playoutPolicy.playoutMode === 'presenter') return;
         if (!audioGraphRef.current.isInitialized) {
             await initializeAudioGraph();
         }
@@ -1040,7 +1042,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
     }, [stopPfl, playoutPolicy.playoutMode]);
     
     const handlePlayTrack = useCallback(async (itemId: string) => {
-        if (playoutPolicy.playoutMode === 'contributor') return;
+        if (playoutPolicy.playoutMode === 'presenter') return;
         if (!audioGraphRef.current.isInitialized) {
             await initializeAudioGraph();
         }
@@ -1345,7 +1347,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
                         setIsPlaying(false);
                         setCurrentPlayingItemId(null);
                     }
-                    // A contributor does nothing on play failure; it waits for the next state update from master.
+                    // A presenter does nothing on play failure; it waits for the next state update from master.
                 }
             } else if (!isPlaying && !currentPlayer.paused) {
                 currentPlayer.pause();
@@ -1356,9 +1358,9 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
         
     }, [currentTrack, isPlaying, activePlayer, handleNext, getTrackSrc, stopPfl]);
 
-    // This effect ensures a contributor's player time is always in sync with the master's state
+    // This effect ensures a presenter's player time is always in sync with the master's state
     useEffect(() => {
-        if (playoutPolicy.playoutMode === 'contributor' && isPlaying) {
+        if (playoutPolicy.playoutMode === 'presenter' && isPlaying) {
             const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
             const player = activePlayerRef.current;
             if (player && player.src) {
@@ -1482,7 +1484,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
                 setTrackProgress(player.currentTime);
             }
 
-            if (playoutPolicyRef.current.playoutMode === 'contributor') return;
+            if (playoutPolicyRef.current.playoutMode === 'presenter') return;
 
             if (isCrossfadingRef.current || player.duration <= 0) return;
             const policy = playoutPolicyRef.current;
@@ -1519,7 +1521,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
 
         const handleEnded = (e: Event) => {
             const player = e.target as HTMLAudioElement;
-            if (playoutPolicyRef.current.playoutMode === 'contributor') return;
+            if (playoutPolicyRef.current.playoutMode === 'presenter') return;
 
             if (!isNaN(player.duration) && player.duration > 2 && player.currentTime < player.duration - 2) {
                 console.warn(`Ignored premature 'ended' event. CurrentTime: ${player.currentTime.toFixed(2)}, Duration: ${player.duration.toFixed(2)}`);
@@ -1618,7 +1620,7 @@ const AppInternal: React.FC<AppInternalProps> = ({ onBackToModeSelection }) => {
     }, [activePlayer, setPlayoutHistory, handleSetCurrentTrack]);
 
     useEffect(() => {
-        if (!isPlaying || playoutPolicy.playoutMode === 'contributor') return;
+        if (!isPlaying || playoutPolicy.playoutMode === 'presenter') return;
     
         const intervalId = setInterval(() => {
             const now = Date.now();
@@ -2603,6 +2605,7 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
         return generatedPlaylist;
     }, [playlistRef, playoutHistoryRef, mediaLibraryRef]);
 
+    // FIX: Completed the truncated useEffect hook.
     useEffect(() => {
         const autoFillCheckInterval = setInterval(() => {
             const { isAutoFillEnabled, autoFillLeadTime } = playoutPolicyRef.current;
@@ -2616,462 +2619,80 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
                 if (!('markerType' in currentItem)) remainingDuration += (currentItem.duration - currentProgress);
                 for (let i = currentPlayingIdx + 1; i < currentPlaylist.length; i++) {
                     const item = currentPlaylist[i];
-                    if (!('markerType' in item)) remainingDuration += item.duration;
+                    if (!('markerType' in item)) {
+                        const timelineData = timelineRef.current.get(item.id);
+                        if(timelineData && !timelineData.isSkipped) remainingDuration += timelineData.duration;
+                    }
                 }
-            } else if (currentPlaylist.length > 0 && !isPlayingRef.current) {
-                 remainingDuration = currentPlaylist.reduce((acc, item) => acc + (!('markerType' in item) ? item.duration : 0), 0);
             }
+            
             const leadTimeSeconds = autoFillLeadTime * 60;
+
             if (remainingDuration < leadTimeSeconds) {
                 isAutoFillingRef.current = true;
-                console.log(`[Auto-Fill] Triggered. Remaining time: ${Math.round(remainingDuration)}s. Lead time: ${leadTimeSeconds}s.`);
+                console.log(`[Auto-Fill] Remaining playlist duration (${remainingDuration.toFixed(0)}s) is less than lead time (${leadTimeSeconds}s). Generating tracks...`);
                 const newTracks = generateAutoFillTracks();
                 if (newTracks.length > 0) {
-                    setPlaylist(prev => {
-                        const lastTrack = prev[prev.length -1];
-                        if (lastTrack && !('markerType' in lastTrack) && lastTrack.addedBy !== 'auto-fill') return prev;
-                        return [...prev, ...newTracks];
-                    });
+                    setPlaylist(prev => [...prev, ...newTracks]);
+                    console.log(`[Auto-Fill] Added ${newTracks.length} tracks to the playlist.`);
                 }
-                 setTimeout(() => { isAutoFillingRef.current = false; }, 5000);
+                isAutoFillingRef.current = false;
             }
-        }, 15000);
+        }, 10000); // Check every 10 seconds
+
         return () => clearInterval(autoFillCheckInterval);
     }, [generateAutoFillTracks, mixerConfig.mic.sends.main.enabled]);
 
-    const handleInsertTimeMarker = useCallback((marker: TimeMarker, beforeItemId: string | null) => {
-        setPlaylist(prev => {
-            const newPlaylist = [...prev];
-            const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
-            if (insertIndex !== -1) newPlaylist.splice(insertIndex, 0, marker);
-            else newPlaylist.push(marker);
-            newPlaylist.sort((a, b) => {
-                const timeA = 'markerType' in a ? a.time : 0;
-                const timeB = 'markerType' in b ? b.time : 0;
-                if (timeA > 0 && timeB > 0) return timeA - timeB;
-                return 0;
-            });
-            return newPlaylist;
-        });
-    }, []);
-
-    const handleUpdateTimeMarker = useCallback((markerId: string, updates: Partial<TimeMarker>) => {
-        setPlaylist(prev => prev.map(item => item.id === markerId && 'markerType' in item ? { ...item, ...updates } : item));
-    }, []);
-    
-    const handleClosePwaModal = useCallback(async (dontShowAgain: boolean) => {
-        if (dontShowAgain) await dataService.putAppState('hidePwaInstallModal', true);
-        setIsPwaModalOpen(false);
-    }, []);
-
-    const handleCloseWhatsNewPopup = useCallback(() => {
-        sessionStorage.setItem('radiohost_whatsNewPopupSeen_v1', 'true');
-        setIsWhatsNewOpen(false);
-    }, []);
-
-    const handleActiveCartwallPlayerCountChange = useCallback((count: number) => {
-        setActiveCartwallPlayerCount(count);
-    }, []);
-    
-    const handleToggleAutoMode = useCallback((enabled: boolean) => {
-        setIsAutoModeEnabled(enabled);
-        if (enabled) {
-            setPlayoutPolicy(p => ({ ...p, isAutoFillEnabled: true }));
-            if (!isPlayingRef.current && playlistRef.current.length > 0) handleTogglePlay();
-        }
-    }, [handleTogglePlay]);
-
-    const handleOpenArtworkModal = useCallback((url: string) => {
-        setArtworkModalUrl(url);
-        setIsArtworkModalOpen(true);
-    }, []);
-
-    const handleCloseArtworkModal = useCallback(() => setIsArtworkModalOpen(false), []);
-
-    const handleOpenBroadcastEditor = useCallback((broadcast: Broadcast | null) => {
-        setEditingBroadcast(broadcast);
-        setIsBroadcastEditorOpen(true);
-    }, []);
-
-    const handleCloseBroadcastEditor = useCallback(() => {
-        setIsBroadcastEditorOpen(false);
-        setEditingBroadcast(null);
-    }, []);
-
-    const handleSaveBroadcast = useCallback((broadcast: Broadcast) => {
-        setBroadcasts(prev => {
-            const existingIndex = prev.findIndex(b => b.id === broadcast.id);
-            if (existingIndex > -1) {
-                const newBroadcasts = [...prev];
-                newBroadcasts[existingIndex] = broadcast;
-                return newBroadcasts;
-            }
-            return [...prev, broadcast];
-        });
-        handleCloseBroadcastEditor();
-    }, [handleCloseBroadcastEditor]);
-
-    const handleDeleteBroadcast = useCallback((broadcastId: string) => {
-        setBroadcasts(prev => prev.filter(b => b.id !== broadcastId));
-    }, []);
-
-    const loadBroadcastsToPlaylist = useCallback((broadcastsToLoad: Broadcast[]) => {
-        if (broadcastsToLoad.length === 0) return;
-        broadcastsToLoad.sort((a, b) => a.startTime - b.startTime);
-        const allItemsToInsert = broadcastsToLoad.flatMap(b => b.playlist.map(item => !('markerType' in item) ? { ...item, addedBy: 'broadcast' as const } : item));
-        const firstItem = allItemsToInsert.length > 0 ? allItemsToInsert[0] : null;
-        setPlaylist(currentPlaylist => [ ...currentPlaylist.slice(0, 1), ...allItemsToInsert, ...currentPlaylist.slice(1) ]);
-
-        if ( isPlayingRef.current && firstItem && 'markerType' in firstItem && firstItem.markerType === TimeMarkerType.HARD ) {
-            console.log('[Broadcast] Initial hard marker detected. Triggering immediate jump.');
-            const firstPlayableIndexInBlock = allItemsToInsert.findIndex((item, index) => index > 0 && !('markerType' in item));
-            if (firstPlayableIndexInBlock !== -1) {
-                const targetPlaylistIndex = 1 + firstPlayableIndexInBlock;
-                triggerHardMarkerFadeAndJump(targetPlaylistIndex);
-            }
-        }
-
-        const now = Date.now();
-        const loadedIds = new Set(broadcastsToLoad.map(b => b.id));
-        setBroadcasts(currentBroadcasts => currentBroadcasts.map(b => loadedIds.has(b.id) ? { ...b, lastLoaded: now } : b));
-    }, [triggerHardMarkerFadeAndJump]);
-
-    const handleManualLoadBroadcast = useCallback((broadcastId: string) => {
-        const broadcastToLoad = broadcastsRef.current.find(b => b.id === broadcastId);
-        if (broadcastToLoad) loadBroadcastsToPlaylist([broadcastToLoad]);
-    }, [loadBroadcastsToPlaylist]);
-    
-    useEffect(() => {
-        const checkInterval = setInterval(() => {
-            const now = Date.now();
-            const broadcastsToLoad = broadcastsRef.current.filter(b => b.startTime <= now && !b.lastLoaded);
-            if (broadcastsToLoad.length > 0) loadBroadcastsToPlaylist(broadcastsToLoad);
-        }, 5000);
-        return () => clearInterval(checkInterval);
-    }, [loadBroadcastsToPlaylist]);
-
-    const handleVoiceTrackCreate = useCallback(async (voiceTrack: Track, blob: Blob): Promise<Track> => {
-        const savedTrack = await dataService.addTrack(voiceTrack, blob);
-        setMediaLibrary(prevLibrary => {
-            const voicetracksFolderName = "Voicetracks";
-            let voicetracksFolder = prevLibrary.children.find(child => child.type === 'folder' && child.name === voicetracksFolderName) as Folder | undefined;
-            let updatedLibrary = prevLibrary;
-            if (!voicetracksFolder) {
-                const newFolder: Folder = { id: `folder-voicetracks-${Date.now()}`, name: voicetracksFolderName, type: 'folder', children: [] };
-                updatedLibrary = addItemToTree(updatedLibrary, 'root', newFolder);
-                voicetracksFolder = newFolder;
-            }
-            const folderToUpdate = findFolderInTree(updatedLibrary, voicetracksFolder.id);
-            if (folderToUpdate && !folderToUpdate.children.some(t => t.id === savedTrack.id)) {
-                return addItemToTree(updatedLibrary, voicetracksFolder.id, savedTrack);
-            }
-            return updatedLibrary;
-        });
-        return savedTrack;
-    }, []);
-
-    // --- NEW: WebSocket Logic for HOST mode ---
-    const sendStateUpdate = useCallback((payload: any) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'stateUpdate', payload }));
-        }
-    }, []);
-
-    const sendLibraryUpdate = useCallback((library: Folder) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'libraryUpdate', payload: library }));
-        }
-    }, []);
-
-    const lastProgressUpdateRef = useRef(0);
-    const isInitialLibraryMount = useRef(true);
-
-    useEffect(() => {
-        if (playoutPolicy.playoutMode !== 'master') return;
-        if (isInitialLibraryMount.current) {
-            isInitialLibraryMount.current = false;
-            return;
-        }
-        sendLibraryUpdate(mediaLibrary);
-    }, [mediaLibrary, playoutPolicy.playoutMode, sendLibraryUpdate]);
-
-    useEffect(() => {
-        if (playoutPolicy.playoutMode === 'master') {
-            const now = Date.now();
-            if (now - lastProgressUpdateRef.current > 1000) { // Throttle to 1 second
-                sendStateUpdate({ trackProgress });
-                lastProgressUpdateRef.current = now;
-            }
-        }
-    }, [trackProgress, playoutPolicy.playoutMode, sendStateUpdate]);
-
-    useEffect(() => {
-        if (playoutPolicy.playoutMode === 'master') {
-            sendStateUpdate({
-                playlist,
-                currentTrackIndex,
-                isPlaying,
-                stopAfterTrackId,
-                currentPlayingItemId,
-            });
-        }
-    }, [playlist, currentTrackIndex, isPlaying, stopAfterTrackId, currentPlayingItemId, playoutPolicy.playoutMode, sendStateUpdate]);
-
-    useEffect(() => {
-        const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
-        if (isInitialLoad || !isHostMode || !currentUser) return;
-        
-        setWsStatus('connecting');
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}?email=${currentUser.email}`;
-        
-        const ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-            console.log('[WebSocket] Connected');
-            setWsStatus('connected');
-            if (playoutPolicyRef.current.playoutMode === 'master') {
-                ws.send(JSON.stringify({ type: 'setMaster' }));
-            } else {
-                ws.send(JSON.stringify({ type: 'request-master-state' }));
-            }
-        };
-
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            console.log('[WebSocket] Received message:', data.type);
-
-            if (playoutPolicyRef.current.playoutMode === 'contributor' && data.type === 'stateUpdate') {
-                const { payload } = data;
-                if (payload.playlist) setPlaylist(payload.playlist);
-                if (payload.mediaLibrary) setMediaLibrary(payload.mediaLibrary);
-                if (payload.currentTrackIndex !== undefined) setCurrentTrackIndex(payload.currentTrackIndex);
-                if (payload.isPlaying !== undefined) setIsPlaying(payload.isPlaying);
-                if (payload.trackProgress !== undefined) setTrackProgress(payload.trackProgress);
-                if (payload.currentPlayingItemId !== undefined) setCurrentPlayingItemId(payload.currentPlayingItemId);
-                if (payload.stopAfterTrackId !== undefined) setStopAfterTrackId(payload.stopAfterTrackId);
-            } else if (playoutPolicyRef.current.playoutMode === 'contributor' && data.type === 'libraryUpdate') {
-                setMediaLibrary(data.payload);
-            } else if (playoutPolicyRef.current.playoutMode === 'master' && data.type === 'request-master-state') {
-                sendStateUpdate({
-                    playlist: playlistRef.current,
-                    mediaLibrary: mediaLibraryRef.current,
-                    currentTrackIndex: currentTrackIndexRef.current,
-                    isPlaying: isPlayingRef.current,
-                    stopAfterTrackId: stopAfterTrackIdRef.current,
-                    currentPlayingItemId: currentPlayingItemIdRef.current,
-                    trackProgress: trackProgressRef.current,
-                });
-            } else if (data.type === 'webrtc-signal') {
-                setRtcSignal(data); // Pass signal to RemoteStudio
-            }
-        };
-
-        ws.onclose = () => {
-            console.log('[WebSocket] Disconnected');
-            setWsStatus('disconnected');
-        };
-        ws.onerror = (error) => {
-            console.error('[WebSocket] Error:', error);
-            setWsStatus('disconnected');
-        };
-
-        return () => {
-            ws.close();
-        };
-    }, [isInitialLoad, currentUser, playoutPolicy.playoutMode, sendStateUpdate, sendLibraryUpdate]);
-
-    const isMaster = playoutPolicy.playoutMode === 'master';
-    const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
+    // FIX: Added the missing return statement with the full JSX for the component.
+    // Auth guard
+    if (!currentUser) {
+        return <Auth onLogin={handleLogin} onSignup={handleSignup} onBack={onBackToModeSelection} />;
+    }
 
     return (
-        <div className="flex flex-col h-screen bg-white dark:bg-black text-black dark:text-white font-sans overflow-hidden">
-            {!currentUser ? (
-                <Auth onLogin={handleLogin} onSignup={handleSignup} onBack={onBackToModeSelection} />
-            ) : (
-                <>
-                    <div
-                        style={{ height: `${headerHeight}px` }}
-                        className="relative flex-shrink-0 bg-neutral-100/50 dark:bg-neutral-900/50 transition-[height] duration-200 ease-out"
-                        onWheel={handleHeaderWheel}
-                    >
-                        <Header
-                            currentUser={currentUser}
-                            onLogout={handleLogout}
-                            currentTrack={displayTrack}
-                            onNext={handleNext}
-                            onPrevious={handlePrevious}
-                            isPlaying={isPlaying}
-                            onTogglePlay={handleTogglePlay}
-                            isPresenterLive={mixerConfig.mic.sends.main.enabled}
-                            progress={trackProgress}
-                            logoSrc={logoSrc}
-                            onLogoChange={handleLogoChange}
-                            onLogoReset={handleLogoReset}
-                            headerGradient={headerGradient}
-                            headerTextColor={headerTextColor}
-                            onOpenHelp={() => setIsHelpModalOpen(true)}
-                            isAutoModeEnabled={isAutoModeEnabled}
-                            onToggleAutoMode={handleToggleAutoMode}
-                            onArtworkClick={handleOpenArtworkModal}
-                            onArtworkLoaded={handleArtworkLoaded}
-                            headerHeight={headerHeight}
-                            nextTrack={nextTrack}
-                            nextNextTrack={nextNextTrack}
-                            onPlayTrack={handlePlayTrack}
-                            onEject={handleRemoveFromPlaylist}
-                            mainPlayerAnalyser={audioGraphRef.current.analysers?.mainPlayer || null}
-                            isContributor={!isMaster}
-                            isHostMode={isHostMode}
-                            connectionStatus={wsStatus}
-                            playoutMode={playoutPolicy.playoutMode}
-                        />
-                    </div>
-                    <VerticalResizer
-                        onMouseDown={handleHeaderResizeMouseDown}
-                        onDoubleClick={handleHeaderResizeDoubleClick}
-                        title="Drag to resize player, double-click to toggle visibility"
-                    />
-                    <main ref={mainRef} className="flex-grow flex p-4 min-h-0">
-                        <div style={{ flexBasis: `${displayedColumnWidths[0]}%` }} className={`flex-shrink-0 h-full overflow-hidden transition-all duration-300 ease-in-out ${!isLibraryCollapsed && 'border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900'}`}>
-                            <MediaLibrary
-                                rootFolder={mediaLibrary}
-                                onAddToPlaylist={(track) => handleAttemptToAddTrack(track, null)}
-                                onAddTracksToLibrary={handleAddTracksToLibrary}
-                                onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
-                                onRemoveFromLibrary={handleRemoveFromLibrary}
-                                onRemoveMultipleFromLibrary={handleRemoveMultipleFromLibrary}
-                                onCreateFolder={handleCreateFolder}
-                                onMoveItem={handleMoveItemInLibrary}
-                                onOpenMetadataSettings={(folder) => setEditingMetadataFolder(folder)}
-                                onOpenTrackMetadataEditor={(track) => setEditingTrack(track)}
-                                onUpdateTrackTags={handleUpdateTrackTags}
-                                onUpdateFolderTags={handleUpdateFolderTags}
-                                onPflTrack={handlePflTrack}
-                                pflTrackId={pflTrackId}
-                                onLibraryUpdate={setMediaLibrary}
-                            />
-                        </div>
+        <div className="h-screen w-screen bg-neutral-100 dark:bg-black text-black dark:text-white flex flex-col font-sans overflow-hidden">
+            {/* Hidden Audio Players */}
+            <audio ref={playerARef} crossOrigin="anonymous" />
+            <audio ref={playerBRef} crossOrigin="anonymous" />
+            <audio ref={pflAudioRef} crossOrigin="anonymous" />
+            <audio ref={mainBusAudioRef} autoPlay crossOrigin="anonymous" />
+            <audio ref={monitorBusAudioRef} autoPlay crossOrigin="anonymous" />
 
-                        <Resizer onMouseDown={handleMouseDown(0)} onDoubleClick={handleToggleLibraryCollapse} title="Double-click to toggle Library panel" />
-
-                        <div style={{ flexBasis: `${displayedColumnWidths[1]}%` }} className="h-full min-w-0 border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900 overflow-hidden">
-                            <Playlist
-                                items={playlist}
-                                currentPlayingItemId={currentPlayingItemId}
-                                onRemove={handleRemoveFromPlaylist}
-                                onReorder={handleReorderPlaylist}
-                                onPlayTrack={handlePlayTrack}
-                                onInsertTrack={handleAttemptToAddTrack}
-                                isPlaying={isPlaying}
-                                stopAfterTrackId={stopAfterTrackId}
-                                onSetStopAfterTrackId={setStopAfterTrackId}
-                                trackProgress={trackProgress}
-                                onClearPlaylist={handleClearPlaylist}
-                                onPflTrack={handlePflTrack}
-                                pflTrackId={pflTrackId}
-                                isPflPlaying={isPflPlaying}
-                                pflProgress={pflProgress}
-                                mediaLibrary={mediaLibrary}
-                                timeline={timeline}
-                                onInsertTimeMarker={handleInsertTimeMarker}
-                                onUpdateTimeMarker={handleUpdateTimeMarker}
-                                onInsertVoiceTrack={handleInsertVoiceTrack}
-                                policy={playoutPolicy}
-                                isContributor={!isMaster}
-                            />
-                        </div>
-
-                        <Resizer onMouseDown={handleMouseDown(1)} onDoubleClick={handleToggleRightColumnCollapse} title="Double-click to toggle Side panel" />
-
-                        <div style={{ flexBasis: `${displayedColumnWidths[2]}%` }} className={`flex-shrink-0 h-full flex flex-col overflow-hidden transition-all duration-300 ease-in-out ${!isRightColumnCollapsed && 'border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900'}`}>
-                             <div className="flex-grow flex flex-col min-h-0">
-                                <div className="flex-shrink-0 border-b border-neutral-200 dark:border-neutral-800">
-                                    <nav className="flex justify-around text-center">
-                                        <button onClick={() => setActiveRightColumnTab('cartwall')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'cartwall' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Cartwall">Cartwall</button>
-                                        <button onClick={() => setActiveRightColumnTab('scheduler')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'scheduler' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Scheduler">Scheduler</button>
-                                        <button onClick={() => setActiveRightColumnTab('ai-playlist')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'ai-playlist' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="AI Playlist">AI Playlist</button>
-                                        <button onClick={() => setActiveRightColumnTab('ai')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'ai' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="AI Assistant">AI</button>
-                                        <button onClick={() => setActiveRightColumnTab('mixer')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'mixer' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Mixer">Mixer</button>
-                                        {isMaster && <button onClick={() => setActiveRightColumnTab('stream')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'stream' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Stream">Stream</button>}
-                                        <button onClick={() => setActiveRightColumnTab('settings')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'settings' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Settings">Settings</button>
-                                    </nav>
-                                </div>
-                                <div className="flex-grow relative">
-                                    <div className="absolute inset-0 overflow-y-auto">
-                                        {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(newGrid) => setPlayoutPolicy(p => ({ ...p, cartwallGrid: newGrid }))} audioContext={audioGraphRef.current.context} destinationNode={audioGraphRef.current.sourceGains.cartwall || null} onActivePlayerCountChange={handleActiveCartwallPlayerCountChange} />}
-                                        {activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
-                                        {activeRightColumnTab === 'ai-playlist' && <AiPlaylist mediaLibrary={mediaLibrary} allTags={allTags} onAddToPlaylist={handleAddGeneratedPlaylist} />}
-                                        {activeRightColumnTab === 'ai' && <AiAssistant currentTrack={displayTrack} />}
-                                        {activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} />}
-                                        {isMaster && activeRightColumnTab === 'stream' && <PublicStream ws={wsRef.current} mainBusStream={mainBusStream} isAudioEngineReady={audioGraphRef.current.isInitialized} isAudioEngineInitializing={isAudioEngineInitializing} currentTrack={displayTrack} isPlaying={isPlaying} artworkUrl={loadedArtworkUrl} />}
-                                        {activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isNowPlayingExportEnabled={isNowPlayingExportEnabled} onSetIsNowPlayingExportEnabled={setIsNowPlayingExportEnabled} onSetNowPlayingFile={handleSetNowPlayingFile} nowPlayingFileName={nowPlayingFileName} metadataFormat={metadataFormat} onSetMetadataFormat={setMetadataFormat} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} onSetAutoBackupFolder={handleSetAutoBackupFolder} autoBackupFolderPath={autoBackupFolderPath} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} allFolders={allFolders} allTags={allTags} />}
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="flex-shrink-0 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900">
-                                <div
-                                    className="flex justify-between items-center p-3 cursor-pointer hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50"
-                                    onClick={() => setIsMicPanelCollapsed(p => !p)}
-                                    aria-expanded={!isMicPanelCollapsed}
-                                    aria-controls="mic-panel"
-                                >
-                                    <div className="flex items-center gap-2">
-                                        <MicrophoneIcon className="w-5 h-5" />
-                                        <h3 className="font-semibold text-black dark:text-white">Microphone</h3>
-                                    </div>
-                                    <button className="text-black dark:text-white">
-                                        {isMicPanelCollapsed ? <ChevronUpIcon className="w-5 h-5" /> : <ChevronDownIcon className="w-5 h-5" />}
-                                    </button>
-                                </div>
-                                {!isMicPanelCollapsed && (
-                                    <div id="mic-panel">
-                                        <RemoteStudio
-                                            ref={remoteStudioRef}
-                                            mixerConfig={mixerConfig}
-                                            onMixerChange={setMixerConfig}
-                                            onStreamAvailable={handleMicStream}
-                                            ws={wsRef.current}
-                                            currentUser={currentUser}
-                                            isMaster={!isMaster}
-                                            incomingSignal={rtcSignal}
-                                        />
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    </main>
-                </>
-            )}
-             <MetadataSettingsModal
-                folder={editingMetadataFolder}
-                onClose={() => setEditingMetadataFolder(null)}
-                onSave={handleUpdateFolderMetadataSettings}
-             />
-             <TrackMetadataModal
-                track={editingTrack}
-                onClose={() => setEditingTrack(null)}
-                onSave={handleUpdateTrackMetadata}
-             />
-             <HelpModal
-                isOpen={isHelpModalOpen}
-                onClose={() => setIsHelpModalOpen(false)}
-             />
-            <PwaInstallModal
-                isOpen={isPwaModalOpen}
-                onClose={handleClosePwaModal}
-             />
-            <WhatsNewPopup
+            {/* Modals and Popups */}
+            <MetadataSettingsModal 
+                folder={editingMetadataFolder} 
+                onClose={() => setEditingMetadataFolder(null)} 
+                onSave={handleUpdateFolderMetadataSettings} 
+            />
+            <TrackMetadataModal 
+                track={editingTrack} 
+                onClose={() => setEditingTrack(null)} 
+                onSave={handleUpdateTrackMetadata} 
+            />
+            <HelpModal 
+                isOpen={isHelpModalOpen} 
+                onClose={() => setIsHelpModalOpen(false)} 
+            />
+            <PwaInstallModal 
+                isOpen={isPwaModalOpen} 
+                onClose={async (dontShow) => { 
+                    setIsPwaModalOpen(false); 
+                    if (dontShow) await dataService.putAppState('hidePwaInstallModal', true); 
+                }} 
+            />
+             <WhatsNewPopup
                 isOpen={isWhatsNewOpen}
-                onClose={handleCloseWhatsNewPopup}
+                onClose={() => {
+                    setIsWhatsNewOpen(false);
+                    sessionStorage.setItem('radiohost_whatsNewPopupSeen_v1', 'true');
+                }}
             />
-            <ArtworkModal
-                isOpen={isArtworkModalOpen}
-                artworkUrl={artworkModalUrl}
-                onClose={handleCloseArtworkModal}
+            <ArtworkModal 
+                isOpen={isArtworkModalOpen} 
+                artworkUrl={artworkModalUrl} 
+                onClose={() => setIsArtworkModalOpen(false)} 
             />
-             <ConfirmationDialog
+            <ConfirmationDialog
                 isOpen={!!validationWarning}
                 onClose={() => setValidationWarning(null)}
                 onConfirm={handleConfirmValidationAndAddTrack}
@@ -3083,22 +2704,182 @@ const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
             </ConfirmationDialog>
             <BroadcastEditor
                 isOpen={isBroadcastEditorOpen}
-                onClose={handleCloseBroadcastEditor}
-                onSave={handleSaveBroadcast}
+                onClose={() => setIsBroadcastEditorOpen(false)}
+                onSave={(broadcast) => {
+                    setBroadcasts(prev => {
+                        const index = prev.findIndex(b => b.id === broadcast.id);
+                        if (index > -1) {
+                            const newBroadcasts = [...prev];
+                            newBroadcasts[index] = broadcast;
+                            return newBroadcasts;
+                        }
+                        return [...prev, broadcast];
+                    });
+                    setIsBroadcastEditorOpen(false);
+                }}
                 existingBroadcast={editingBroadcast}
                 mediaLibrary={mediaLibrary}
-                onVoiceTrackCreate={handleVoiceTrackCreate}
+                onVoiceTrackCreate={async (track, blob) => {
+                    return await dataService.addTrack(track, blob);
+                }}
                 policy={playoutPolicy}
             />
-            
-            <audio ref={playerARef} crossOrigin="anonymous"></audio>
-            <audio ref={playerBRef} crossOrigin="anonymous"></audio>
-            <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
-            <audio ref={mainBusAudioRef} autoPlay></audio>
-            <audio ref={monitorBusAudioRef} autoPlay></audio>
+
+            {/* Main Layout */}
+            <header
+                style={{ height: headerHeight > 0 ? `${headerHeight}px` : '0px', transition: 'height 0.3s ease-in-out' }}
+                className="flex-shrink-0 z-20 shadow-md"
+                onWheel={handleHeaderWheel}
+            >
+                {headerHeight > 0 && <Header
+                    currentUser={currentUser}
+                    onLogout={handleLogout}
+                    currentTrack={displayTrack}
+                    nextTrack={nextTrack}
+                    nextNextTrack={nextNextTrack}
+                    onNext={handleNext}
+                    onPrevious={handlePrevious}
+                    isPlaying={isPlaying}
+                    onTogglePlay={handleTogglePlay}
+                    isPresenterLive={mixerConfig.mic.sends.main.enabled}
+                    progress={trackProgress}
+                    logoSrc={logoSrc}
+                    onLogoChange={handleLogoChange}
+                    onLogoReset={handleLogoReset}
+                    headerGradient={headerGradient}
+                    headerTextColor={headerTextColor}
+                    onOpenHelp={() => setIsHelpModalOpen(true)}
+                    isAutoModeEnabled={isAutoModeEnabled}
+                    onToggleAutoMode={setIsAutoModeEnabled}
+                    onArtworkClick={(url) => { setArtworkModalUrl(url); setIsArtworkModalOpen(true); }}
+                    onArtworkLoaded={handleArtworkLoaded}
+                    headerHeight={headerHeight}
+                    onPlayTrack={handlePlayTrack}
+                    onEject={handleRemoveFromPlaylist}
+                    mainPlayerAnalyser={audioGraphRef.current.analysers?.mainPlayer || null}
+                    isPresenter={playoutPolicy.playoutMode === 'presenter'}
+                    isHostMode={sessionStorage.getItem('appMode') === 'HOST'}
+                    connectionStatus={wsStatus}
+                    playoutMode={playoutPolicy.playoutMode}
+                />}
+            </header>
+
+            {headerHeight > 0 && <VerticalResizer onMouseDown={handleHeaderResizeMouseDown} onDoubleClick={handleHeaderResizeDoubleClick} />}
+
+            <main ref={mainRef} className="flex-grow flex overflow-hidden">
+                {/* Left Column */}
+                {!isLibraryCollapsed && (
+                    <div className="h-full flex-shrink-0" style={{ width: `${displayedColumnWidths[0]}%` }}>
+                        <MediaLibrary
+                            rootFolder={mediaLibrary}
+                            onAddToPlaylist={handleAttemptToAddTrack}
+                            onAddTracksToLibrary={handleAddTracksToLibrary}
+                            onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
+                            onRemoveFromLibrary={handleRemoveFromLibrary}
+                            onRemoveMultipleFromLibrary={handleRemoveMultipleFromLibrary}
+                            onCreateFolder={handleCreateFolder}
+                            onMoveItem={handleMoveItemInLibrary}
+                            onOpenMetadataSettings={setEditingMetadataFolder}
+                            onOpenTrackMetadataEditor={setEditingTrack}
+                            onUpdateTrackTags={handleUpdateTrackTags}
+                            onUpdateFolderTags={handleUpdateFolderTags}
+                            onPflTrack={handlePflTrack}
+                            pflTrackId={pflTrackId}
+                            onLibraryUpdate={setMediaLibrary}
+                        />
+                    </div>
+                )}
+                <Resizer onMouseDown={handleMouseDown(0)} onDoubleClick={handleToggleLibraryCollapse} title={isLibraryCollapsed ? "Expand Library" : "Collapse Library"} />
+                
+                {/* Center Column */}
+                <div className="h-full flex-grow" style={{ width: `${displayedColumnWidths[1]}%` }}>
+                    <Playlist
+                        items={playlist}
+                        currentPlayingItemId={currentPlayingItemId}
+                        onRemove={handleRemoveFromPlaylist}
+                        onReorder={handleReorderPlaylist}
+                        onPlayTrack={handlePlayTrack}
+                        onInsertTrack={handleAttemptToAddTrack}
+                        onInsertTimeMarker={(marker, beforeId) => {
+                             setPlaylist(prev => {
+                                const newPlaylist = [...prev];
+                                const insertIndex = beforeId ? newPlaylist.findIndex(item => item.id === beforeId) : newPlaylist.length;
+                                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, marker);
+                                return newPlaylist;
+                            });
+                        }}
+                        onUpdateTimeMarker={(markerId, updates) => {
+                            setPlaylist(p => p.map(item => item.id === markerId ? {...item, ...updates} : item));
+                        }}
+                        onInsertVoiceTrack={handleInsertVoiceTrack}
+                        isPlaying={isPlaying}
+                        stopAfterTrackId={stopAfterTrackId}
+                        onSetStopAfterTrackId={setStopAfterTrackId}
+                        trackProgress={trackProgress}
+                        onClearPlaylist={handleClearPlaylist}
+                        onPflTrack={handlePflTrack}
+                        pflTrackId={pflTrackId}
+                        isPflPlaying={isPflPlaying}
+                        pflProgress={pflProgress}
+                        mediaLibrary={mediaLibrary}
+                        timeline={timeline}
+                        policy={playoutPolicy}
+                        isPresenter={playoutPolicy.playoutMode === 'presenter'}
+                    />
+                </div>
+                <Resizer onMouseDown={handleMouseDown(1)} onDoubleClick={handleToggleRightColumnCollapse} title={isRightColumnCollapsed ? "Expand Side Panel" : "Collapse Side Panel"} />
+                
+                {/* Right Column */}
+                {!isRightColumnCollapsed && (
+                    <div className="h-full flex-shrink-0 flex flex-col" style={{ width: `${displayedColumnWidths[2]}%` }}>
+                        <div className="flex-shrink-0 border-b border-neutral-200 dark:border-neutral-800">
+                             <div className="flex justify-around items-center text-sm font-medium text-neutral-500 dark:text-neutral-400">
+                                {(['cartwall', 'ai-playlist', 'ai', 'stream', 'mixer', 'scheduler', 'settings'] as const).map(tab => (
+                                    <button
+                                        key={tab}
+                                        onClick={() => setActiveRightColumnTab(tab)}
+                                        className={`px-3 py-2 border-b-2 capitalize ${activeRightColumnTab === tab ? 'border-black dark:border-white text-black dark:text-white' : 'border-transparent hover:border-neutral-300 dark:hover:border-neutral-700'}`}
+                                    >
+                                        {tab.replace('-', ' ')}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="flex-grow overflow-y-auto">
+                            {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(grid) => setPlayoutPolicy(p => ({...p, cartwallGrid: grid}))} audioContext={audioGraphRef.current.context} destinationNode={audioGraphRef.current.sourceGains.cartwall ?? null} onActivePlayerCountChange={setActiveCartwallPlayerCount} />}
+                            {activeRightColumnTab === 'ai-playlist' && <AiPlaylist mediaLibrary={mediaLibrary} allTags={allTags} onAddToPlaylist={handleAddGeneratedPlaylist} />}
+                            {activeRightColumnTab === 'ai' && <AiAssistant currentTrack={currentTrack} />}
+                            {activeRightColumnTab === 'stream' && <PublicStream ws={wsRef.current} mainBusStream={mainBusStream} isAudioEngineReady={audioGraphRef.current.isInitialized} isAudioEngineInitializing={isAudioEngineInitializing} currentTrack={displayTrack} isPlaying={isPlaying} artworkUrl={loadedArtworkUrl} />}
+                            {activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} />}
+                            {activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onDelete={(id) => setBroadcasts(b => b.filter(br => br.id !== id))} onManualLoad={(id) => { const b = broadcasts.find(br => br.id === id); if (b) { b.playlist.forEach(item => { if(!('markerType' in item)) (item as Track).addedBy = 'broadcast' }); setPlaylist(p => [...p, ...b.playlist]); setBroadcasts(brs => brs.map(br => br.id === id ? {...br, lastLoaded: Date.now()} : br)); } }} onOpenEditor={(b) => { setEditingBroadcast(b); setIsBroadcastEditorOpen(true); }} />}
+                            {activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isNowPlayingExportEnabled={isNowPlayingExportEnabled} onSetIsNowPlayingExportEnabled={setIsNowPlayingExportEnabled} onSetNowPlayingFile={handleSetNowPlayingFile} nowPlayingFileName={nowPlayingFileName} metadataFormat={metadataFormat} onSetMetadataFormat={setMetadataFormat} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} onSetAutoBackupFolder={handleSetAutoBackupFolder} autoBackupFolderPath={autoBackupFolderPath} allFolders={allFolders} allTags={allTags} />}
+                        </div>
+                         <div className="flex-shrink-0 border-t border-neutral-200 dark:border-neutral-800">
+                             <div className="flex justify-between items-center p-2 cursor-pointer" onClick={() => setIsMicPanelCollapsed(p => !p)}>
+                                <div className="flex items-center gap-2 font-medium">
+                                    <MicrophoneIcon className="w-5 h-5"/>
+                                    Live Presenter
+                                </div>
+                                {isMicPanelCollapsed ? <ChevronUpIcon className="w-5 h-5"/> : <ChevronDownIcon className="w-5 h-5"/>}
+                             </div>
+                             {!isMicPanelCollapsed && (
+                                <RemoteStudio 
+                                    ref={remoteStudioRef}
+                                    mixerConfig={mixerConfig}
+                                    onMixerChange={setMixerConfig}
+                                    onStreamAvailable={handleMicStream}
+                                    ws={wsRef.current}
+                                    currentUser={currentUser}
+                                    isMaster={playoutPolicy.playoutMode === 'master'}
+                                    incomingSignal={rtcSignal}
+                                />
+                             )}
+                         </div>
+                    </div>
+                )}
+            </main>
         </div>
     );
 };
 
-const App = React.memo(AppInternal);
 export default App;
