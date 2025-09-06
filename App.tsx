@@ -368,6 +368,7 @@ const AppInternal: React.FC = () => {
     const [artworkModalUrl, setArtworkModalUrl] = useState<string | null>(null);
     const [loadedArtworkUrl, setLoadedArtworkUrl] = useState<string | null>(null);
     const [validationWarning, setValidationWarning] = useState<{ track: Track; beforeItemId: string | null; message: string; } | null>(null);
+    const [isInitialLoad, setIsInitialLoad] = useState(true);
 
     const [isAutoModeEnabled, setIsAutoModeEnabled] = useState(false);
 
@@ -708,6 +709,7 @@ const AppInternal: React.FC = () => {
                 setCurrentPlayingItemId(null);
                 setStopAfterTrackId(null);
             }
+            setIsInitialLoad(false);
         };
 
         loadInitialData();
@@ -808,6 +810,8 @@ const AppInternal: React.FC = () => {
     };
     
     useDebouncedEffect(() => {
+        if (isInitialLoad) return;
+        
         const isContributor = playoutPolicy.playoutMode === 'contributor';
         const key = currentUser?.email || 'guest';
     
@@ -864,7 +868,7 @@ const AppInternal: React.FC = () => {
             console.log(`[Persistence] Master data saved for ${key}.`);
         }
     }, [
-        mediaLibrary, playlist, cartwallPages, broadcasts, playoutPolicy, logoSrc,
+        isInitialLoad, mediaLibrary, playlist, cartwallPages, broadcasts, playoutPolicy, logoSrc,
         logoHeaderGradient, logoHeaderTextColor, isNowPlayingExportEnabled, metadataFormat,
         columnWidths, isMicPanelCollapsed, headerHeight, isLibraryCollapsed,
         isRightColumnCollapsed, isAutoBackupEnabled, isAutoBackupOnStartupEnabled,

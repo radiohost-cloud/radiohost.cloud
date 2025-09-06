@@ -347,8 +347,8 @@ app.get('/api/user/:email', (req, res) => res.json(db.data.users.find(u => u.ema
 
 app.get('/api/userdata/:email', (req, res) => res.json(db.data.userdata[req.params.email] || null));
 app.post('/api/userdata/:email', async (req, res) => {
-    const { mediaLibrary, ...userSpecificData } = req.body;
-    db.data.userdata[req.params.email] = userSpecificData;
+    // The client already separates user-specific data, so we can just save the whole body.
+    db.data.userdata[req.params.email] = req.body;
     await db.write();
     res.json({ success: true, message: 'User-specific data saved.' });
 });
