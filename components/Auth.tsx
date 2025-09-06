@@ -141,11 +141,33 @@ const Auth: React.FC<AuthProps> = ({ onLogin, onSignup, onBack }) => {
                         <div className="pt-2">
                             <span className="text-sm font-medium text-neutral-800 dark:text-neutral-300 block text-center mb-2">Choose your role for this session:</span>
                             <div className="relative flex w-full p-1 bg-neutral-200 dark:bg-neutral-800 rounded-lg">
-                                <button type="button" onClick={() => setRole('master')} className={`w-1/2 rounded-md py-1.5 text-sm font-semibold transition-colors ${role === 'master' ? 'bg-white dark:bg-black shadow-sm' : 'text-neutral-600 dark:text-neutral-400'}`}>Master Playout</button>
-                                <button type="button" onClick={() => setRole('contributor')} className={`w-1/2 rounded-md py-1.5 text-sm font-semibold transition-colors ${role === 'contributor' ? 'bg-white dark:bg-black shadow-sm' : 'text-neutral-600 dark:text-neutral-400'}`}>Contributor</button>
+                                <span
+                                    className="absolute top-1 h-[calc(100%-0.5rem)] w-[calc(50%-0.25rem)] rounded-md bg-white dark:bg-black shadow-sm transition-transform duration-300 ease-in-out"
+                                    style={{ transform: role === 'master' ? 'translateX(0.25rem)' : 'translateX(calc(100% + 0.25rem))' }}
+                                    aria-hidden="true"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setRole('master')}
+                                    className={`relative z-10 w-1/2 rounded-md py-1.5 text-sm font-semibold transition-colors ${
+                                        role === 'master' ? 'text-black dark:text-white' : 'text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white'
+                                    }`}
+                                >
+                                    Master Playout
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setRole('contributor')}
+                                    className={`relative z-10 w-1/2 rounded-md py-1.5 text-sm font-semibold transition-colors ${
+                                        role === 'contributor' ? 'text-black dark:text-white' : 'text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white'
+                                    }`}
+                                >
+                                    Contributor
+                                </button>
                             </div>
                         </div>
                     )}
+
 
                     {error && <p className="text-sm text-red-500 text-center">{error}</p>}
 
