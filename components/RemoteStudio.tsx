@@ -27,6 +27,7 @@ type MicStatus = 'disconnected' | 'connecting' | 'ready' | 'error';
 const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref) => {
     const { mixerConfig, onMixerChange, onStreamAvailable, ws, currentUser, isStudio, incomingSignal, onlinePresenters, audioLevels, isSecureContext, mainAudioStream } = props;
     const [micStatus, setMicStatus] = useState<MicStatus>('disconnected');
+    const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
     const isLiveInStudio = mixerConfig.mic.sends.main.enabled;
     const [isSendingToStudio, setIsSendingToStudio] = useState(false);
     const [volume, setVolume] = useState(0);
@@ -41,6 +42,15 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
     const remoteAudioRef = useRef<HTMLAudioElement>(null);
 
     const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+
+    useEffect(() => {
+        if (remoteAudioRef.current && remoteStream) {
+            if (remoteAudioRef.current.srcObject !== remoteStream) {
+                remoteAudioRef.current.srcObject = remoteStream;
+                remoteAudioRef.current.play().catch(e => console.error("Autoplay of remote stream failed. User interaction may be needed.", e));
+            }
+        }
+    }, [remoteStream]);
 
     const visualize = useCallback(() => {
         if (analyserRef.current) {
@@ -157,9 +167,7 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
                 onStreamAvailable(remoteStream, sourceId);
             } else { // Presenter receiving studio's main output
                 console.log('[WebRTC] Received main audio stream from studio.');
-                if (remoteAudioRef.current && remoteAudioRef.current.srcObject !== event.streams[0]) {
-                    remoteAudioRef.current.srcObject = event.streams[0];
-                }
+                setRemoteStream(event.streams[0]);
             }
         };
         
@@ -258,7 +266,7 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
 
     return (
         <div className="p-4">
-            <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: 'none' }} />
+            <audio ref={remoteAudioRef} playsInline style={{ display: 'none' }} />
             {!isSecureContext && (
                 <div className="p-3 text-center bg-yellow-100 dark:bg-yellow-900/50 border border-yellow-300 dark:border-yellow-700 rounded-lg text-sm text-yellow-800 dark:text-yellow-200">
                     Microphone access requires a secure connection. Please use <strong>HTTPS</strong> or <strong>localhost</strong>.

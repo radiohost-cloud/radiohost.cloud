@@ -1,4 +1,5 @@
 
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -747,7 +748,88 @@ const AppInternal: React.FC = () => {
 
     }, [isSecureContext]);
 
+    // FIX: Moved initializeAudioGraph function definition before its usage to resolve a "used before its declaration" error.
+    const initializeAudioGraph = useCallback(async () => {
+       if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !pflAudioRef.current) return;
+    
+        try {
+            setIsAudioEngineInitializing(true);
+            const context = new AudioContext();
+            audioGraphRef.current.context = context;
+            
+            const sources: AdvancedAudioGraph['sources'] = {
+                pfl: context.createMediaElementSource(pflAudioRef.current),
+            };
+            audioGraphRef.current.sources = sources;
+
+            const sourceGains: AdvancedAudioGraph['sourceGains'] = {};
+            const routingGains: AdvancedAudioGraph['routingGains'] = {};
+            const duckingGains: AdvancedAudioGraph['duckingGains'] = {};
+            const busGains: AdvancedAudioGraph['busGains'] = {};
+            const busDestinations: AdvancedAudioGraph['busDestinations'] = {};
+            const analysers: AdvancedAudioGraph['analysers'] = {};
+            
+            const sourceIds: AudioSourceId[] = ['mainPlayer', 'mic', 'pfl', 'cartwall'];
+            sourceIds.forEach(id => {
+                sourceGains[id] = context.createGain();
+                analysers[id] = context.createAnalyser();
+                analysers[id]!.fftSize = 256;
+                sourceGains[id]!.connect(analysers[id]!);
+            });
+            
+            sources.pfl.connect(sourceGains.pfl!);
+
+            audioBuses.forEach(bus => {
+                busGains[bus.id] = context.createGain();
+                busDestinations[bus.id] = context.createMediaStreamDestination();
+                analysers[bus.id] = context.createAnalyser();
+                analysers[bus.id]!.fftSize = 256;
+                analysers[bus.id]!.connect(busGains[bus.id]!);
+                busGains[bus.id]!.connect(busDestinations[bus.id]!);
+            });
+
+            sourceIds.forEach(sourceId => {
+                audioBuses.forEach(bus => {
+                    const routingGain = context.createGain();
+                    routingGains[`${sourceId}_to_${bus.id}`] = routingGain;
+                    analysers[sourceId]!.connect(routingGain);
+
+                    const busesWithDucking: AudioBusId[] = ['main', 'monitor'];
+                    if ((sourceId === 'mainPlayer' || sourceId === 'cartwall') && busesWithDucking.includes(bus.id)) {
+                        const duckingGain = context.createGain();
+                        duckingGains[`${sourceId}_to_${bus.id}`] = duckingGain;
+                        routingGain.connect(duckingGain);
+                        duckingGain.connect(analysers[bus.id]!);
+                    } else {
+                        routingGain.connect(analysers[bus.id]!);
+                    }
+                });
+            });
+            
+            audioGraphRef.current = {
+                ...audioGraphRef.current, sourceGains, routingGains, duckingGains, busGains, busDestinations, analysers, isInitialized: true,
+            };
+
+            if(monitorBusAudioRef.current && busDestinations.monitor) monitorBusAudioRef.current.srcObject = busDestinations.monitor.stream;
+
+            if (busDestinations.main) {
+                setMainAudioStream(busDestinations.main.stream);
+            }
+
+            if (context.state === 'suspended') await context.resume();
+
+        } catch (error) { console.error("Failed to initialize Audio graph:", error); }
+        finally { setIsAudioEngineInitializing(false); }
+    }, [audioBuses]);
+
     const isStudio = playoutPolicy.playoutMode === 'studio';
+
+    useEffect(() => {
+        if (isStudio && !audioGraphRef.current.isInitialized && pflAudioRef.current) {
+            console.log("[AudioEngine] Initializing on studio startup...");
+            initializeAudioGraph();
+        }
+    }, [isStudio, initializeAudioGraph]);
 
     useEffect(() => {
         const fetchUsers = async () => {
@@ -967,79 +1049,6 @@ const AppInternal: React.FC = () => {
         const trackWithOriginalId = { ...track, id: track.originalId || track.id };
         return dataService.getTrackSrc(trackWithOriginalId);
     }, []);
-
-    const initializeAudioGraph = useCallback(async () => {
-       if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !pflAudioRef.current) return;
-    
-        try {
-            setIsAudioEngineInitializing(true);
-            const context = new AudioContext();
-            audioGraphRef.current.context = context;
-            
-            const sources: AdvancedAudioGraph['sources'] = {
-                pfl: context.createMediaElementSource(pflAudioRef.current),
-            };
-            audioGraphRef.current.sources = sources;
-
-            const sourceGains: AdvancedAudioGraph['sourceGains'] = {};
-            const routingGains: AdvancedAudioGraph['routingGains'] = {};
-            const duckingGains: AdvancedAudioGraph['duckingGains'] = {};
-            const busGains: AdvancedAudioGraph['busGains'] = {};
-            const busDestinations: AdvancedAudioGraph['busDestinations'] = {};
-            const analysers: AdvancedAudioGraph['analysers'] = {};
-            
-            const sourceIds: AudioSourceId[] = ['mainPlayer', 'mic', 'pfl', 'cartwall'];
-            sourceIds.forEach(id => {
-                sourceGains[id] = context.createGain();
-                analysers[id] = context.createAnalyser();
-                analysers[id]!.fftSize = 256;
-                sourceGains[id]!.connect(analysers[id]!);
-            });
-            
-            sources.pfl.connect(sourceGains.pfl!);
-
-            audioBuses.forEach(bus => {
-                busGains[bus.id] = context.createGain();
-                busDestinations[bus.id] = context.createMediaStreamDestination();
-                analysers[bus.id] = context.createAnalyser();
-                analysers[bus.id]!.fftSize = 256;
-                analysers[bus.id]!.connect(busGains[bus.id]!);
-                busGains[bus.id]!.connect(busDestinations[bus.id]!);
-            });
-
-            sourceIds.forEach(sourceId => {
-                audioBuses.forEach(bus => {
-                    const routingGain = context.createGain();
-                    routingGains[`${sourceId}_to_${bus.id}`] = routingGain;
-                    analysers[sourceId]!.connect(routingGain);
-
-                    const busesWithDucking: AudioBusId[] = ['main', 'monitor'];
-                    if ((sourceId === 'mainPlayer' || sourceId === 'cartwall') && busesWithDucking.includes(bus.id)) {
-                        const duckingGain = context.createGain();
-                        duckingGains[`${sourceId}_to_${bus.id}`] = duckingGain;
-                        routingGain.connect(duckingGain);
-                        duckingGain.connect(analysers[bus.id]!);
-                    } else {
-                        routingGain.connect(analysers[bus.id]!);
-                    }
-                });
-            });
-            
-            audioGraphRef.current = {
-                ...audioGraphRef.current, sourceGains, routingGains, duckingGains, busGains, busDestinations, analysers, isInitialized: true,
-            };
-
-            if(monitorBusAudioRef.current && busDestinations.monitor) monitorBusAudioRef.current.srcObject = busDestinations.monitor.stream;
-
-            if (busDestinations.main) {
-                setMainAudioStream(busDestinations.main.stream);
-            }
-
-            if (context.state === 'suspended') await context.resume();
-
-        } catch (error) { console.error("Failed to initialize Audio graph:", error); }
-        finally { setIsAudioEngineInitializing(false); }
-    }, [audioBuses]);
 
     useEffect(() => {
         let animationFrameId: number;
