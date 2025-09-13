@@ -880,7 +880,8 @@ app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { nam
         }
         
         const fileExt = path.extname(audioFile.originalname);
-        const uniqueId = `${metadata.type.toLowerCase().replace(' ', '-')}-${Date.now()}`;
+        const uniqueId = `${metadata.type.toLowerCase().replace(/\s/g, '-')}-${Date.now()}`;
+        // FIX: Use only the unique ID and extension for the filename to avoid encoding issues.
         const fileName = `${uniqueId}${fileExt}`;
         const filePath = path.join(finalDir, fileName);
         const relativePath = path.join('media', destinationPath, fileName);
