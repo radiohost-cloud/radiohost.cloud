@@ -167,14 +167,16 @@ export const getArtwork = (id: string) => {
 
 export const getArtworkUrl = async (track: Track): Promise<string | null> => {
     const mode = getMode();
+    const idToUse = track.originalId || track.id;
+
     if (mode === 'HOST') {
-        return track.hasEmbeddedArtwork ? `/api/artwork/${track.id}` : track.remoteArtworkUrl || null;
+        return track.hasEmbeddedArtwork ? `/api/artwork/${idToUse}` : track.remoteArtworkUrl || null;
     }
     if (track.remoteArtworkUrl) {
         return track.remoteArtworkUrl;
     }
     if (track.hasEmbeddedArtwork) {
-        const blob = await dbService.getArtwork(track.id);
+        const blob = await dbService.getArtwork(idToUse);
         return blob ? URL.createObjectURL(blob) : null;
     }
     return null;

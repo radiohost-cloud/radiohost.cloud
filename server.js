@@ -179,7 +179,7 @@ const playNextTrack = async () => {
         return;
     }
 
-    const trackPath = path.join(__dirname, track.src);
+    const trackPath = path.join(mediaDir, track.src.replace('/media/', ''));
 
     if (!fs.existsSync(trackPath)) {
         console.error(`[Playback] Track file not found: ${trackPath}. Skipping.`);
@@ -439,6 +439,37 @@ app.post('/api/folder', async (req, res) => {
     }
 });
 
+// Track Deletion
+app.post('/api/track/delete', async (req, res) => {
+    const { id, src } = req.body;
+    if (!id || !src) {
+        return res.status(400).json({ message: 'Track ID and src are required.' });
+    }
+
+    try {
+        // Delete audio file
+        const audioPath = path.join(mediaDir, src.replace('/media/', ''));
+        if (fs.existsSync(audioPath)) {
+            await fsPromises.unlink(audioPath);
+            console.log(`[File System] Deleted audio: ${audioPath}`);
+        }
+
+        // Delete artwork file
+        const artworkPath = path.join(artworkDir, `${id}.jpg`);
+        if (fs.existsSync(artworkPath)) {
+            await fsPromises.unlink(artworkPath);
+            console.log(`[File System] Deleted artwork: ${artworkPath}`);
+        }
+        
+        res.json({ success: true, message: 'Files deleted successfully.' });
+
+    } catch (error) {
+        console.error('Error deleting track files:', error);
+        res.status(500).json({ message: 'Failed to delete track files.' });
+    }
+});
+
+
 // --- Public Stream Route ---
 app.get('/stream/live.:ext', (req, res) => {
     const mimeType = req.params.ext === 'aac' ? 'audio/aac' : 'audio/mpeg';
@@ -483,9 +514,9 @@ app.get('*', (req, res) => {
 server.on('upgrade', (request, socket, head) => {
     const { pathname, search } = new URL(request.url, `ws://${request.headers.host}`);
     if (pathname === '/socket') {
+        // Pass search params to the connection handler
+        const fullUrl = `${pathname}${search}`;
         wss.handleUpgrade(request, socket, head, (ws) => {
-            // Pass search params to the connection handler
-            const fullUrl = `${pathname}${search}`;
             wss.emit('connection', ws, { ...request, url: fullUrl });
         });
     } else {
