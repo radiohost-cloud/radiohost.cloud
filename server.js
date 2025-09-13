@@ -179,7 +179,7 @@ const playNextTrack = async () => {
         return;
     }
 
-    const trackPath = path.join(mediaDir, track.src.replace('/media/', ''));
+    const trackPath = path.join(__dirname, track.src);
 
     if (!fs.existsSync(trackPath)) {
         console.error(`[Playback] Track file not found: ${trackPath}. Skipping.`);
@@ -357,11 +357,15 @@ app.post('/api/userdata/:email', async (req, res) => {
 // --- Multer Setup for File Uploads ---
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        const dir = file.fieldname === 'artworkFile' ? artworkDir : mediaDir;
-        const destinationPath = req.body.destinationPath || '';
-        const fullPath = path.join(dir, destinationPath);
-        fs.mkdirSync(fullPath, { recursive: true });
-        cb(null, fullPath);
+        // FIX: Artwork always goes to the root artworkDir, audio goes to subfolders.
+        if (file.fieldname === 'artworkFile') {
+            cb(null, artworkDir);
+        } else {
+            const destinationPath = req.body.destinationPath || '';
+            const fullPath = path.join(mediaDir, destinationPath);
+            fs.mkdirSync(fullPath, { recursive: true });
+            cb(null, fullPath);
+        }
     },
     filename: (req, file, cb) => {
         const metadata = JSON.parse(req.body.metadata);
@@ -448,7 +452,7 @@ app.post('/api/track/delete', async (req, res) => {
 
     try {
         // Delete audio file
-        const audioPath = path.join(mediaDir, src.replace('/media/', ''));
+        const audioPath = path.join(__dirname, src);
         if (fs.existsSync(audioPath)) {
             await fsPromises.unlink(audioPath);
             console.log(`[File System] Deleted audio: ${audioPath}`);

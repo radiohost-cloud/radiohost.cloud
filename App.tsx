@@ -475,7 +475,7 @@ const AppInternal: React.FC = () => {
     type AdvancedAudioGraph = {
         context: AudioContext | null;
         sources: {
-            // mainPlayer source removed
+            mainPlayer?: MediaElementAudioSourceNode; // Added back for HOST mode monitoring
             mic?: MediaStreamAudioSourceNode;
             pfl?: MediaElementAudioSourceNode;
             [key: `remote_${string}`]: MediaStreamAudioSourceNode; // For remote contributors
@@ -844,6 +844,30 @@ const AppInternal: React.FC = () => {
             initializeAudioGraph();
         }
     }, [isStudio, initializeAudioGraph]);
+
+    // NEW: Connect monitor stream to audio graph for VU metering in Studio mode
+    useEffect(() => {
+        const graph = audioGraphRef.current;
+        const monitorElement = monitorStreamAudioRef.current;
+    
+        if (isHostMode && isStudio && monitorElement && graph.isInitialized && !graph.sources.mainPlayer) {
+            try {
+                const sourceNode = graph.context!.createMediaElementSource(monitorElement);
+                sourceNode.connect(graph.sourceGains.mainPlayer!);
+                graph.sources.mainPlayer = sourceNode;
+                console.log("[AudioGraph] Monitor stream connected to mainPlayer analyser.");
+
+                return () => {
+                    sourceNode.disconnect();
+                    delete graph.sources.mainPlayer;
+                    console.log("[AudioGraph] Monitor stream disconnected from mainPlayer analyser.");
+                };
+            } catch (error) {
+                console.error("Error connecting monitor stream to audio graph:", error);
+            }
+        }
+    }, [isHostMode, isStudio, audioGraphRef.current.isInitialized]);
+
 
     useEffect(() => {
         const fetchUsers = async () => {
@@ -2762,7 +2786,7 @@ const AppInternal: React.FC = () => {
             
             <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
             <audio ref={monitorBusAudioRef} autoPlay></audio>
-            {isHostMode && isStudio && <audio ref={monitorStreamAudioRef} autoPlay muted={false}/>}
+            {isHostMode && isStudio && <audio ref={monitorStreamAudioRef} crossOrigin="anonymous" autoPlay muted={false}/>}
         </div>
     );
 };
