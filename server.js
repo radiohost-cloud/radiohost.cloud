@@ -177,6 +177,12 @@ const stopPlaybackEngine = async () => {
 };
 
 const playNextTrack = async () => {
+    // 1. Clear any pending timeout for the *previous* track. This handles manual skips.
+    if (playbackEngineState.playheadTimeout) {
+        clearTimeout(playbackEngineState.playheadTimeout);
+        playbackEngineState.playheadTimeout = null;
+    }
+
     if (!playbackEngineState.isPlaying) return;
 
     const playlist = db.data.sharedPlaylist;
@@ -189,7 +195,7 @@ const playNextTrack = async () => {
         if (nextIndex !== -1 && nextIndex !== currentIndex) {
             playbackEngineState.currentTrackIndex = nextIndex;
             db.data.sharedPlayerState.currentTrackIndex = nextIndex;
-            playNextTrack();
+            playNextTrack(); // Recursively call to try the next one
         } else {
             console.log('[Playback Engine] No more playable tracks found. Stopping.');
             stopPlaybackEngine();
@@ -197,8 +203,6 @@ const playNextTrack = async () => {
         return;
     }
 
-    // FIX: Correctly resolve the physical path from the track's src URL.
-    // The src is like "media/Music/song.mp3", but the physical dir is "Media".
     const mediaDir = path.join(__dirname, 'Media');
     const relativeTrackPath = track.src.startsWith('media/') ? track.src.substring('media/'.length) : track.src;
     const trackPath = path.join(mediaDir, relativeTrackPath);
@@ -208,7 +212,7 @@ const playNextTrack = async () => {
         const nextIndex = findNextPlayableTrackIndex(currentIndex);
         playbackEngineState.currentTrackIndex = nextIndex;
         db.data.sharedPlayerState.currentTrackIndex = nextIndex;
-        playNextTrack();
+        playNextTrack(); // Recursively call to try the next one
         return;
     }
     
@@ -236,19 +240,10 @@ const playNextTrack = async () => {
     
     readStream.pipe(audioStream, { end: false });
 
+    // 2. Change the 'end' handler to only log buffering completion.
     readStream.on('end', () => {
-        console.log(`[Playback Engine] Finished track: ${track.title}`);
-        if (playbackEngineState.playheadTimeout) clearTimeout(playbackEngineState.playheadTimeout);
-        
-        const nextIndex = findNextPlayableTrackIndex(currentIndex);
-        playbackEngineState.currentTrackIndex = nextIndex;
-
-        if (nextIndex === -1 || track.id === db.data.sharedPlayerState.stopAfterTrackId) {
-             console.log('[Playback Engine] End of playlist or stop marker reached. Stopping.');
-             stopPlaybackEngine();
-        } else {
-            playNextTrack();
-        }
+        console.log(`[Playback Engine] Finished buffering track: ${track.title}`);
+        playbackEngineState.activeReadStream = null;
     });
 
     readStream.on('error', (err) => {
@@ -258,6 +253,32 @@ const playNextTrack = async () => {
         playbackEngineState.currentTrackIndex = nextIndex;
         playNextTrack();
     });
+
+    // 3. Set the new timeout based on the actual track duration.
+    const trackDurationMs = track.duration * 1000;
+    
+    playbackEngineState.playheadTimeout = setTimeout(() => {
+        // Check for stop marker at the end of the track's duration
+        if (track.id === db.data.sharedPlayerState.stopAfterTrackId) {
+            console.log('[Playback Engine] Stop marker reached. Stopping.');
+            stopPlaybackEngine();
+            return;
+        }
+
+        // Find the next track
+        const nextIndex = findNextPlayableTrackIndex(currentIndex);
+        if (nextIndex === -1) {
+            console.log('[Playback Engine] End of playlist reached. Stopping.');
+            stopPlaybackEngine();
+            return;
+        }
+
+        // 4. Schedule the next track to play
+        playbackEngineState.currentTrackIndex = nextIndex;
+        db.data.sharedPlayerState.currentTrackIndex = nextIndex;
+        playNextTrack();
+
+    }, trackDurationMs);
 };
 
 const startPlaybackEngine = async () => {
