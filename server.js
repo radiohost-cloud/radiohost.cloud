@@ -197,7 +197,12 @@ const playNextTrack = async () => {
         return;
     }
 
-    const trackPath = path.join(__dirname, track.src);
+    // FIX: Correctly resolve the physical path from the track's src URL.
+    // The src is like "media/Music/song.mp3", but the physical dir is "Media".
+    const mediaDir = path.join(__dirname, 'Media');
+    const relativeTrackPath = track.src.startsWith('media/') ? track.src.substring('media/'.length) : track.src;
+    const trackPath = path.join(mediaDir, relativeTrackPath);
+
     if (!fs.existsSync(trackPath)) {
         console.error(`[Playback Engine] Track file not found: ${trackPath}. Skipping.`);
         const nextIndex = findNextPlayableTrackIndex(currentIndex);
@@ -880,15 +885,15 @@ app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { nam
         }
         
         const fileExt = path.extname(audioFile.originalname);
-        const uniqueId = `${metadata.type.toLowerCase().replace(/\s/g, '-')}-${Date.now()}`;
-        // FIX: Use only the unique ID and extension for the filename to avoid encoding issues.
+        const uniqueId = metadata.id; // Use the ID generated on the client
         const fileName = `${uniqueId}${fileExt}`;
         const filePath = path.join(finalDir, fileName);
-        const relativePath = path.join('media', destinationPath, fileName);
+        // The relative path stored in the DB should use forward slashes for URL compatibility
+        const relativePath = path.join('media', destinationPath, fileName).replace(/\\/g, '/');
 
         await fsPromises.writeFile(filePath, audioFile.buffer);
 
-        const finalTrack = { ...metadata, id: uniqueId, src: relativePath.replace(/\\/g, '/') };
+        const finalTrack = { ...metadata, src: relativePath };
 
         if (req.files.artworkFile) {
             const artworkFile = req.files.artworkFile[0];
