@@ -28,6 +28,7 @@ const PORT = process.env.PORT || 3000;
 // Create necessary directories
 const mediaDir = path.join(__dirname, 'Media');
 const artworkDir = path.join(__dirname, 'Artwork');
+const distDir = path.join(__dirname, 'dist'); // For the built frontend
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir, { recursive: true });
 
@@ -459,10 +460,22 @@ app.get('/stream/live.:ext', (req, res) => {
 
 // --- Serve Static Files and SPA ---
 // This must come AFTER all API routes
-app.use(express.static(__dirname));
 
+// Serve media and artwork files from their respective directories
+app.use('/media', express.static(mediaDir));
+app.use('/artwork', express.static(artworkDir));
+
+// Serve the built frontend app from the 'dist' directory
+app.use(express.static(distDir));
+
+// For any other request, serve the index.html file from the 'dist' directory
 app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+    const indexPath = path.join(distDir, 'index.html');
+    if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+    } else {
+        res.status(404).send('Application not found. Please run `npm run build` to generate the application files in the `dist` directory.');
+    }
 });
 
 
