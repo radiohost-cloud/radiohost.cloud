@@ -300,7 +300,7 @@ wss.on('connection', async (ws, req) => {
         ws.req = req; // Store request for IP lookup
         browserPlayerClients.add(ws);
         
-        if (ws.readyState === ws.OPEN) {
+        if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'streamConfig', payload: { mimeType: currentMimeType } }));
             ws.send(JSON.stringify({ type: 'metadataUpdate', payload: { ...currentMetadata, logoSrc: currentLogoSrc } }));
         }
@@ -788,4 +788,161 @@ app.post('/api/signup', async (req, res) => {
     await db.read();
     const existingUser = db.data.users.find(u => u.email === email);
     if (existingUser) {
-        return res.status
+        return res.status(409).json({ message: 'User with this email already exists' });
+    }
+    const isFirstUser = db.data.users.length === 0;
+    const newUser = {
+        email,
+        password, // In a real app, hash this!
+        nickname,
+        role: isFirstUser ? 'studio' : 'presenter' // First user is always studio admin
+    };
+    db.data.users.push(newUser);
+    await db.write();
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { password: _, ...userWithoutPassword } = newUser;
+    res.status(201).json(userWithoutPassword);
+});
+
+
+app.get('/api/user/:email', async (req, res) => {
+    const { email } = req.params;
+    await db.read();
+    const user = db.data.users.find(u => u.email === email);
+    if (user) {
+        const { password, ...userWithoutPassword } = user;
+        res.json(userWithoutPassword);
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+});
+
+app.get('/api/users', async (req, res) => {
+    await db.read();
+    const users = db.data.users.map(({ password, ...user }) => user);
+    res.json(users);
+});
+
+app.put('/api/user/:email/role', async (req, res) => {
+    const { email } = req.params;
+    const { role } = req.body;
+    if (role !== 'studio' && role !== 'presenter') {
+        return res.status(400).json({ message: 'Invalid role' });
+    }
+    await db.read();
+    const user = db.data.users.find(u => u.email === email);
+    if (user) {
+        user.role = role;
+        await db.write();
+        const { password, ...userWithoutPassword } = user;
+        res.json(userWithoutPassword);
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+});
+
+
+app.get('/api/userdata/:email', async (req, res) => {
+    const { email } = req.params;
+    await db.read();
+    const userData = db.data.userdata[email] || null;
+    res.json(userData);
+});
+
+app.post('/api/userdata/:email', async (req, res) => {
+    const { email } = req.params;
+    db.data.userdata[email] = req.body;
+    await db.write();
+    res.json({ success: true });
+});
+
+app.get('/api/artwork/:trackId', async (req, res) => {
+    const { trackId } = req.params;
+    const artworkPath = path.join(artworkDir, `${trackId}.jpg`);
+    if (fs.existsSync(artworkPath)) {
+        res.sendFile(artworkPath);
+    } else {
+        res.status(404).json({ message: 'Artwork not found' });
+    }
+});
+
+app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { name: 'artworkFile', maxCount: 1 }]), async (req, res) => {
+    try {
+        const metadata = JSON.parse(req.body.metadata);
+        const destinationPath = req.body.destinationPath || '';
+        const audioFile = req.files.audioFile[0];
+
+        // Create directory if it doesn't exist
+        const finalDir = path.join(mediaDir, destinationPath);
+        if (!fs.existsSync(finalDir)) {
+            await fsPromises.mkdir(finalDir, { recursive: true });
+        }
+        
+        const fileExt = path.extname(audioFile.originalname);
+        const uniqueId = `${metadata.type.toLowerCase().replace(' ', '-')}-${Date.now()}`;
+        const fileName = `${uniqueId}${fileExt}`;
+        const filePath = path.join(finalDir, fileName);
+        const relativePath = path.join('media', destinationPath, fileName);
+
+        await fsPromises.writeFile(filePath, audioFile.buffer);
+
+        const finalTrack = { ...metadata, id: uniqueId, src: relativePath.replace(/\\/g, '/') };
+
+        if (req.files.artworkFile) {
+            const artworkFile = req.files.artworkFile[0];
+            const artworkPath = path.join(artworkDir, `${uniqueId}.jpg`);
+            await fsPromises.writeFile(artworkPath, artworkFile.buffer);
+            finalTrack.hasEmbeddedArtwork = true;
+        }
+
+        res.status(201).json(finalTrack);
+    } catch (error) {
+        console.error('Upload error:', error);
+        res.status(500).json({ message: 'Failed to upload file' });
+    }
+});
+
+app.post('/api/track/delete', async (req, res) => {
+    const { id, src } = req.body;
+    try {
+        if (src) {
+            const trackPath = path.join(__dirname, src);
+            if (fs.existsSync(trackPath)) {
+                await fsPromises.unlink(trackPath);
+            }
+        }
+        const artworkPath = path.join(artworkDir, `${id}.jpg`);
+        if (fs.existsSync(artworkPath)) {
+            await fsPromises.unlink(artworkPath);
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Delete error:', error);
+        res.status(500).json({ message: 'Failed to delete files' });
+    }
+});
+
+app.post('/api/folder', async (req, res) => {
+    const { path: folderPath } = req.body;
+    try {
+        const fullPath = path.join(mediaDir, folderPath);
+        if (!fs.existsSync(fullPath)) {
+            await fsPromises.mkdir(fullPath, { recursive: true });
+        }
+        res.status(201).json({ success: true });
+    } catch (error) {
+        console.error('Folder creation error:', error);
+        res.status(500).json({ message: 'Failed to create folder' });
+    }
+});
+
+// --- Catch-all to serve index.html for React Router ---
+app.get('*', (req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'));
+});
+
+// --- Start Server ---
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Server] RadioHost.cloud backend is running on http://0.0.0.0:${PORT}`);
+});
