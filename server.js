@@ -63,32 +63,47 @@ const getStationSettings = async () => {
     return userData?.settings || {};
 };
 
-// --- FFmpeg Loudness Analysis Helper ---
+// --- FFmpeg Helpers ---
+
+// NEW: Use ffprobe for fast and reliable metadata fetching (especially duration)
+const getAudioMetadata = (filePath) => {
+    return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(filePath, (err, metadata) => {
+            if (err) {
+                console.error(`[FFprobe] Error probing ${filePath}:`, err.message);
+                return reject(err);
+            }
+            if (!metadata || !metadata.format || !metadata.format.duration) {
+                return reject(new Error('Could not determine audio duration from metadata.'));
+            }
+            resolve(metadata);
+        });
+    });
+};
+
+
+// REFACTORED: More robust loudness analysis
 const analyzeLoudness = (filePath) => {
     return new Promise((resolve, reject) => {
-        // EBU R128 recommendation: I=-23 LUFS. Here we use -24 for more headroom, common in some broadcasting.
-        // This is a "dry run" to get the values, not to re-encode the file.
         const loudnormOptions = 'loudnorm=I=-24:LRA=7:tp=-1.5:print_format=json';
         
         ffmpeg(filePath)
             .withAudioFilter(loudnormOptions)
-            .addOption('-f', 'null') // Don't create an output file
+            .addOption('-f', 'null')
             .on('error', (err) => {
-                console.error(`[FFmpeg] Error analyzing ${filePath}:`, err.message);
                 reject(err);
             })
             .on('end', (stdout, stderr) => {
-                // fluent-ffmpeg can be inconsistent with stdout/stderr. Loudnorm logs to stderr.
                 if (!stderr) {
                     return reject(new Error('FFmpeg did not return analysis data.'));
                 }
                 
-                const lines = stderr.split('\n').reverse(); // Start from the end
-                const jsonLine = lines.find(line => line.trim().startsWith('{') && line.trim().endsWith('}'));
+                // More robust JSON parsing from stderr
+                const jsonMatch = stderr.match(/{[\s\S]*}/);
 
-                if (jsonLine) {
+                if (jsonMatch) {
                     try {
-                        const stats = JSON.parse(jsonLine);
+                        const stats = JSON.parse(jsonMatch[0]);
                         const loudnessData = {
                             i: parseFloat(stats.input_i),
                             tp: parseFloat(stats.input_tp),
@@ -103,7 +118,7 @@ const analyzeLoudness = (filePath) => {
                     reject(new Error('Could not find FFmpeg JSON output in stderr.'));
                 }
             })
-            .save('-'); // Required to trigger the process, output is discarded.
+            .save('-');
     });
 };
 
@@ -472,31 +487,38 @@ const upload = multer({ storage });
 // Media Upload
 app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { name: 'artworkFile', maxCount: 1 }]), async (req, res) => {
     try {
-        const metadata = JSON.parse(req.body.metadata);
+        const clientMetadata = JSON.parse(req.body.metadata);
         const destinationPath = req.body.destinationPath || '';
 
         const audioFile = req.files.audioFile[0];
         const artworkFile = req.files.artworkFile ? req.files.artworkFile[0] : null;
 
-        // NEW: Analyze loudness with FFmpeg
+        // Step 1: Get reliable metadata (especially duration) with ffprobe. This is critical.
+        const metadata = await getAudioMetadata(audioFile.path);
+        const duration = metadata.format.duration;
+        if (!duration || duration <= 0) {
+            throw new Error("Invalid audio file: duration could not be determined.");
+        }
+
+        // Step 2: Attempt to analyze loudness. This is an enhancement and should not fail the entire upload.
         let loudnessData = null;
         try {
             console.log(`[FFmpeg] Analyzing loudness for: ${audioFile.path}`);
             loudnessData = await analyzeLoudness(audioFile.path);
             console.log(`[FFmpeg] Analysis complete:`, loudnessData);
         } catch(ffmpegError) {
-            console.error(`[FFmpeg] Loudness analysis failed for ${audioFile.filename}. The track will be added without normalization data. Error: ${ffmpegError.message}`);
-            // Don't block the upload, just log the error.
+            console.warn(`[FFmpeg] Loudness analysis failed for ${audioFile.filename}. The track will be added without normalization data. Error: ${ffmpegError.message}`);
         }
 
         const relativeAudioPath = path.join(destinationPath, audioFile.filename);
         
         const newTrack = {
-            ...metadata,
+            ...clientMetadata,
+            duration: parseFloat(duration), // Ensure duration is a number and comes from the server
             src: `/Media/${relativeAudioPath.replace(/\\/g, '/')}`,
             hasEmbeddedArtwork: !!artworkFile,
-            remoteArtworkUrl: metadata.remoteArtworkUrl, // Explicitly save remote artwork URL
-            loudness: loudnessData, // Add loudness data to the track object
+            remoteArtworkUrl: clientMetadata.remoteArtworkUrl, // Preserve client-side fetched URL
+            loudness: loudnessData,
         };
 
         const findAndAdd = (folder, pathParts, track) => {
@@ -520,7 +542,10 @@ app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { nam
         res.status(201).json(newTrack);
     } catch (error) {
         console.error('Upload error:', error);
-        res.status(500).json({ message: 'Failed to upload track.' });
+        // Clean up uploaded files if process fails
+        if (req.files.audioFile) await deleteFileSilently(req.files.audioFile[0].path);
+        if (req.files.artworkFile) await deleteFileSilently(req.files.artworkFile[0].path);
+        res.status(500).json({ message: `Failed to process track: ${error.message}` });
     }
 });
 
@@ -676,3 +701,7 @@ server.on('upgrade', (request, socket, head) => {
 server.listen(PORT, () => {
     console.log(`RadioHost.cloud server running on http://localhost:${PORT}`);
 });
+```
+</change>
+</changes>
+```
