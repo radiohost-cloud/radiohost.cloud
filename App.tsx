@@ -1,5 +1,3 @@
-
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -2111,7 +2109,12 @@ const AppInternal: React.FC = () => {
                 const titleOK = !seenTitles.has(track.title);
 
                 if (artistOK && titleOK) {
-                    const trackWithMeta: Track = { ...track, addedBy: 'auto-fill' };
+                    const trackWithMeta: Track = { 
+                        ...track,
+                        originalId: track.id,
+                        id: `pl-item-af-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+                        addedBy: 'auto-fill' 
+                    };
                     generatedPlaylist.push(trackWithMeta);
                     currentDuration += track.duration;
                     if(track.artist) seenArtists[track.artist] = now + (currentDuration * 1000);
@@ -2124,7 +2127,12 @@ const AppInternal: React.FC = () => {
             if (!foundTrack) {
                 const track = sourceTracks.shift();
                 if (track) {
-                    generatedPlaylist.push({ ...track, addedBy: 'auto-fill' });
+                    generatedPlaylist.push({ 
+                        ...track, 
+                        originalId: track.id,
+                        id: `pl-item-af-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+                        addedBy: 'auto-fill' 
+                    });
                     currentDuration += track.duration;
                 }
             }

@@ -189,7 +189,12 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
         setPlaylist(prev => {
             const newPlaylist = [...prev];
             const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
-            newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, track);
+            const newPlaylistItem: SequenceItem = {
+                ...track,
+                originalId: track.id,
+                id: `bc-item-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
+            };
+            newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, newPlaylistItem);
             return newPlaylist;
         });
     }, []);
