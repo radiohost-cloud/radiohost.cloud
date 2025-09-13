@@ -2046,9 +2046,9 @@ const AppInternal: React.FC = () => {
 
     const isAutoFillingRef = useRef(false);
 
-    const generateAutoFillTracks = useCallback((): Track[] => {
-        const { autoFillSourceType, autoFillSourceId, autoFillTargetDuration, artistSeparation, titleSeparation } = playoutPolicyRef.current;
-        if (!autoFillSourceId) return [];
+    const generateAutoFillTracks = useCallback((durationToGenerateInSeconds: number): Track[] => {
+        const { autoFillSourceType, autoFillSourceId, artistSeparation, titleSeparation } = playoutPolicyRef.current;
+        if (!autoFillSourceId || durationToGenerateInSeconds <= 0) return [];
 
         let sourceTracks: Track[] = [];
         const seenArtists: Record<string, number> = {};
@@ -2094,7 +2094,7 @@ const AppInternal: React.FC = () => {
 
         const generatedPlaylist: Track[] = [];
         let currentDuration = 0;
-        const targetDurationSeconds = autoFillTargetDuration * 60;
+        const targetDurationSeconds = durationToGenerateInSeconds;
 
         for (let i = sourceTracks.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
@@ -2143,7 +2143,7 @@ const AppInternal: React.FC = () => {
     useEffect(() => {
         const autoFillCheckInterval = setInterval(() => {
             if (isStudio) { // Only studio should auto-fill
-                const { isAutoFillEnabled, autoFillLeadTime } = playoutPolicyRef.current;
+                const { isAutoFillEnabled, autoFillLeadTime, autoFillTargetDuration } = playoutPolicyRef.current;
                 if (!isAutoFillEnabled || isAutoFillingRef.current || mixerConfig.mic.sends.main.enabled) return;
                 const currentPlaylist = playlistRef.current;
                 const currentPlayingIdx = currentPlaylist.findIndex(t => t.id === currentPlayingItemIdRef.current);
@@ -2162,12 +2162,18 @@ const AppInternal: React.FC = () => {
                 const leadTimeSeconds = autoFillLeadTime * 60;
                 if (remainingDuration < leadTimeSeconds) {
                     isAutoFillingRef.current = true;
-                    console.log(`[Auto-Fill] Triggered. Remaining time: ${Math.round(remainingDuration)}s. Lead time: ${leadTimeSeconds}s.`);
-                    const newTracks = generateAutoFillTracks();
-                    if (newTracks.length > 0) {
-                        const newPlaylist = [...playlistRef.current, ...newTracks];
-                        setPlaylist(newPlaylist);
-                        sendStudioAction('setPlaylist', newPlaylist);
+                    const targetDurationSeconds = autoFillTargetDuration * 60;
+                    const durationToGenerate = targetDurationSeconds - remainingDuration;
+
+                    console.log(`[Auto-Fill] Triggered. Remaining time: ${Math.round(remainingDuration)}s. Target: ${targetDurationSeconds}s. Generating ~${Math.round(durationToGenerate / 60)} minutes.`);
+                    
+                    if (durationToGenerate > 0) {
+                        const newTracks = generateAutoFillTracks(durationToGenerate);
+                        if (newTracks.length > 0) {
+                            const newPlaylist = [...playlistRef.current, ...newTracks];
+                            setPlaylist(newPlaylist);
+                            sendStudioAction('setPlaylist', newPlaylist);
+                        }
                     }
                     setTimeout(() => { isAutoFillingRef.current = false; }, 5000);
                 }
