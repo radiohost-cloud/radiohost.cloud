@@ -1,5 +1,6 @@
 
 
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -1602,18 +1603,50 @@ const AppInternal: React.FC = () => {
         updateMediaLibrary(prevLibrary => addItemToTree(prevLibrary, destinationFolderId, track));
     }, [updateMediaLibrary]);
     
+    const getMode = () => sessionStorage.getItem('appMode');
+
     const handleRemoveFromLibrary = useCallback(async (id: string) => {
-        const trackToDelete = findTrackInTree(mediaLibraryRef.current, id);
-        if (trackToDelete) await dataService.deleteTrack(trackToDelete);
-        updateMediaLibrary(prev => removeItemFromTree(prev, id));
-    }, [updateMediaLibrary]);
+        await handleRemoveMultipleFromLibrary([id]);
+    }, []);
 
     const handleRemoveMultipleFromLibrary = useCallback(async (ids: string[]) => {
-        for(const id of ids){
-             const trackToDelete = findTrackInTree(mediaLibraryRef.current, id);
-             if (trackToDelete) await dataService.deleteTrack(trackToDelete);
+        const mode = getMode();
+        if (mode === 'HOST') {
+            await dataService.deleteLibraryItems(ids);
+            // State update will come from WebSocket
+        } else { // DEMO mode
+            const allTracksToDelete = new Set<Track>();
+            const findItems = (children: LibraryItem[], idSet: Set<string>) => {
+                for (const item of children) {
+                    if (idSet.has(item.id)) {
+                        if (item.type === 'folder') {
+                            findAllTracks(item, allTracksToDelete);
+                        } else {
+                            allTracksToDelete.add(item);
+                        }
+                    } else if (item.type === 'folder') {
+                        findItems(item.children, idSet);
+                    }
+                }
+            };
+            const findAllTracks = (folder: Folder, trackSet: Set<Track>) => {
+                for (const child of folder.children) {
+                    if (child.type === 'folder') {
+                        findAllTracks(child, trackSet);
+                    } else {
+                        trackSet.add(child);
+                    }
+                }
+            };
+
+            findItems(mediaLibraryRef.current.children, new Set(ids));
+
+            for (const track of allTracksToDelete) {
+                await dataService.deleteTrack(track); // Deletes from IndexedDB
+            }
+
+            updateMediaLibrary(prev => removeItemsFromTree(prev, new Set(ids)));
         }
-        updateMediaLibrary(prev => removeItemsFromTree(prev, new Set(ids)));
     }, [updateMediaLibrary]);
 
     const getFolderPath = useCallback((root: Folder, folderId: string): string => {
@@ -2533,12 +2566,14 @@ const handleUploadFiles = useCallback(async (files: File[], destinationFolderId:
     const tracksToAdd: Track[] = [];
 
     for (const file of files) {
-        const metadata = {
+// FIX: Add 'src' property to satisfy the Track type.
+        const metadata: Track = {
             title: file.name.replace(/\.[^/.]+$/, ""),
             artist: 'Unknown Artist',
             type: TrackType.SONG,
             duration: 0, // Server will replace this
-            id: `local-${Date.now()}-${Math.random()}`
+            id: `local-${Date.now()}-${Math.random()}`,
+            src: ''
         };
         try {
             const savedTrack = await dataService.addTrack(metadata, file, undefined, destinationPath);
@@ -2587,7 +2622,8 @@ const handleImportFolder = useCallback(async (files: File[], destinationFolderId
             parentId = childNode.id;
         }
 
-        const metadata = { title: fileName.replace(/\.[^/.]+$/, ""), artist: 'Unknown Artist', type: TrackType.SONG, duration: 0, id: `local-${Date.now()}-${Math.random()}` };
+// FIX: Add 'src' property to satisfy the Track type.
+        const metadata: Track = { title: fileName.replace(/\.[^/.]+$/, ""), artist: 'Unknown Artist', type: TrackType.SONG, duration: 0, id: `local-${Date.now()}-${Math.random()}`, src: '' };
         const uploadPath = [rootPath, ...pathParts].filter(Boolean).join('/');
 
         try {

@@ -134,11 +134,25 @@ export const getTrackSrc = async (track: Track): Promise<string | null> => {
 export const deleteTrack = async (track: Track) => {
     const mode = getMode();
     if (mode === 'HOST') {
-        return apiService.deleteTrack(track);
+       // This is now handled by deleteLibraryItems to ensure DB entry is also removed.
+       // The server will delete the physical files.
+       console.warn("deleteTrack called in HOST mode. Use deleteLibraryItems instead.");
+       return Promise.resolve();
     }
+    // For DEMO mode, this is correct.
     await dbService.deleteTrack(track.id);
     await dbService.deleteArtwork(track.id);
 };
+
+export const deleteLibraryItems = async (itemIds: string[]) => {
+    const mode = getMode();
+    if (mode === 'HOST') {
+        return apiService.deleteLibraryItems(itemIds);
+    }
+    // In DEMO mode, the App component handles iterating and deleting from dbService
+    return Promise.resolve();
+};
+
 
 export const createFolder = async (folderPath: string) => {
     const mode = getMode();

@@ -78,11 +78,11 @@ export const uploadTrack = async (trackMetadata: Track, file: File, artworkBlob?
     return handleResponse(response);
 };
 
-export const deleteTrack = (track: Track) => {
-    return fetch(`/api/track/delete`, {
+export const deleteLibraryItems = (itemIds: string[]) => {
+    return fetch(`/api/library/delete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: track.id, src: track.src }),
+        body: JSON.stringify({ itemIds }),
     }).then(handleResponse);
 };
 

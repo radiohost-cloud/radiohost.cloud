@@ -546,33 +546,75 @@ app.post('/api/folder', async (req, res) => {
     }
 });
 
-// Track Deletion
-app.post('/api/track/delete', async (req, res) => {
-    const { id, src } = req.body;
-    if (!id || !src) {
-        return res.status(400).json({ message: 'Track ID and src are required.' });
+// NEW: Unified Deletion Endpoint
+const deleteFileSilently = async (filePath) => {
+    try {
+        if (fs.existsSync(filePath)) {
+            await fsPromises.unlink(filePath);
+            console.log(`[File System] Deleted file: ${filePath}`);
+        }
+    } catch (error) {
+        console.warn(`[File System] Could not delete file ${filePath}: ${error.message}`);
+    }
+};
+
+const recursivelyDeleteItems = async (items) => {
+    for (const item of items) {
+        if (item.type === 'folder') {
+            await recursivelyDeleteItems(item.children);
+            // Optionally, delete the physical empty folder if needed
+        } else {
+            // It's a track
+            if (item.src) {
+                const audioPath = path.join(__dirname, item.src);
+                await deleteFileSilently(audioPath);
+            }
+            if (item.hasEmbeddedArtwork) {
+                const artworkPath = path.join(artworkDir, `${item.id}.jpg`);
+                await deleteFileSilently(artworkPath);
+            }
+        }
+    }
+};
+
+app.post('/api/library/delete', async (req, res) => {
+    const { itemIds } = req.body;
+    if (!itemIds || !Array.isArray(itemIds)) {
+        return res.status(400).json({ message: 'itemIds array is required.' });
     }
 
     try {
-        // Delete audio file
-        const audioPath = path.join(__dirname, src);
-        if (fs.existsSync(audioPath)) {
-            await fsPromises.unlink(audioPath);
-            console.log(`[File System] Deleted audio: ${audioPath}`);
-        }
+        const idsToDelete = new Set(itemIds);
+        const itemsToDelete = [];
 
-        // Delete artwork file
-        const artworkPath = path.join(artworkDir, `${id}.jpg`);
-        if (fs.existsSync(artworkPath)) {
-            await fsPromises.unlink(artworkPath);
-            console.log(`[File System] Deleted artwork: ${artworkPath}`);
-        }
+        const filterAndCollect = (children) => {
+            const remainingChildren = [];
+            for (const child of children) {
+                if (idsToDelete.has(child.id)) {
+                    itemsToDelete.push(child);
+                } else {
+                    if (child.type === 'folder') {
+                        child.children = filterAndCollect(child.children);
+                    }
+                    remainingChildren.push(child);
+                }
+            }
+            return remainingChildren;
+        };
+
+        db.data.sharedMediaLibrary.children = filterAndCollect(db.data.sharedMediaLibrary.children);
         
-        res.json({ success: true, message: 'Files deleted successfully.' });
+        // Now, physically delete all collected items and their children
+        await recursivelyDeleteItems(itemsToDelete);
+        
+        await db.write();
+        broadcastLibrary();
+
+        res.json({ success: true, message: 'Items deleted successfully.' });
 
     } catch (error) {
-        console.error('Error deleting track files:', error);
-        res.status(500).json({ message: 'Failed to delete track files.' });
+        console.error('Error deleting library items:', error);
+        res.status(500).json({ message: 'Failed to delete items.' });
     }
 });
 
