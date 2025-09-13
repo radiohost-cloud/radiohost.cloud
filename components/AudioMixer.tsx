@@ -7,6 +7,7 @@ import SignalIndicator from './SignalIndicator';
 import { Toggle } from './Toggle';
 import { GridIcon } from './icons/GridIcon';
 import { UsersIcon } from './icons/UsersIcon';
+import { ServerIcon } from './icons/ServerIcon';
 
 interface AudioMixerProps {
     mixerConfig: MixerConfig;
@@ -57,6 +58,8 @@ const EQ_PRESETS: Record<string, { name: string, bands: { bass: number, mid: num
 const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, audioBuses, onBusChange, availableOutputDevices, policy, onUpdatePolicy, audioLevels, onlinePresenters = [] }) => {
     const [normalizationPreset, setNormalizationPreset] = useState('custom');
     const [eqPreset, setEqPreset] = useState('custom');
+
+    const isHostStudio = policy.playoutMode === 'studio' && sessionStorage.getItem('appMode') === 'HOST';
 
     useEffect(() => {
         const matchingNormPreset = Object.entries(NORMALIZATION_PRESETS).find(
@@ -145,9 +148,18 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
                 <h3 className="text-lg font-semibold text-black dark:text-white">Input Channels</h3>
                 <div className="mt-2 space-y-4">
                     {Object.entries(mixerConfig)
-                        .filter(([id]) => id !== 'pfl') // PFL is managed internally
+                        .filter(([sourceId]) => {
+                            if (sourceId === 'pfl') return false; // PFL is managed internally
+                            if (isHostStudio && sourceId === 'cartwall') return false; // In Host mode, cartwall is mixed on server
+                            return true;
+                        })
                         .map(([sourceId, config]) => {
-                            const meta = getSourceMeta(sourceId as AudioSourceId, onlinePresenters);
+                            let meta = getSourceMeta(sourceId as AudioSourceId, onlinePresenters);
+                            // In Host mode, the "mainPlayer" is actually the monitor feed from the server.
+                            if (isHostStudio && sourceId === 'mainPlayer') {
+                                meta = { name: "Server Output", icon: <ServerIcon className="w-5 h-5"/> };
+                            }
+
                             return (
                                 <div key={sourceId} className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
                                     <div className="flex items-center justify-between mb-2">
