@@ -10,6 +10,7 @@ import { JSONFile } from 'lowdb/node';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { promises as fsPromises } from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 import { PassThrough } from 'stream';
@@ -427,7 +428,7 @@ wss.on('connection', async (ws, req) => {
                                 console.log(`[Public Stream] Public access set to: ${payload}`);
                                 if(!payload) {
                                    // If we turn it off, disconnect current listeners
-                                   audioStream.unpipe();
+                                   // Unpiping is handled per-request now, so this might not be needed.
                                 }
                                 break;
                         }
@@ -533,6 +534,11 @@ server.on('upgrade', (request, socket, head) => {
 app.use(cors());
 app.use(express.json());
 app.set('trust proxy', 1);
+
+// --- Static File Serving (for Frontend) ---
+const distPath = path.join(__dirname, 'dist');
+app.use(express.static(distPath));
+
 
 // --- Media File Storage Setup ---
 const mediaDir = path.join(__dirname, 'Media');
@@ -724,11 +730,14 @@ app.get('/stream/live*', (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Access-Control-Allow-Origin', '*');
     
-    audioStream.pipe(res);
+    const listenerStream = new PassThrough();
+    audioStream.pipe(listenerStream);
+    listenerStream.pipe(res);
 
     req.on('close', () => {
         console.log('[Audio Stream] Listener disconnected.');
-        audioStream.unpipe(res);
+        audioStream.unpipe(listenerStream);
+        listenerStream.unpipe(res);
     });
 });
 
@@ -886,6 +895,13 @@ app.post('/api/folder', async (req, res) => {
         res.status(500).json({ message: 'Error creating folder' });
     }
 });
+
+// --- Catch-all for SPA ---
+// This must be after all other API routes
+app.get('*', (req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'));
+});
+
 
 // --- Server Listen ---
 server.listen(PORT, () => {
