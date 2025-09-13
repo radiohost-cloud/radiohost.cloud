@@ -430,11 +430,13 @@ app.get('/api/userdata/:email', async (req, res) => {
     res.json(data);
 });
 
-const isObject = (item) => {
+// FIX: Change helper functions from const arrow functions to standard function declarations
+// to prevent potential subtle parsing errors with Node's ES Module interpreter.
+function isObject(item) {
   return (item && typeof item === 'object' && !Array.isArray(item));
 }
 
-const deepMerge = (target, source) => {
+function deepMerge(target, source) {
   let output = { ...target };
   if (isObject(target) && isObject(source)) {
     Object.keys(source).forEach(key => {
@@ -701,7 +703,3 @@ server.on('upgrade', (request, socket, head) => {
 server.listen(PORT, () => {
     console.log(`RadioHost.cloud server running on http://localhost:${PORT}`);
 });
-```
-</change>
-</changes>
-```
