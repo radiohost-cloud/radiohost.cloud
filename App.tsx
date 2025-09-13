@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -80,6 +81,7 @@ const defaultPlayoutPolicy: PlayoutPolicy = {
         stationUrl: 'https://radiohost.cloud',
         stationDescription: 'Powered by RadioHost.cloud',
         metadataHeader: '',
+        codec: 'mp3',
     },
 };
 
@@ -409,7 +411,9 @@ const AppInternal: React.FC = () => {
     const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
     const [audioLevels, setAudioLevels] = useState<Partial<Record<AudioSourceId | AudioBusId, number>>>({});
     const [isAudioEngineInitializing, setIsAudioEngineInitializing] = useState(false);
-    const [mainAudioStream, setMainAudioStream] = useState<MediaStream | null>(null);
+    
+    // --- NEW: Audio element for monitoring server stream in HOST mode
+    const monitorStreamAudioRef = useRef<HTMLAudioElement>(null);
 
     const monitorBusAudioRef = useRef<HTMLAudioElement>(null);
 
@@ -810,10 +814,6 @@ const AppInternal: React.FC = () => {
 
             if(monitorBusAudioRef.current && busDestinations.monitor) monitorBusAudioRef.current.srcObject = busDestinations.monitor.stream;
 
-            if (busDestinations.main) {
-                setMainAudioStream(busDestinations.main.stream);
-            }
-
             if (context.state === 'suspended') await context.resume();
 
         } catch (error) { console.error("Failed to initialize Audio graph:", error); }
@@ -821,6 +821,22 @@ const AppInternal: React.FC = () => {
     }, [audioBuses]);
 
     const isStudio = playoutPolicy.playoutMode === 'studio';
+    const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
+
+    // FIX: In HOST mode, set the source for the monitor audio element.
+    useEffect(() => {
+        if (isHostMode && monitorStreamAudioRef.current) {
+            const codec = playoutPolicy.streamingConfig.codec || 'mp3';
+            const streamUrl = `/stream/live.${codec}?t=${Date.now()}`; // Cache bust
+            if (monitorStreamAudioRef.current.src !== streamUrl) {
+                console.log("[Audio] Setting studio monitor stream source to:", streamUrl);
+                monitorStreamAudioRef.current.src = streamUrl;
+                monitorStreamAudioRef.current.load();
+                monitorStreamAudioRef.current.play().catch(e => console.error("Autoplay failed for monitor stream. User interaction might be required.", e));
+            }
+        }
+    }, [isHostMode, playoutPolicy.streamingConfig.codec, isPlaying]); // Re-set src when playback starts
+
 
     useEffect(() => {
         if (isStudio && !audioGraphRef.current.isInitialized && pflAudioRef.current) {
@@ -831,7 +847,6 @@ const AppInternal: React.FC = () => {
 
     useEffect(() => {
         const fetchUsers = async () => {
-            const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
             if(isHostMode && isStudio){
                 try {
                     const users = await dataService.getAllUsers();
@@ -842,7 +857,7 @@ const AppInternal: React.FC = () => {
             }
         };
         fetchUsers();
-    }, [isStudio]);
+    }, [isStudio, isHostMode]);
 
     useEffect(() => {
         // If the user is no longer a studio admin (e.g., switched to presenter mode)
@@ -2477,6 +2492,12 @@ const AppInternal: React.FC = () => {
         }
     }, []);
 
+    const monitorStreamUrl = useMemo(() => {
+        if (!isHostMode) return null;
+        const codec = playoutPolicy.streamingConfig.codec || 'mp3';
+        return `/stream/live.${codec}`;
+    }, [isHostMode, playoutPolicy.streamingConfig.codec]);
+
 
     if (isLoadingSession) {
         return (
@@ -2517,8 +2538,7 @@ const AppInternal: React.FC = () => {
                 trackProgress={trackProgress}
                 isPlaying={isPlaying}
                 isSecureContext={isSecureContext}
-// FIX: Pass mainAudioStream to MobileApp component
-                mainAudioStream={mainAudioStream}
+                monitorStreamUrl={monitorStreamUrl}
             />
         );
     }
@@ -2685,7 +2705,7 @@ const AppInternal: React.FC = () => {
                                         onlinePresenters={onlinePresenters}
                                         audioLevels={audioLevels}
                                         isSecureContext={isSecureContext}
-                                        mainAudioStream={mainAudioStream}
+                                        monitorStreamUrl={monitorStreamUrl}
                                     />
                                 </div>
                             )}
@@ -2742,6 +2762,7 @@ const AppInternal: React.FC = () => {
             
             <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
             <audio ref={monitorBusAudioRef} autoPlay></audio>
+            {isHostMode && isStudio && <audio ref={monitorStreamAudioRef} autoPlay muted={false}/>}
         </div>
     );
 };

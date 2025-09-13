@@ -21,9 +21,9 @@ export const fetchArtwork = async (artist: string, title: string): Promise<strin
             const artworkUrl = result.artworkUrl100 || result.artworkUrl60 || result.artworkUrl30;
             
             if (artworkUrl && typeof artworkUrl === 'string') {
-                // Replace the size in the URL to request a higher resolution image.
-                // This is more robust than matching a specific size like '100x100'.
-                return artworkUrl.replace(/\/\d+x\d+[^/]*$/, '/600x600bb.jpg');
+                // Replace '100x100' with '600x600' to get a higher resolution image.
+                // This is a common and reliable trick for the iTunes API.
+                return artworkUrl.replace('100x100bb.jpg', '600x600bb.jpg');
             }
         }
 

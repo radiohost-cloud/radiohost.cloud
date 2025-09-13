@@ -1,5 +1,6 @@
 
 
+
 export enum TrackType {
   SONG = 'Song',
   JINGLE = 'Jingle',
@@ -91,6 +92,7 @@ export interface StreamingConfig {
   stationUrl: string;
   stationDescription: string;
   metadataHeader?: string;
+  codec?: 'mp3' | 'aac';
 }
 
 export interface PlayoutPolicy {

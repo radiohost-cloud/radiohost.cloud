@@ -1,4 +1,5 @@
 
+
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { UserIcon } from './icons/UserIcon';
 import { LogoutIcon } from './icons/LogoutIcon';
@@ -104,6 +105,8 @@ const Deck: React.FC<{
     
     const progressPercentage = (track?.duration && progress) ? (progress / track.duration) * 100 : 0;
     const isThisTrackPlaying = !!(isCurrent && isPlaying);
+    const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
+
 
     const handleArtworkClick = useCallback(() => {
         if (artworkUrl) {
@@ -156,7 +159,7 @@ const Deck: React.FC<{
                 )}
             </div>
 
-            {isThisTrackPlaying && analyserNode && (
+            {isThisTrackPlaying && analyserNode && !isHostMode && (
                 <div className="absolute top-4 bottom-4 right-2 w-6 z-20 pointer-events-none">
                     <VUMeter analyserNode={analyserNode} />
                 </div>

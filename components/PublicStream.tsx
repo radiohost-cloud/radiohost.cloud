@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { Toggle } from './Toggle';
 import { BroadcastIcon } from './icons/BroadcastIcon';
@@ -37,11 +38,14 @@ const PublicStream: React.FC<PublicStreamProps> = ({
     const [isCopied, setIsCopied] = useState(false);
     const [listeners, setListeners] = useState<Listener[]>([]);
 
+    const selectedCodec = policy.streamingConfig.codec || 'mp3';
+
     useEffect(() => {
         const origin = `${window.location.protocol}//${window.location.hostname}${(window.location.port ? ':'+window.location.port : '')}`;
+        const streamExtension = selectedCodec === 'aac' ? '.aac' : '.mp3';
         setPlayerPageUrl(`${origin}/stream`);
-        setDirectStreamUrl(`${origin}/stream/live.mp3`);
-    }, []);
+        setDirectStreamUrl(`${origin}/stream/live${streamExtension}`);
+    }, [selectedCodec]);
 
     // Fetch listener stats
     useEffect(() => {
@@ -68,12 +72,12 @@ const PublicStream: React.FC<PublicStreamProps> = ({
         });
     };
 
-    const handleMetadataHeaderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        onUpdatePolicy({
+    const handlePolicyChange = <K extends keyof PlayoutPolicy['streamingConfig']>(key: K, value: PlayoutPolicy['streamingConfig'][K]) => {
+         onUpdatePolicy({
             ...policy,
             streamingConfig: {
                 ...policy.streamingConfig,
-                metadataHeader: e.target.value,
+                [key]: value,
             },
         });
     };
@@ -102,19 +106,30 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                 Public Stream
             </h3>
 
-            <div className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                <label htmlFor="metadata-header" className="block text-sm font-medium mb-1">Metadata Header</label>
-                <input
-                    id="metadata-header"
-                    type="text"
-                    placeholder="e.g., You are listening to..."
-                    value={policy.streamingConfig.metadataHeader || ''}
-                    onChange={handleMetadataHeaderChange}
-                    className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"
-                />
-                <p className="text-xs text-neutral-500 mt-1">
-                    Optional text to display before the track title on the player page.
-                </p>
+            <div className="grid grid-cols-2 gap-4">
+                 <div className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                    <label htmlFor="stream-codec" className="block text-sm font-medium mb-1">Codec</label>
+                    <select
+                        id="stream-codec"
+                        value={selectedCodec}
+                        onChange={(e) => handlePolicyChange('codec', e.target.value as 'mp3' | 'aac')}
+                        className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm"
+                    >
+                        <option value="mp3">MP3 (Best Compatibility)</option>
+                        <option value="aac">AAC (Better Quality)</option>
+                    </select>
+                </div>
+                <div className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                    <label htmlFor="metadata-header" className="block text-sm font-medium mb-1">Metadata Header</label>
+                    <input
+                        id="metadata-header"
+                        type="text"
+                        placeholder="e.g., You are listening to..."
+                        value={policy.streamingConfig.metadataHeader || ''}
+                        onChange={(e) => handlePolicyChange('metadataHeader', e.target.value)}
+                        className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"
+                    />
+                </div>
             </div>
 
             <div className="flex items-center justify-between p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
