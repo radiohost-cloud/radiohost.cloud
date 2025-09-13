@@ -1,6 +1,7 @@
 
 
 
+
 export enum TrackType {
   SONG = 'Song',
   JINGLE = 'Jingle',
@@ -19,6 +20,13 @@ export interface VtMixDetails {
   nextFadeIn: number;
 }
 
+export interface LoudnessInfo {
+  i: number; // Integrated loudness in LUFS
+  tp: number; // True Peak in dBTP
+  lra: number; // Loudness Range
+  offset: number; // Target offset
+}
+
 export interface Track {
   id: string;
   originalId?: string; // To store the original library ID when an item is instanced in a playlist
@@ -32,6 +40,7 @@ export interface Track {
   tags?: string[];
   addedBy?: 'auto-fill' | 'user' | 'broadcast';
   vtMix?: VtMixDetails;
+  loudness?: LoudnessInfo; // New: For EBU R128 normalization
 }
 
 export enum TimeMarkerType {
@@ -101,7 +110,7 @@ export interface PlayoutPolicy {
   titleSeparation: number; // in minutes
   removePlayedTracks: boolean;
   normalizationEnabled: boolean;
-  normalizationTargetDb: number; // in dB
+  normalizationTargetDb: number; // in LUFS for EBU R128
   equalizerEnabled: boolean;
   equalizerBands: {
     bass: number; // in dB

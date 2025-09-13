@@ -41,9 +41,10 @@ const getSourceMeta = (sourceId: AudioSourceId, onlinePresenters: User[]): { nam
 
 const NORMALIZATION_PRESETS: Record<string, { name: string, target: number | null }> = {
   custom: { name: 'Custom', target: null },
-  'radio-broadcast': { name: 'Radio Broadcast', target: -14 },
-  streaming: { name: 'Streaming', target: -18 },
-  'podcast-voice': { name: 'Podcast/Voice', target: -20 },
+  'ebu-r128': { name: 'EBU R128 (Broadcast Standard)', target: -23 },
+  'streaming-loud': { name: 'Streaming (Loud)', target: -14 },
+  'streaming-quiet': { name: 'Streaming (Quiet)', target: -18 },
+  'podcast-voice': { name: 'Podcast/Voice', target: -19 },
 };
 
 const EQ_PRESETS: Record<string, { name: string, bands: { bass: number, mid: number, treble: number } | null }> = {
@@ -121,6 +122,7 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
     
     const handleNormalizationPresetChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
         const presetKey = e.target.value;
+        setNormalizationPreset(presetKey);
         const preset = NORMALIZATION_PRESETS[presetKey];
         if (preset && preset.target !== null) {
             handlePolicyChange('normalizationTargetDb', preset.target);
@@ -129,6 +131,7 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
     
     const handleEqPresetChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
         const presetKey = e.target.value;
+        setEqPreset(presetKey);
         const preset = EQ_PRESETS[presetKey];
         if (preset && preset.bands) {
             handlePolicyChange('equalizerBands', preset.bands);
@@ -336,13 +339,13 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
             <hr className="border-neutral-200 dark:border-neutral-800" />
 
             <div>
-                 <h3 className="text-lg font-semibold text-black dark:text-white">Master Output Processing</h3>
-                 <p className="text-xs text-neutral-500">These settings only affect the Main Output bus.</p>
+                 <h3 className="text-lg font-semibold text-black dark:text-white">Player Processing</h3>
+                 <p className="text-xs text-neutral-500">These settings only affect the Main Player channel.</p>
                  <div className="mt-4 space-y-6">
                     <div className="flex items-center justify-between">
                         <div>
-                            <label htmlFor="normalization-enabled" className="text-sm font-medium block cursor-pointer">Audio Normalization (Compressor)</label>
-                            <p className="text-xs text-neutral-500">Adjust track volumes for a consistent level.</p>
+                            <label htmlFor="normalization-enabled" className="text-sm font-medium block cursor-pointer">Apply Loudness Normalization</label>
+                            <p className="text-xs text-neutral-500">Uses EBU R128 data analyzed on upload by FFmpeg.</p>
                         </div>
                         <Toggle id="normalization-enabled" checked={policy.normalizationEnabled} onChange={(v) => handlePolicyChange('normalizationEnabled', v)} />
                     </div>
@@ -360,16 +363,16 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
                             <div>
                                 <label htmlFor="normalization-target" className="flex justify-between text-sm font-medium">
                                     <span>Target Loudness</span>
-                                    <span className="font-mono">{policy.normalizationTargetDb} dB</span>
+                                    <span className="font-mono">{policy.normalizationTargetDb} LUFS</span>
                                 </label>
                                 <input
                                     id="normalization-target"
                                     type="range"
-                                    min="-40"
-                                    max="0"
-                                    step="1"
+                                    min="-24"
+                                    max="-14"
+                                    step="0.5"
                                     value={policy.normalizationTargetDb}
-                                    onChange={(e) => handlePolicyChange('normalizationTargetDb', parseInt(e.target.value, 10))}
+                                    onChange={(e) => handlePolicyChange('normalizationTargetDb', parseFloat(e.target.value))}
                                     className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer mt-1"
                                 />
                             </div>

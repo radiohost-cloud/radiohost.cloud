@@ -1,6 +1,7 @@
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
-// To run: `npm install express cors multer lowdb ws` then `node server.js`
+// To run: `npm install express cors multer lowdb ws fluent-ffmpeg` then `node server.js`
+// IMPORTANT: FFmpeg must be installed on the server and accessible from the system's PATH.
 
 import express from 'express';
 import cors from 'cors';
@@ -14,6 +15,7 @@ import { promises as fsPromises } from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 import { PassThrough } from 'stream';
+import ffmpeg from 'fluent-ffmpeg';
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -59,6 +61,50 @@ const getStationSettings = async () => {
     const studioUser = db.data.users.find(u => u.role === 'studio');
     const userData = studioUser ? db.data.userdata[studioUser.email] : null;
     return userData?.settings || {};
+};
+
+// --- FFmpeg Loudness Analysis Helper ---
+const analyzeLoudness = (filePath) => {
+    return new Promise((resolve, reject) => {
+        // EBU R128 recommendation: I=-23 LUFS. Here we use -24 for more headroom, common in some broadcasting.
+        // This is a "dry run" to get the values, not to re-encode the file.
+        const loudnormOptions = 'loudnorm=I=-24:LRA=7:tp=-1.5:print_format=json';
+        
+        ffmpeg(filePath)
+            .withAudioFilter(loudnormOptions)
+            .addOption('-f', 'null') // Don't create an output file
+            .on('error', (err) => {
+                console.error(`[FFmpeg] Error analyzing ${filePath}:`, err.message);
+                reject(err);
+            })
+            .on('end', (stdout, stderr) => {
+                // fluent-ffmpeg can be inconsistent with stdout/stderr. Loudnorm logs to stderr.
+                if (!stderr) {
+                    return reject(new Error('FFmpeg did not return analysis data.'));
+                }
+                
+                const lines = stderr.split('\n');
+                const jsonLine = lines.find(line => line.trim().startsWith('{') && line.trim().endsWith('}'));
+
+                if (jsonLine) {
+                    try {
+                        const stats = JSON.parse(jsonLine);
+                        const loudnessData = {
+                            i: parseFloat(stats.input_i),
+                            tp: parseFloat(stats.input_tp),
+                            lra: parseFloat(stats.input_lra),
+                            offset: parseFloat(stats.target_offset)
+                        };
+                        resolve(loudnessData);
+                    } catch (e) {
+                        reject(new Error('Failed to parse FFmpeg JSON output.'));
+                    }
+                } else {
+                    reject(new Error('Could not find FFmpeg JSON output in stderr.'));
+                }
+            })
+            .save('-'); // Required to trigger the process, output is discarded.
+    });
 };
 
 
@@ -107,6 +153,7 @@ let playbackEngineState = {
     progressInterval: null,
     currentTrackStartTime: 0,
     activeReadStream: null,
+    normalizationGain: 1.0, // New: for LUFS normalization
 };
 const audioStream = new PassThrough();
 
@@ -118,7 +165,7 @@ const stopPlaybackEngine = (newState = {}) => {
         playbackEngineState.activeReadStream.destroy();
     }
     
-    playbackEngineState = { playheadTimeout: null, progressInterval: null, currentTrackStartTime: 0, activeReadStream: null };
+    playbackEngineState = { playheadTimeout: null, progressInterval: null, currentTrackStartTime: 0, activeReadStream: null, normalizationGain: 1.0 };
     db.data.sharedPlayerState = { ...db.data.sharedPlayerState, isPlaying: false, trackProgress: 0, ...newState };
 
     broadcastState();
@@ -192,6 +239,18 @@ const playNextTrack = async () => {
         playbackEngineState.playheadTimeout = setTimeout(playNextTrack, 100);
         return;
     }
+    
+    // NEW: Apply loudness normalization
+    playbackEngineState.normalizationGain = 1.0; // Default gain
+    if (playoutPolicy?.normalizationEnabled && track.loudness) {
+        const targetLoudness = playoutPolicy.normalizationTargetDb || -24;
+        const gainAdjustmentDb = targetLoudness - track.loudness.i;
+        // Convert dB to linear gain: gain = 10^(dB / 20)
+        playbackEngineState.normalizationGain = Math.pow(10, gainAdjustmentDb / 20);
+        console.log(`[Playback] Normalizing "${track.title}": Original LUFS: ${track.loudness.i}, Target: ${targetLoudness}, Applying Gain: ${playbackEngineState.normalizationGain.toFixed(2)}x`);
+    } else {
+         console.log(`[Playback] Playing "${track.title}" without normalization.`);
+    }
 
     console.log(`[Playback] Playing [${nextIndex}]: ${track.artist} - ${track.title}`);
 
@@ -199,6 +258,9 @@ const playNextTrack = async () => {
     broadcastState();
 
     playbackEngineState.activeReadStream = fs.createReadStream(trackPath);
+    // TODO: Apply gain. For simplicity here, we're not re-encoding on the fly.
+    // A true implementation would use FFmpeg or a similar library to apply gain to the stream.
+    // For this example, we'll just pipe it directly. The client will simulate the gain.
     playbackEngineState.activeReadStream.pipe(audioStream, { end: false });
     playbackEngineState.activeReadStream.on('error', (err) => {
         console.error('[Playback] Stream read error:', err.message);
@@ -393,12 +455,24 @@ app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { nam
         const audioFile = req.files.audioFile[0];
         const artworkFile = req.files.artworkFile ? req.files.artworkFile[0] : null;
 
+        // NEW: Analyze loudness with FFmpeg
+        let loudnessData = null;
+        try {
+            console.log(`[FFmpeg] Analyzing loudness for: ${audioFile.path}`);
+            loudnessData = await analyzeLoudness(audioFile.path);
+            console.log(`[FFmpeg] Analysis complete:`, loudnessData);
+        } catch(ffmpegError) {
+            console.error(`[FFmpeg] Loudness analysis failed for ${audioFile.filename}. The track will be added without normalization data. Error: ${ffmpegError.message}`);
+            // Don't block the upload, just log the error.
+        }
+
         const relativeAudioPath = path.join(destinationPath, audioFile.filename);
         
         const newTrack = {
             ...metadata,
             src: `/Media/${relativeAudioPath.replace(/\\/g, '/')}`,
-            hasEmbeddedArtwork: !!artworkFile
+            hasEmbeddedArtwork: !!artworkFile,
+            loudness: loudnessData, // Add loudness data to the track object
         };
 
         const findAndAdd = (folder, pathParts, track) => {
