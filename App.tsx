@@ -1,4 +1,3 @@
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -81,7 +80,6 @@ const defaultPlayoutPolicy: PlayoutPolicy = {
         stationUrl: 'https://radiohost.cloud',
         stationDescription: 'Powered by RadioHost.cloud',
         metadataHeader: '',
-        codec: 'mp3',
     },
 };
 
@@ -338,7 +336,7 @@ const getAllTags = (node: Folder): string[] => {
 type StreamStatus = 'inactive' | 'starting' | 'broadcasting' | 'error' | 'stopping';
 // --- App Component ---
 
-const App: React.FC = () => {
+const AppInternal: React.FC = () => {
     const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
     const [currentUser, setCurrentUser] = useState<User | null>(null);
     const [isLoadingSession, setIsLoadingSession] = useState(true);
@@ -405,13 +403,13 @@ const App: React.FC = () => {
     const remoteStudioRef = useRef<any>(null);
     const nowPlayingFileHandleRef = useRef<FileSystemFileHandle | null>(null);
     const autoBackupFolderHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
-    const serverMonitorAudioRef = useRef<HTMLAudioElement>(null); // New: For HOST mode monitoring
     
     // --- NEW Audio Mixer State ---
     const [audioBuses, setAudioBuses] = useState<AudioBus[]>(initialBuses);
     const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
     const [audioLevels, setAudioLevels] = useState<Partial<Record<AudioSourceId | AudioBusId, number>>>({});
     const [isAudioEngineInitializing, setIsAudioEngineInitializing] = useState(false);
+    const [mainAudioStream, setMainAudioStream] = useState<MediaStream | null>(null);
 
     const monitorBusAudioRef = useRef<HTMLAudioElement>(null);
 
@@ -748,6 +746,7 @@ const App: React.FC = () => {
 
     }, [isSecureContext]);
 
+    // FIX: Moved initializeAudioGraph function definition before its usage to resolve a "used before its declaration" error.
     const initializeAudioGraph = useCallback(async () => {
        if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !pflAudioRef.current) return;
     
@@ -811,41 +810,28 @@ const App: React.FC = () => {
 
             if(monitorBusAudioRef.current && busDestinations.monitor) monitorBusAudioRef.current.srcObject = busDestinations.monitor.stream;
 
+            if (busDestinations.main) {
+                setMainAudioStream(busDestinations.main.stream);
+            }
+
             if (context.state === 'suspended') await context.resume();
 
         } catch (error) { console.error("Failed to initialize Audio graph:", error); }
         finally { setIsAudioEngineInitializing(false); }
-    }, [audioBuses, isAudioEngineInitializing]);
+    }, [audioBuses]);
 
     const isStudio = playoutPolicy.playoutMode === 'studio';
-    const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
 
     useEffect(() => {
-        if (isStudio && !isHostMode && !audioGraphRef.current.isInitialized && pflAudioRef.current) {
-            console.log("[AudioEngine] Initializing on DEMO studio startup...");
+        if (isStudio && !audioGraphRef.current.isInitialized && pflAudioRef.current) {
+            console.log("[AudioEngine] Initializing on studio startup...");
             initializeAudioGraph();
         }
-    }, [isStudio, isHostMode, initializeAudioGraph]);
-
-    useEffect(() => {
-        const monitorPlayer = serverMonitorAudioRef.current;
-        if (isHostMode && isStudio && monitorPlayer) {
-            const codec = playoutPolicy.streamingConfig.codec || 'mp3';
-            const streamUrl = `/stream/live.${codec}`;
-            if (isPlaying) {
-                 if (monitorPlayer.src !== streamUrl) {
-                    monitorPlayer.src = `${streamUrl}?t=${Date.now()}`;
-                    monitorPlayer.play().catch(e => console.error("Server monitor stream failed to play.", e));
-                 }
-            } else {
-                monitorPlayer.pause();
-                monitorPlayer.src = '';
-            }
-        }
-    }, [isHostMode, isStudio, isPlaying, playoutPolicy.streamingConfig.codec]);
+    }, [isStudio, initializeAudioGraph]);
 
     useEffect(() => {
         const fetchUsers = async () => {
+            const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
             if(isHostMode && isStudio){
                 try {
                     const users = await dataService.getAllUsers();
@@ -856,7 +842,7 @@ const App: React.FC = () => {
             }
         };
         fetchUsers();
-    }, [isStudio, isHostMode]);
+    }, [isStudio]);
 
     useEffect(() => {
         // If the user is no longer a studio admin (e.g., switched to presenter mode)
@@ -1677,10 +1663,11 @@ const App: React.FC = () => {
 
     const handleLogin = useCallback((user: User) => {
         setCurrentUser(user);
+        const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
         if (isHostMode && user.role) {
             setPlayoutPolicy(p => ({ ...p, playoutMode: user.role }));
         }
-    }, [isHostMode]);
+    }, []);
     const handleSignup = useCallback((user: User) => { setCurrentUser(user); }, []);
     const handleLogout = useCallback(async () => {
         await dataService.putAppState('currentUserEmail', null);
@@ -1841,8 +1828,8 @@ const App: React.FC = () => {
         });
     }, []);
 
-    const nextIndex = useMemo(() => findNextPlayableIndex(currentTrackIndex, 1), [findNextPlayableIndex]);
-    const nextNextIndex = useMemo(() => (nextIndex !== -1 ? findNextPlayableIndex(nextIndex, 1) : -1), [nextIndex, findNextPlayableIndex]);
+    const nextIndex = useMemo(() => findNextPlayableIndex(currentTrackIndex, 1), [playlist, currentTrackIndex, findNextPlayableIndex]);
+    const nextNextIndex = useMemo(() => (nextIndex !== -1 ? findNextPlayableIndex(nextIndex, 1) : -1), [playlist, nextIndex, findNextPlayableIndex]);
 
     const nextTrack = useMemo(() => {
         if (nextIndex !== -1 && nextIndex !== currentTrackIndex) {
@@ -2151,7 +2138,7 @@ const App: React.FC = () => {
             }
         }
         return generatedPlaylist;
-    }, [playoutHistoryRef, mediaLibraryRef]);
+    }, [playlistRef, playoutHistoryRef, mediaLibraryRef]);
 
     useEffect(() => {
         const autoFillCheckInterval = setInterval(() => {
@@ -2323,6 +2310,7 @@ const App: React.FC = () => {
 
     // --- NEW: WebSocket Logic for HOST mode ---
     useEffect(() => {
+        const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
         if (!isHostMode || !currentUser) {
             setWsStatus('disconnected');
             return;
@@ -2408,7 +2396,7 @@ const App: React.FC = () => {
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
             ws.close();
         };
-    }, [currentUser, isHostMode, addVoiceTrackToState, isMobile]);
+    }, [currentUser, addVoiceTrackToState, isMobile]);
     
     // Effect to clean up resources for departed presenters
     useEffect(() => {
@@ -2423,34 +2411,340 @@ const App: React.FC = () => {
         if (presentersToClean.length > 0) {
             console.log('[Cleanup] Removing departed presenters:', presentersToClean);
             
-            setMixerConfig(prevConfig => {
-                const newConfig = { ...prevConfig };
-                let changed = false;
-                presentersToClean.forEach(email => {
-                    const sourceId = `remote_${email}`;
-                    if (newConfig[sourceId as keyof MixerConfig]) {
-                        delete newConfig[sourceId as keyof MixerConfig];
-                        changed = true;
-                    }
-                });
-                return changed ? newConfig : prevConfig;
-            });
-
-            // Also cleanup peer connections
+            const newMixerConfig = { ...mixerConfig };
+            let configChanged = false;
+            
             presentersToClean.forEach(email => {
+                const sourceId: AudioSourceId = `remote_${email}`;
+                
                 remoteStudioRef.current?.cleanupConnection(email);
+                
+                const graph = audioGraphRef.current;
+                if (graph.sources[sourceId]) {
+                    (graph.sources[sourceId] as MediaStreamAudioSourceNode).disconnect();
+                    delete graph.sources[sourceId];
+                    console.log(`[AudioGraph] Disconnected and removed source for ${email}`);
+                }
+                
+                if (newMixerConfig[sourceId]) {
+                    delete newMixerConfig[sourceId];
+                    configChanged = true;
+                }
             });
+            
+            if (configChanged) {
+                setMixerConfig(newMixerConfig);
+            }
         }
-    }, [isStudio, onlinePresenters, mixerConfig]);
+    }, [onlinePresenters, isStudio, mixerConfig]);
+
+
+    useEffect(() => {
+        if (isStudio && wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'configUpdate', payload: { logoSrc } }));
+        }
+    }, [logoSrc, isStudio, wsStatus]);
     
-    // FIX: The component return statement was missing due to file truncation.
-    // A placeholder is returned to make the component valid and fix compilation errors.
+    // --- Public Stream State & Logic ---
+    const [isPublicStreamEnabled, setIsPublicStreamEnabled] = useState(false);
+    const [publicStreamStatus, setPublicStreamStatus] = useState<StreamStatus>('inactive');
+    const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
+
+    const handleTogglePublicStream = (enabled: boolean) => {
+        setIsPublicStreamEnabled(enabled);
+        sendStudioAction('togglePublicStream', enabled);
+        // The server will handle status updates. For now, we can optimistically update.
+        if (enabled) {
+            setPublicStreamStatus('broadcasting'); // Assume success
+        } else {
+            setPublicStreamStatus('inactive');
+        }
+    };
+
+    const handleSendChatMessage = useCallback((text: string, from?: string) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            const message: ChatMessage = {
+                from: from || 'Studio',
+                text,
+                timestamp: Date.now(),
+            };
+            wsRef.current.send(JSON.stringify({
+                type: 'chatMessage',
+                payload: message
+            }));
+            // Optimistically add the message to the sender's own UI
+            setChatMessages(prev => [...prev.slice(-100), message]);
+        }
+    }, []);
+
+
+    if (isLoadingSession) {
+        return (
+            <div className="flex flex-col h-screen bg-white dark:bg-black items-center justify-center space-y-6">
+                <LogoIcon className="h-12 w-auto text-black dark:text-white" />
+                <div className="flex items-center gap-4 text-neutral-500 dark:text-neutral-400">
+                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-current"></div>
+                    <span>Loading your studio...</span>
+                </div>
+            </div>
+        );
+    }
+
+    if (!currentUser) {
+        return <Auth onLogin={handleLogin} onSignup={handleSignup} onGoBack={handleGoBackToModeSelector} />;
+    }
+
+    if (isMobile) {
+        return (
+            <MobileApp
+                currentUser={currentUser}
+                onLogout={handleLogout}
+                displayTrack={displayTrack}
+                nextTrack={nextTrack}
+                mixerConfig={mixerConfig}
+                onMixerChange={setMixerConfig}
+                onStreamAvailable={handleSourceStream}
+                ws={wsRef.current}
+                isStudio={isStudio}
+                incomingSignal={rtcSignal}
+                onlinePresenters={onlinePresenters}
+                audioLevels={audioLevels}
+                onInsertVoiceTrack={handleInsertVoiceTrack}
+                chatMessages={chatMessages}
+                onSendChatMessage={handleSendChatMessage}
+                logoSrc={logoSrc}
+                wsStatus={wsStatus}
+                trackProgress={trackProgress}
+                isPlaying={isPlaying}
+                isSecureContext={isSecureContext}
+// FIX: Pass mainAudioStream to MobileApp component
+                mainAudioStream={mainAudioStream}
+            />
+        );
+    }
+
+
     return (
-        <div>
-            <h1>Component UI Missing</h1>
-            <p>The original App.tsx file was truncated, and the UI rendering part of the component was lost. The code logic has been fixed to resolve compilation errors, but the visual part of the application needs to be restored.</p>
+        <div className="flex flex-col h-full bg-white dark:bg-black text-black dark:text-white font-sans overflow-hidden">
+            <>
+                <div
+                    style={{ height: `${headerHeight}px` }}
+                    className="relative flex-shrink-0 bg-neutral-100/50 dark:bg-neutral-900/50 transition-[height] duration-200 ease-out"
+                    onWheel={handleHeaderWheel}
+                >
+                    <Header
+                        currentUser={currentUser}
+                        onLogout={handleLogout}
+                        currentTrack={displayTrack}
+                        onNext={handleNext}
+                        onPrevious={handlePrevious}
+                        isPlaying={isPlaying}
+                        onTogglePlay={handleTogglePlay}
+                        isPresenterLive={mixerConfig.mic.sends.main.enabled}
+                        progress={trackProgress}
+                        logoSrc={logoSrc}
+                        onLogoChange={handleLogoChange}
+                        onLogoReset={handleLogoReset}
+                        headerGradient={headerGradient}
+                        headerTextColor={headerTextColor}
+                        onOpenHelp={() => setIsHelpModalOpen(true)}
+                        isAutoModeEnabled={isAutoModeEnabled}
+                        onToggleAutoMode={handleToggleAutoMode}
+                        onArtworkClick={handleOpenArtworkModal}
+                        onArtworkLoaded={handleArtworkLoaded}
+                        headerHeight={headerHeight}
+                        nextTrack={nextTrack}
+                        nextNextTrack={nextNextTrack}
+                        onPlayTrack={handlePlayTrack}
+                        onEject={handleRemoveFromPlaylist}
+                        mainPlayerAnalyser={audioGraphRef.current.analysers?.mainPlayer || null}
+                        playoutMode={playoutPolicy.playoutMode}
+                        wsStatus={wsStatus}
+                    />
+                </div>
+                <VerticalResizer
+                    onMouseDown={handleHeaderResizeMouseDown}
+                    onDoubleClick={handleHeaderResizeDoubleClick}
+                    title="Drag to resize player, double-click to toggle visibility"
+                />
+                <main ref={mainRef} className="flex-grow flex p-4 min-h-0">
+                    <div style={{ flexBasis: `${displayedColumnWidths[0]}%` }} className={`flex-shrink-0 h-full overflow-hidden transition-all duration-300 ease-in-out ${!isLibraryCollapsed && 'border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900'}`}>
+                        <MediaLibrary
+                            rootFolder={mediaLibrary}
+                            onAddToPlaylist={(track) => handleAttemptToAddTrack(track, null)}
+                            onAddTracksToLibrary={handleAddTracksToLibrary}
+                            onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
+                            onRemoveFromLibrary={handleRemoveFromLibrary}
+                            onRemoveMultipleFromLibrary={handleRemoveMultipleFromLibrary}
+                            onCreateFolder={handleCreateFolder}
+                            onMoveItem={handleMoveItemInLibrary}
+                            onOpenMetadataSettings={(folder) => setEditingMetadataFolder(folder)}
+                            onOpenTrackMetadataEditor={(track) => setEditingTrack(track)}
+                            onUpdateTrackTags={handleUpdateTrackTags}
+                            onUpdateFolderTags={handleUpdateFolderTags}
+                            onPflTrack={handlePflTrack}
+                            pflTrackId={pflTrackId}
+                            onLibraryUpdate={setMediaLibrary}
+                            playoutMode={playoutPolicy.playoutMode}
+                        />
+                    </div>
+
+                    <Resizer onMouseDown={handleMouseDown(0)} onDoubleClick={handleToggleLibraryCollapse} title="Double-click to toggle Library panel" />
+
+                    <div style={{ flexBasis: `${displayedColumnWidths[1]}%` }} className="h-full min-w-0 border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900 overflow-hidden">
+                        <Playlist
+                            items={playlist}
+                            currentPlayingItemId={currentPlayingItemId}
+                            currentTrackIndex={currentTrackIndex}
+                            onRemove={handleRemoveFromPlaylist}
+                            onReorder={handleReorderPlaylist}
+                            onPlayTrack={handlePlayTrack}
+                            onInsertTrack={handleAttemptToAddTrack}
+                            isPlaying={isPlaying}
+                            stopAfterTrackId={stopAfterTrackId}
+                            onSetStopAfterTrackId={handleSetStopAfterTrackId}
+                            trackProgress={trackProgress}
+                            onClearPlaylist={handleClearPlaylist}
+                            onPflTrack={handlePflTrack}
+                            pflTrackId={pflTrackId}
+                            isPflPlaying={isPflPlaying}
+                            pflProgress={pflProgress}
+                            mediaLibrary={mediaLibrary}
+                            timeline={timeline}
+                            onInsertTimeMarker={handleInsertTimeMarker}
+                            onUpdateTimeMarker={handleUpdateTimeMarker}
+                            onInsertVoiceTrack={handleInsertVoiceTrack}
+                            policy={playoutPolicy}
+                            isContributor={playoutPolicy.playoutMode === 'presenter'}
+                        />
+                    </div>
+
+                    <Resizer onMouseDown={handleMouseDown(1)} onDoubleClick={handleToggleRightColumnCollapse} title="Double-click to toggle Side panel" />
+
+                    <div style={{ flexBasis: `${displayedColumnWidths[2]}%` }} className={`flex-shrink-0 h-full flex flex-col overflow-hidden transition-all duration-300 ease-in-out ${!isRightColumnCollapsed && 'border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900'}`}>
+                         <div className="flex-grow flex flex-col min-h-0">
+                            <div className="flex-shrink-0 border-b border-neutral-200 dark:border-neutral-800">
+                                <nav className="flex justify-around text-center">
+                                    <button onClick={() => setActiveRightColumnTab('cartwall')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'cartwall' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Cartwall">Cartwall</button>
+                                    {isStudio && <button onClick={() => setActiveRightColumnTab('scheduler')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'scheduler' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Scheduler">Scheduler</button>}
+                                    {isStudio && <button onClick={() => { setActiveRightColumnTab('chat'); setHasUnreadChat(false); }} className={`px-3 py-2 w-full text-sm font-semibold transition-colors relative ${activeRightColumnTab === 'chat' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Chat">{hasUnreadChat && <span className="absolute top-1 right-2 w-2 h-2 bg-red-500 rounded-full"></span>}Chat</button>}
+                                    <button onClick={() => setActiveRightColumnTab('lastfm')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'lastfm' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Last.fm Info">Last.fm</button>
+                                    {isStudio && <button onClick={() => setActiveRightColumnTab('mixer')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'mixer' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Mixer">Mixer</button>}
+                                    {isStudio && <button onClick={() => setActiveRightColumnTab('users')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'users' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Users">Users</button>}
+                                    {isStudio && <button onClick={() => setActiveRightColumnTab('stream')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'stream' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Stream">Stream</button>}
+                                    {isStudio && <button onClick={() => setActiveRightColumnTab('settings')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'settings' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Settings">Settings</button>}
+                                </nav>
+                            </div>
+                            <div className="flex-grow relative">
+                                <div className="absolute inset-0 overflow-y-auto">
+                                    {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(newGrid) => setPlayoutPolicy(p => ({ ...p, cartwallGrid: newGrid }))} audioContext={audioGraphRef.current.context} destinationNode={audioGraphRef.current.sourceGains.cartwall || null} onActivePlayerCountChange={handleActiveCartwallPlayerCountChange} />}
+                                    {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
+                                    {isStudio && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
+                                    {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} apiKey={playoutPolicy.lastFmApiKey} />}
+                                    {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} onlinePresenters={onlinePresenters}/>}
+                                    {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
+                                    {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
+                                        isPublicStreamEnabled={isPublicStreamEnabled}
+                                        publicStreamStatus={publicStreamStatus}
+                                        publicStreamError={publicStreamError}
+                                        onTogglePublicStream={handleTogglePublicStream}
+                                        isSecureContext={isSecureContext}
+                                        policy={playoutPolicy}
+                                        onUpdatePolicy={setPlayoutPolicy}
+                                    />}
+                                    {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isNowPlayingExportEnabled={isNowPlayingExportEnabled} onSetIsNowPlayingExportEnabled={setIsNowPlayingExportEnabled} onSetNowPlayingFile={handleSetNowPlayingFile} nowPlayingFileName={nowPlayingFileName} metadataFormat={metadataFormat} onSetMetadataFormat={setMetadataFormat} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} onSetAutoBackupFolder={handleSetAutoBackupFolder} autoBackupFolderPath={autoBackupFolderPath} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} allFolders={allFolders} allTags={allTags} />}
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex-shrink-0 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900">
+                            <div
+                                className="flex justify-between items-center p-3 cursor-pointer hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50"
+                                onClick={() => setIsMicPanelCollapsed(p => !p)}
+                                aria-expanded={!isMicPanelCollapsed}
+                                aria-controls="mic-panel"
+                            >
+                                <div className="flex items-center gap-2">
+                                    <MicrophoneIcon className="w-5 h-5" />
+                                    <h3 className="font-semibold text-black dark:text-white">Microphone</h3>
+                                </div>
+                                <button className="text-black dark:text-white">
+                                    {isMicPanelCollapsed ? <ChevronUpIcon className="w-5 h-5" /> : <ChevronDownIcon className="w-5 h-5" />}
+                                </button>
+                            </div>
+                            {!isMicPanelCollapsed && (
+                                <div id="mic-panel">
+                                    <RemoteStudio
+                                        ref={remoteStudioRef}
+                                        mixerConfig={mixerConfig}
+                                        onMixerChange={setMixerConfig}
+                                        onStreamAvailable={handleSourceStream}
+                                        ws={wsRef.current}
+                                        currentUser={currentUser}
+                                        isStudio={playoutPolicy.playoutMode === 'studio'}
+                                        incomingSignal={rtcSignal}
+                                        onlinePresenters={onlinePresenters}
+                                        audioLevels={audioLevels}
+                                        isSecureContext={isSecureContext}
+                                        mainAudioStream={mainAudioStream}
+                                    />
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </main>
+            </>
+             <MetadataSettingsModal
+                folder={editingMetadataFolder}
+                onClose={() => setEditingMetadataFolder(null)}
+                onSave={handleUpdateFolderMetadataSettings}
+             />
+             <TrackMetadataModal
+                track={editingTrack}
+                onClose={() => setEditingTrack(null)}
+                onSave={handleUpdateTrackMetadata}
+             />
+             <HelpModal
+                isOpen={isHelpModalOpen}
+                onClose={() => setIsHelpModalOpen(false)}
+             />
+            <PwaInstallModal
+                isOpen={isPwaModalOpen}
+                onClose={handleClosePwaModal}
+             />
+            <WhatsNewPopup
+                isOpen={isWhatsNewOpen}
+                onClose={handleCloseWhatsNewPopup}
+            />
+            <ArtworkModal
+                isOpen={isArtworkModalOpen}
+                artworkUrl={artworkModalUrl}
+                onClose={handleCloseArtworkModal}
+            />
+             <ConfirmationDialog
+                isOpen={!!validationWarning}
+                onClose={() => setValidationWarning(null)}
+                onConfirm={handleConfirmValidationAndAddTrack}
+                title="Playout Policy Warning"
+                confirmText="Add Anyway"
+                confirmButtonClass="bg-yellow-600 hover:bg-yellow-500 text-black"
+            >
+                {validationWarning?.message}
+            </ConfirmationDialog>
+            <BroadcastEditor
+                isOpen={isBroadcastEditorOpen}
+                onClose={handleCloseBroadcastEditor}
+                onSave={handleSaveBroadcast}
+                existingBroadcast={editingBroadcast}
+                mediaLibrary={mediaLibrary}
+                onVoiceTrackCreate={handleVoiceTrackCreate}
+                policy={playoutPolicy}
+            />
+            
+            <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
+            <audio ref={monitorBusAudioRef} autoPlay></audio>
         </div>
     );
 };
 
+const App = React.memo(AppInternal);
 export default App;

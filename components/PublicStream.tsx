@@ -3,7 +3,7 @@ import { Toggle } from './Toggle';
 import { BroadcastIcon } from './icons/BroadcastIcon';
 import { ShareIcon } from './icons/ShareIcon';
 import { UsersIcon } from './icons/UsersIcon';
-import { type PlayoutPolicy, StreamingConfig } from '../types';
+import { type PlayoutPolicy } from '../types';
 
 type StreamStatus = 'inactive' | 'starting' | 'broadcasting' | 'error' | 'stopping';
 
@@ -39,10 +39,9 @@ const PublicStream: React.FC<PublicStreamProps> = ({
 
     useEffect(() => {
         const origin = `${window.location.protocol}//${window.location.hostname}${(window.location.port ? ':'+window.location.port : '')}`;
-        const codec = policy.streamingConfig.codec || 'mp3';
         setPlayerPageUrl(`${origin}/stream`);
-        setDirectStreamUrl(`${origin}/stream/live.${codec}`);
-    }, [policy.streamingConfig.codec]);
+        setDirectStreamUrl(`${origin}/stream/live.mp3`);
+    }, []);
 
     // Fetch listener stats
     useEffect(() => {
@@ -69,12 +68,12 @@ const PublicStream: React.FC<PublicStreamProps> = ({
         });
     };
 
-    const handleStreamingConfigChange = (key: keyof StreamingConfig, value: any) => {
+    const handleMetadataHeaderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         onUpdatePolicy({
             ...policy,
             streamingConfig: {
                 ...policy.streamingConfig,
-                [key]: value,
+                metadataHeader: e.target.value,
             },
         });
     };
@@ -103,30 +102,20 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                 Public Stream
             </h3>
 
-             <div className="grid grid-cols-2 gap-4">
-                <div className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                    <label htmlFor="station-name" className="block text-sm font-medium mb-1">Station Name</label>
-                    <input
-                        id="station-name" type="text" placeholder="My Radio Station"
-                        value={policy.streamingConfig.stationName || ''}
-                        onChange={(e) => handleStreamingConfigChange('stationName', e.target.value)}
-                        className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm"
-                    />
-                </div>
-                <div className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                    <label htmlFor="codec" className="block text-sm font-medium mb-1">Codec</label>
-                    <select
-                        id="codec"
-                        value={policy.streamingConfig.codec || 'mp3'}
-                        onChange={(e) => handleStreamingConfigChange('codec', e.target.value)}
-                        className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm"
-                    >
-                        <option value="mp3">MP3</option>
-                        <option value="aac">AAC</option>
-                    </select>
-                </div>
-             </div>
-
+            <div className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                <label htmlFor="metadata-header" className="block text-sm font-medium mb-1">Metadata Header</label>
+                <input
+                    id="metadata-header"
+                    type="text"
+                    placeholder="e.g., You are listening to..."
+                    value={policy.streamingConfig.metadataHeader || ''}
+                    onChange={handleMetadataHeaderChange}
+                    className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"
+                />
+                <p className="text-xs text-neutral-500 mt-1">
+                    Optional text to display before the track title on the player page.
+                </p>
+            </div>
 
             <div className="flex items-center justify-between p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
                 <div>

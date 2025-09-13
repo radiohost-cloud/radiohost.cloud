@@ -763,16 +763,9 @@ app.get('/stream/live*', (req, res) => {
     if (!playbackEngineState.isPublicStreamEnabled) {
         return res.status(403).send('Public stream is not enabled.');
     }
-
-    // FIX: Dynamically set content type based on file extension
-    let mimeType = 'audio/mpeg'; // Default to mp3
-    if (req.path.endsWith('.aac')) {
-        mimeType = 'audio/aac';
-    }
-    currentMimeType = mimeType;
     
-    console.log(`[Audio Stream] New listener connected. Serving as ${mimeType}.`);
-    res.setHeader('Content-Type', mimeType);
+    console.log('[Audio Stream] New listener connected.');
+    res.setHeader('Content-Type', currentMimeType);
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Access-Control-Allow-Origin', '*');

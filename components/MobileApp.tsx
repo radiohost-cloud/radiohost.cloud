@@ -33,7 +33,7 @@ interface MobileAppProps {
     trackProgress: number;
     isPlaying: boolean;
     isSecureContext: boolean;
-    monitorStreamUrl: string | null;
+    mainAudioStream: MediaStream | null;
 }
 
 const MobilePlayer: React.FC<{ 
@@ -134,14 +134,13 @@ const BottomNavItem: React.FC<{
 const MobileApp: React.FC<MobileAppProps> = ({
     currentUser, onLogout, displayTrack, nextTrack, mixerConfig, onMixerChange, onStreamAvailable,
     ws, isStudio, incomingSignal, onlinePresenters, audioLevels, onInsertVoiceTrack, chatMessages,
-    onSendChatMessage, logoSrc, wsStatus, trackProgress, isPlaying, isSecureContext, monitorStreamUrl
+    onSendChatMessage, logoSrc, wsStatus, trackProgress, isPlaying, isSecureContext, mainAudioStream
 }) => {
     const [activeTab, setActiveTab] = useState<'player' | 'mic'>('player');
     const [isVtRecorderOpen, setIsVtRecorderOpen] = useState(false);
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [hasUnreadChat, setHasUnreadChat] = useState(false);
     const prevMessagesCount = useRef(chatMessages.length);
-    const monitorAudioRef = useRef<HTMLAudioElement>(null);
 
     useEffect(() => {
         if (chatMessages.length > prevMessagesCount.current && !isChatOpen) {
@@ -150,20 +149,6 @@ const MobileApp: React.FC<MobileAppProps> = ({
         prevMessagesCount.current = chatMessages.length;
     }, [chatMessages, isChatOpen]);
 
-    // FIX: Play the server monitor stream for presenters
-    useEffect(() => {
-        if (monitorAudioRef.current && currentUser?.role === 'presenter') {
-            if (monitorStreamUrl && isPlaying) {
-                 if (monitorAudioRef.current.src !== monitorStreamUrl) {
-                     monitorAudioRef.current.src = `${monitorStreamUrl}?t=${Date.now()}`; // Bust cache
-                     monitorAudioRef.current.play().catch(e => console.error("Autoplay of monitor stream failed.", e));
-                }
-            } else {
-                monitorAudioRef.current.pause();
-                monitorAudioRef.current.src = '';
-            }
-        }
-    }, [monitorStreamUrl, isPlaying, currentUser?.role]);
 
     const handleSaveVt = useCallback((track: Track, blob: Blob) => {
         const simplifiedVtMix: VtMixDetails = {
@@ -182,7 +167,6 @@ const MobileApp: React.FC<MobileAppProps> = ({
 
     return (
         <div className="flex flex-col h-full bg-black text-white font-sans">
-            <audio ref={monitorAudioRef} style={{ display: 'none' }} />
             <header className="flex-shrink-0 flex items-center justify-between p-4 bg-neutral-900 border-b border-neutral-800 z-20 relative">
                 <div className="w-10"></div>
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -214,7 +198,7 @@ const MobileApp: React.FC<MobileAppProps> = ({
                         mixerConfig={mixerConfig} onMixerChange={onMixerChange} onStreamAvailable={onStreamAvailable}
                         ws={ws} currentUser={currentUser} isStudio={isStudio} incomingSignal={incomingSignal}
                         onlinePresenters={onlinePresenters} audioLevels={audioLevels} isSecureContext={isSecureContext}
-                        monitorStreamUrl={monitorStreamUrl}
+                        mainAudioStream={mainAudioStream}
                     />
                 </div>
             </main>

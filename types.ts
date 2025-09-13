@@ -91,7 +91,6 @@ export interface StreamingConfig {
   stationUrl: string;
   stationDescription: string;
   metadataHeader?: string;
-  codec?: 'mp3' | 'aac'; // New: Codec selection
 }
 
 export interface PlayoutPolicy {

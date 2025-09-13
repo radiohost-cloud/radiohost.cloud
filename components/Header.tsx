@@ -100,8 +100,7 @@ const Deck: React.FC<{
     onEject: (trackId: string) => void;
     analyserNode?: AnalyserNode | null;
     playoutMode: 'studio' | 'presenter' | undefined;
-    isServerPlayout: boolean;
-}> = ({ track, artworkUrl, label, isCurrent, progress, onArtworkClick, onTogglePlay, onNext, onPrevious, isPlaying, onPlayTrack, onEject, analyserNode, playoutMode, isServerPlayout }) => {
+}> = ({ track, artworkUrl, label, isCurrent, progress, onArtworkClick, onTogglePlay, onNext, onPrevious, isPlaying, onPlayTrack, onEject, analyserNode, playoutMode }) => {
     
     const progressPercentage = (track?.duration && progress) ? (progress / track.duration) * 100 : 0;
     const isThisTrackPlaying = !!(isCurrent && isPlaying);
@@ -157,7 +156,7 @@ const Deck: React.FC<{
                 )}
             </div>
 
-            {isThisTrackPlaying && analyserNode && !isServerPlayout && (
+            {isThisTrackPlaying && analyserNode && (
                 <div className="absolute top-4 bottom-4 right-2 w-6 z-20 pointer-events-none">
                     <VUMeter analyserNode={analyserNode} />
                 </div>
@@ -358,7 +357,6 @@ const Header: React.FC<HeaderProps> = ({
                         onEject={onEject}
                         analyserNode={mainPlayerAnalyser}
                         playoutMode={playoutMode}
-                        isServerPlayout={isHostMode}
                     />
                     <Deck 
                         track={nextTrack} 
@@ -368,7 +366,6 @@ const Header: React.FC<HeaderProps> = ({
                         onPlayTrack={onPlayTrack}
                         onEject={onEject}
                         playoutMode={playoutMode}
-                        isServerPlayout={isHostMode}
                     />
                     <Deck 
                         track={nextNextTrack} 
@@ -378,7 +375,6 @@ const Header: React.FC<HeaderProps> = ({
                         onPlayTrack={onPlayTrack}
                         onEject={onEject} 
                         playoutMode={playoutMode}
-                        isServerPlayout={isHostMode}
                     />
                 </div>
 
