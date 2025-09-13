@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Toggle } from './Toggle';
 import { BroadcastIcon } from './icons/BroadcastIcon';
 import { ShareIcon } from './icons/ShareIcon';
@@ -17,13 +17,7 @@ interface PublicStreamProps {
     isPublicStreamEnabled: boolean;
     publicStreamStatus: StreamStatus;
     publicStreamError: string | null;
-    publicStreamCodec: string;
-    publicStreamBitrate: number;
     onTogglePublicStream: (enabled: boolean) => void;
-    onConfigChange: (config: { codec: string; bitrate: number; }) => void;
-    availableFormats: { id: string, name: string, mimeType: string, bitrates: number[] }[];
-    isAudioEngineReady: boolean;
-    isAudioEngineInitializing: boolean;
     isSecureContext: boolean;
     policy: PlayoutPolicy;
     onUpdatePolicy: (policy: PlayoutPolicy) => void;
@@ -33,13 +27,7 @@ const PublicStream: React.FC<PublicStreamProps> = ({
     isPublicStreamEnabled, 
     publicStreamStatus, 
     publicStreamError, 
-    publicStreamCodec, 
-    publicStreamBitrate, 
     onTogglePublicStream, 
-    onConfigChange,
-    availableFormats,
-    isAudioEngineReady,
-    isAudioEngineInitializing,
     isSecureContext,
     policy,
     onUpdatePolicy
@@ -52,17 +40,8 @@ const PublicStream: React.FC<PublicStreamProps> = ({
     useEffect(() => {
         const origin = `${window.location.protocol}//${window.location.hostname}${(window.location.port ? ':'+window.location.port : '')}`;
         setPlayerPageUrl(`${origin}/stream`);
-
-        const selectedFormat = availableFormats.find(f => f.id === publicStreamCodec);
-        let extension = '.bin';
-        if (selectedFormat) {
-            const mime = selectedFormat.mimeType;
-            if (mime.includes('webm')) extension = '.webm';
-            else if (mime.includes('mp4')) extension = '.mp4';
-            else if (mime.includes('mpeg')) extension = '.mp3';
-        }
-        setDirectStreamUrl(`${origin}/stream/live${extension}`);
-    }, [publicStreamCodec, availableFormats]);
+        setDirectStreamUrl(`${origin}/stream/live.mp3`);
+    }, []);
 
     // Fetch listener stats
     useEffect(() => {
@@ -109,17 +88,12 @@ const PublicStream: React.FC<PublicStreamProps> = ({
         }
     }, [publicStreamStatus]);
 
-    const isToggleDisabled = !isAudioEngineReady || isAudioEngineInitializing || !isSecureContext;
-    const isSettingsDisabled = publicStreamStatus !== 'inactive' || isToggleDisabled;
+    const isToggleDisabled = !isSecureContext;
 
     const helperText = useMemo(() => {
         if (!isSecureContext) return "Requires a secure (HTTPS) connection.";
-        if (isAudioEngineInitializing) return "Initializing audio engine...";
-        if (!isAudioEngineReady) return "Audio engine inactive. Play a track to start it.";
         return "Broadcast your main output to a public URL.";
-    }, [isSecureContext, isAudioEngineInitializing, isAudioEngineReady]);
-
-    const selectedFormat = availableFormats.find(f => f.id === publicStreamCodec);
+    }, [isSecureContext]);
 
     return (
         <div className="p-4 space-y-4 h-full flex flex-col">
@@ -128,54 +102,19 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                 Public Stream
             </h3>
 
-            {/* Stream Settings */}
-            <div className={`space-y-4 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg ${isSettingsDisabled ? 'opacity-60' : ''}`}>
-                <div>
-                    <label htmlFor="codec-select" className="block text-sm font-medium mb-1">Codec</label>
-                    <select
-                        id="codec-select"
-                        value={publicStreamCodec}
-                        onChange={e => onConfigChange({ codec: e.target.value, bitrate: publicStreamBitrate })}
-                        disabled={isSettingsDisabled}
-                        className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"
-                    >
-                        {availableFormats.map(f => (
-                            <option key={f.id} value={f.id}>{f.name}</option>
-                        ))}
-                    </select>
-                    <p className="text-xs text-neutral-500 mt-1">
-                        Opus has higher quality. AAC/MP3 have maximum compatibility (e.g., Apple devices).
-                    </p>
-                </div>
-                <div>
-                    <label htmlFor="bitrate-select" className="block text-sm font-medium mb-1">Bitrate</label>
-                    <select
-                        id="bitrate-select"
-                        value={publicStreamBitrate}
-                        onChange={e => onConfigChange({ codec: publicStreamCodec, bitrate: Number(e.target.value) })}
-                        disabled={isSettingsDisabled || !selectedFormat}
-                        className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"
-                    >
-                        {selectedFormat?.bitrates.map(b => (
-                            <option key={b} value={b}>{b / 1000} kbps</option>
-                        ))}
-                    </select>
-                </div>
-                <div>
-                    <label htmlFor="metadata-header" className="block text-sm font-medium mb-1">Metadata Header</label>
-                    <input
-                        id="metadata-header"
-                        type="text"
-                        placeholder="e.g., You are listening to..."
-                        value={policy.streamingConfig.metadataHeader || ''}
-                        onChange={handleMetadataHeaderChange}
-                        disabled={isSettingsDisabled}
-                        className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"
-                    />
-                    <p className="text-xs text-neutral-500 mt-1">
-                        Optional text to display before the track title.
-                    </p>
-                </div>
+            <div className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                <label htmlFor="metadata-header" className="block text-sm font-medium mb-1">Metadata Header</label>
+                <input
+                    id="metadata-header"
+                    type="text"
+                    placeholder="e.g., You are listening to..."
+                    value={policy.streamingConfig.metadataHeader || ''}
+                    onChange={handleMetadataHeaderChange}
+                    className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"
+                />
+                <p className="text-xs text-neutral-500 mt-1">
+                    Optional text to display before the track title on the player page.
+                </p>
             </div>
 
             <div className="flex items-center justify-between p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
@@ -216,7 +155,6 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                         </div>
                         <p className="text-xs text-neutral-500 mt-1">Share this link for an easy-to-use web player.</p>
                     </div>
-
 
                     <div className="flex-grow flex flex-col min-h-0 pt-2">
                         <h4 className="flex-shrink-0 text-sm font-medium mb-2 flex items-center gap-2">

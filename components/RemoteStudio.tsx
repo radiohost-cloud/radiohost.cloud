@@ -26,7 +26,8 @@ type MicStatus = 'disconnected' | 'connecting' | 'ready' | 'error';
 const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref) => {
     const { mixerConfig, onMixerChange, onStreamAvailable, ws, currentUser, isStudio, incomingSignal, onlinePresenters, audioLevels, isSecureContext } = props;
     const [micStatus, setMicStatus] = useState<MicStatus>('disconnected');
-    const isLive = mixerConfig.mic.sends.main.enabled;
+    const isLiveInStudio = mixerConfig.mic.sends.main.enabled;
+    const [isSendingToStudio, setIsSendingToStudio] = useState(false);
     const [volume, setVolume] = useState(0);
     const [errorMessage, setErrorMessage] = useState('');
     const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
@@ -37,7 +38,6 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
     const animationFrameId = useRef<number | null>(null);
     const audioContextRef = useRef<AudioContext | null>(null);
 
-    // WebRTC refs
     const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
 
     const visualize = useCallback(() => {
@@ -113,14 +113,15 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         } catch (err) {
             console.error("Error accessing microphone:", err);
             setMicStatus('error');
-            onMixerChange(prev => ({ ...prev, mic: { ...prev.mic, sends: { ...prev.mic.sends, main: { ...prev.mic.sends.main, enabled: false } } } }));
+            if (isStudio) onMixerChange(prev => ({ ...prev, mic: { ...prev.mic, sends: { ...prev.mic.sends, main: { ...prev.mic.sends.main, enabled: false } } } }));
+            else setIsSendingToStudio(false);
             if (err instanceof Error) {
                 if(err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') setErrorMessage('Microphone permission denied.');
                 else if (err.name === 'NotFoundError') setErrorMessage('Selected microphone not found.');
                 else setErrorMessage('Could not access microphone.');
             }
         }
-    }, [micStatus, audioInputDevices.length, onStreamAvailable, updateDeviceLists, visualize, onMixerChange, isSecureContext]);
+    }, [micStatus, audioInputDevices.length, onStreamAvailable, updateDeviceLists, visualize, onMixerChange, isSecureContext, isStudio]);
 
     useEffect(() => {
         return () => {
@@ -147,39 +148,24 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         if (isStudio) {
             pc.ontrack = (event) => {
                 if (event.track.kind !== 'audio') return;
-
                 console.log(`[WebRTC] Received remote audio track from ${remoteUserEmail}`);
                 const sourceId: AudioSourceId = `remote_${remoteUserEmail}`;
-                
                 const remoteStream = new MediaStream([event.track]);
                 onStreamAvailable(remoteStream, sourceId);
-                
-                onMixerChange(prevConfig => {
-                    if (prevConfig[sourceId]) return prevConfig;
-                    
-                    console.log(`[Mixer] Adding new channel for remote presenter: ${remoteUserEmail}`);
-                    const newConfig = { ...prevConfig };
-                    newConfig[sourceId] = { 
-                        gain: 1, 
-                        muted: false, 
-                        sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } 
-                    };
-                    return newConfig;
-                });
             };
         }
 
         peerConnectionsRef.current.set(remoteUserEmail, pc);
         return pc;
-    }, [isStudio, onStreamAvailable, onMixerChange, ws]);
-    
-    const handleMicToggle = async () => {
-        if (micStatus === 'connecting' || !isSecureContext) return;
-        const willBeLive = !isLive;
+    }, [isStudio, onStreamAvailable, ws]);
 
-        if (willBeLive) {
-            if (micStatus !== 'ready') await connectMicrophone(selectedInputDeviceId);
-            if (!isStudio && ws && streamRef.current) {
+    const handlePresenterBroadcastToggle = async () => {
+        const willBeSending = !isSendingToStudio;
+        setIsSendingToStudio(willBeSending);
+
+        if (willBeSending) {
+            await connectMicrophone(selectedInputDeviceId);
+            if (ws && streamRef.current) {
                 const pc = createPeerConnection('studio');
                 streamRef.current.getTracks().forEach(track => pc.addTrack(track, streamRef.current!));
                 const offer = await pc.createOffer();
@@ -187,32 +173,24 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
                 sendSignal('studio', { sdp: offer });
             }
         } else {
-            if (!isStudio) {
-                peerConnectionsRef.current.get('studio')?.close();
-                peerConnectionsRef.current.delete('studio');
-            }
+            const pc = peerConnectionsRef.current.get('studio');
+            pc?.close();
+            peerConnectionsRef.current.delete('studio');
         }
-        
-        if (!isStudio && ws) {
-            ws.send(JSON.stringify({
-                type: 'presenter-state-change',
-                payload: { onAir: willBeLive }
-            }));
-        }
+    };
 
-        onMixerChange(prev => ({ ...prev, mic: { ...prev.mic, sends: { ...prev.mic.sends, main: { ...prev.mic.sends.main, enabled: willBeLive } } } }));
+    const handleStudioMicToggle = () => {
+        onMixerChange(prev => ({ ...prev, mic: { ...prev.mic, sends: { ...prev.mic.sends, main: { ...prev.mic.sends.main, enabled: !isLiveInStudio } } } }));
     };
 
     useEffect(() => {
         if (!incomingSignal || !ws) return;
-        
         const { sender, payload } = incomingSignal;
         let pc = peerConnectionsRef.current.get(sender);
         
         if (!pc && payload.sdp?.type === 'offer') {
             pc = createPeerConnection(sender);
         }
-        
         if (!pc) return;
 
         if (payload.sdp) {
@@ -228,19 +206,18 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         }
     }, [incomingSignal, ws, createPeerConnection]);
 
-
     const handleDeviceSelectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
         const newDeviceId = e.target.value;
         setSelectedInputDeviceId(newDeviceId);
-        if (micStatus === 'ready' || micStatus === 'error') {
+        if (micStatus === 'ready' || micStatus === 'error' || isSendingToStudio) {
             connectMicrophone(newDeviceId);
         }
     };
     
     useImperativeHandle(ref, () => ({
         goOnAir: () => {
-            if (!isLive) {
-                handleMicToggle();
+            if (isStudio && !isLiveInStudio) {
+                handleStudioMicToggle();
             }
         },
         cleanupConnection: (email: string) => {
@@ -258,7 +235,6 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         onMixerChange((prevConfig) => {
             const presenterConfig = prevConfig[sourceId];
             if (!presenterConfig) return prevConfig;
-
             const newConfig = JSON.parse(JSON.stringify(prevConfig));
             newConfig[sourceId].sends.main.enabled = !presenterConfig.sends.main.enabled;
             return newConfig;
@@ -267,60 +243,58 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
 
     return (
         <div className="p-4">
-             {!isSecureContext && (
+            {!isSecureContext && (
                 <div className="p-3 text-center bg-yellow-100 dark:bg-yellow-900/50 border border-yellow-300 dark:border-yellow-700 rounded-lg text-sm text-yellow-800 dark:text-yellow-200">
                     Microphone access requires a secure connection. Please use <strong>HTTPS</strong> or <strong>localhost</strong>.
                 </div>
             )}
-            {!isStudio && (
-                <div className={`space-y-4 ${!isSecureContext ? 'opacity-50' : ''}`}>
-                    <div>
-                        <label htmlFor="mic-select" className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
-                            Input Device
-                        </label>
-                        <select
-                            id="mic-select"
-                            value={selectedInputDeviceId}
-                            onChange={handleDeviceSelectChange}
-                            className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-black dark:text-white sm:text-sm"
-                            disabled={isLive || !isSecureContext}
-                        >
-                            <option value="default">Default Microphone</option>
-                            {audioInputDevices.map(device => (
-                                <option key={device.deviceId} value={device.deviceId}>
-                                    {device.label || `Microphone ${device.deviceId.slice(0, 8)}`}
-                                </option>
-                            ))}
-                        </select>
-                    </div>
-
-                    {(micStatus === 'ready' || isLive) && (
-                        <div className="h-6">
-                            <VolumeMeter volume={volume} />
-                        </div>
-                    )}
-                    
-                    {micStatus === 'error' && errorMessage && (
-                        <p className="text-sm text-red-500 text-center">{errorMessage}</p>
-                    )}
-
-                    <button
-                        onClick={handleMicToggle}
-                        disabled={!isSecureContext || micStatus === 'connecting' || (micStatus === 'error' && !isLive)}
-                        className={`w-full flex items-center justify-center gap-2 px-4 py-3 text-lg font-semibold rounded-lg shadow-md transition-colors
-                            ${isLive ? 'bg-red-600 text-white hover:bg-red-700 animate-pulse' : 'bg-neutral-300 dark:bg-neutral-700 hover:bg-neutral-400 dark:hover:bg-neutral-600'}
-                            ${(!isSecureContext || micStatus === 'connecting' || (micStatus === 'error' && !isLive)) ? 'opacity-50 cursor-not-allowed' : ''}
-                        `}
+            <div className={`space-y-4 ${!isSecureContext ? 'opacity-50' : ''}`}>
+                <div>
+                    <label htmlFor="mic-select" className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                        Input Device
+                    </label>
+                    <select
+                        id="mic-select"
+                        value={selectedInputDeviceId}
+                        onChange={handleDeviceSelectChange}
+                        className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-black dark:text-white sm:text-sm"
+                        disabled={(isStudio && isLiveInStudio) || (!isStudio && isSendingToStudio) || !isSecureContext}
                     >
-                        <MicrophoneIcon className="w-6 h-6" />
-                        <span>{isLive ? 'ON AIR' : (micStatus === 'ready' ? 'Go On Air' : 'Connect Microphone')}</span>
-                    </button>
+                        <option value="default">Default Microphone</option>
+                        {audioInputDevices.map(device => (
+                            <option key={device.deviceId} value={device.deviceId}>
+                                {device.label || `Microphone ${device.deviceId.slice(0, 8)}`}
+                            </option>
+                        ))}
+                    </select>
                 </div>
-            )}
+
+                {(micStatus === 'ready' || (isStudio && isLiveInStudio) || (!isStudio && isSendingToStudio)) && (
+                    <div className="h-6">
+                        <VolumeMeter volume={volume} />
+                    </div>
+                )}
+                
+                {micStatus === 'error' && errorMessage && (
+                    <p className="text-sm text-red-500 text-center">{errorMessage}</p>
+                )}
+
+                <button
+                    onClick={isStudio ? handleStudioMicToggle : handlePresenterBroadcastToggle}
+                    disabled={!isSecureContext || micStatus === 'connecting' || (micStatus === 'error' && !(isStudio ? isLiveInStudio : isSendingToStudio))}
+                    className={`w-full flex items-center justify-center gap-2 px-4 py-3 text-lg font-semibold rounded-lg shadow-md transition-colors
+                        ${(isStudio ? isLiveInStudio : isSendingToStudio) ? 'bg-red-600 text-white hover:bg-red-700 animate-pulse' : 'bg-neutral-300 dark:bg-neutral-700 hover:bg-neutral-400 dark:hover:bg-neutral-600'}
+                        ${(!isSecureContext || micStatus === 'connecting' || (micStatus === 'error' && !(isStudio ? isLiveInStudio : isSendingToStudio))) ? 'opacity-50 cursor-not-allowed' : ''}
+                    `}
+                >
+                    <MicrophoneIcon className="w-6 h-6" />
+                    <span>{(isStudio ? isLiveInStudio : isSendingToStudio) ? 'ON AIR' : (micStatus === 'ready' ? (isStudio ? 'Go On Air' : 'Send to Studio') : 'Connect Microphone')}</span>
+                </button>
+            </div>
 
             {isStudio && (
                 onlinePresenters.filter(p => p.email !== currentUser?.email).length > 0 ? (
-                    <div>
+                    <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-800">
                         <h4 className="text-sm font-semibold text-neutral-800 dark:text-neutral-200 mb-2">Remote Presenters</h4>
                         <div className="space-y-3 max-h-48 overflow-y-auto">
                             {onlinePresenters.filter(p => p.email !== currentUser?.email).map(presenter => {
@@ -350,7 +324,7 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
                         </div>
                     </div>
                 ) : (
-                    <div className="text-center text-sm text-neutral-500 py-4">
+                    <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-800 text-center text-sm text-neutral-500 py-4">
                         No remote presenters connected.
                     </div>
                 )

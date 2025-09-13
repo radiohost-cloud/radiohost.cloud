@@ -395,31 +395,20 @@ const AppInternal: React.FC = () => {
     const [autoBackupFolderPath, setAutoBackupFolderPath] = useState<string | null>(null);
     const [lastAutoBackupTimestamp, setLastAutoBackupTimestamp] = useState<number>(0);
      
-    // --- Dual Audio Player Refs for seamless playback ---
-    const playerARef = useRef<HTMLAudioElement>(null);
-    const playerBRef = useRef<HTMLAudioElement>(null);
-    const [activePlayer, setActivePlayer] = useState<'A' | 'B'>('A');
-    const playerALoadedIdRef = useRef<string | null>(null);
-    const playerBLoadedIdRef = useRef<string | null>(null);
-    const playerAUrlRef = useRef<string | null>(null);
-    const playerBUrlRef = useRef<string | null>(null);
+    // --- REMOVED Local Playback Refs ---
 
     const pflAudioRef = useRef<HTMLAudioElement>(null);
     const pflAudioUrlRef = useRef<string | null>(null);
     const remoteStudioRef = useRef<any>(null);
-    const isCrossfadingRef = useRef(false);
     const nowPlayingFileHandleRef = useRef<FileSystemFileHandle | null>(null);
     const autoBackupFolderHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
-    const audioBufferRef = useRef<Map<string, Blob>>(new Map());
     
     // --- NEW Audio Mixer State ---
     const [audioBuses, setAudioBuses] = useState<AudioBus[]>(initialBuses);
     const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
     const [audioLevels, setAudioLevels] = useState<Partial<Record<AudioSourceId | AudioBusId, number>>>({});
     const [isAudioEngineInitializing, setIsAudioEngineInitializing] = useState(false);
-    const [mainBusStream, setMainBusStream] = useState<MediaStream | null>(null);
 
-    const mainBusAudioRef = useRef<HTMLAudioElement>(null);
     const monitorBusAudioRef = useRef<HTMLAudioElement>(null);
 
     // Refs to provide stable functions to useEffects
@@ -468,7 +457,6 @@ const AppInternal: React.FC = () => {
     const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
     const [rtcSignal, setRtcSignal] = useState<any>(null); // To pass signals to RemoteStudio
     const [onlinePresenters, setOnlinePresenters] = useState<User[]>([]);
-// FIX: The type `NodeJS.Timeout` is not available in the browser environment. Changed to `ReturnType<typeof setInterval>` which resolves to the correct type (`number`) in the browser.
     const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     // --- NEW: User Management State ---
@@ -478,78 +466,26 @@ const AppInternal: React.FC = () => {
     const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
     const [hasUnreadChat, setHasUnreadChat] = useState(false);
 
-
-    // --- AUDIO WORKLET ---
-    // This code runs in a separate, high-priority audio thread to prevent UI lag from affecting playback.
-    const mixerWorkletCode = `
-    class MixerProcessor extends AudioWorkletProcessor {
-      static get parameterDescriptors() {
-        return [
-          { name: 'gainA', defaultValue: 1.0, automationRate: 'a-rate' },
-          { name: 'gainB', defaultValue: 0.0, automationRate: 'a-rate' },
-        ];
-      }
-
-      process(inputs, outputs, parameters) {
-        const output = outputs[0];
-        const inputA = inputs[0];
-        const inputB = inputs[1];
-        const gainA = parameters.gainA;
-        const gainB = parameters.gainB;
-
-        // Don't process if no inputs are connected
-        if (inputA.length === 0 && inputB.length === 0) {
-          return true;
-        }
-
-        for (let channel = 0; channel < output.length; ++channel) {
-          const outputChannel = output[channel];
-          const inputAChannel = inputA.length > channel ? inputA[channel] : undefined;
-          const inputBChannel = inputB.length > channel ? inputB[channel] : undefined;
-          const gainALen = gainA.length;
-          const gainBLen = gainB.length;
-
-          for (let i = 0; i < outputChannel.length; ++i) {
-            const sampleA = inputAChannel ? inputAChannel[i] * gainA[gainALen > 1 ? i : 0] : 0;
-            const sampleB = inputBChannel ? inputBChannel[i] * gainB[gainBLen > 1 ? i : 0] : 0;
-            outputChannel[i] = sampleA + sampleB;
-          }
-        }
-        return true;
-      }
-    }
-    registerProcessor('mixer-processor', MixerProcessor);
-    `;
-
     type AdvancedAudioGraph = {
         context: AudioContext | null;
         sources: {
-            playerA?: MediaElementAudioSourceNode;
-            playerB?: MediaElementAudioSourceNode;
+            // mainPlayer source removed
             mic?: MediaStreamAudioSourceNode;
             pfl?: MediaElementAudioSourceNode;
             [key: `remote_${string}`]: MediaStreamAudioSourceNode; // For remote contributors
         };
-        playerMixerNode: AudioWorkletNode | null;
         sourceGains: Partial<Record<AudioSourceId, GainNode>>;
         routingGains: Partial<Record<`${AudioSourceId}_to_${AudioBusId}`, GainNode>>;
         duckingGains: Partial<Record<`${AudioSourceId}_to_${AudioBusId}`, GainNode>>;
         busGains: Partial<Record<AudioBusId, GainNode>>;
         busDestinations: Partial<Record<AudioBusId, MediaStreamAudioDestinationNode>>;
         analysers: Partial<Record<AudioSourceId | AudioBusId, AnalyserNode>>;
-        mainBusCompressor?: DynamicsCompressorNode;
-        mainBusEq?: {
-            bass: BiquadFilterNode;
-            mid: BiquadFilterNode;
-            treble: BiquadFilterNode;
-        };
         isInitialized: boolean;
     };
     
     const audioGraphRef = useRef<AdvancedAudioGraph>({
         context: null,
         sources: {},
-        playerMixerNode: null,
         sourceGains: {},
         routingGains: {},
         duckingGains: {},
@@ -861,16 +797,15 @@ const AppInternal: React.FC = () => {
     
     useEffect(() => {
         const autoStart = async () => {
-            if (isAutoModeEnabledRef.current) {
+            if (isAutoModeEnabledRef.current && isStudio) {
                 console.log("[Auto Mode] Enabled on startup. Initializing...");
-                if (!audioGraphRef.current.isInitialized) await initializeAudioGraph();
                 setPlayoutPolicy(p => ({ ...p, isAutoFillEnabled: true }));
-                setTimeout(() => { if (!isPlayingRef.current && playlistRef.current.length > 0) handleTogglePlay(); }, 500);
+                if (!isPlayingRef.current && playlistRef.current.length > 0) sendStudioAction('start-engine', null);
             }
         };
         const startupTimer = setTimeout(autoStart, 1500);
         return () => clearTimeout(startupTimer);
-    }, []);
+    }, [isStudio]);
 
     const useDebouncedEffect = (effect: () => void, deps: React.DependencyList, delay: number) => {
         useEffect(() => {
@@ -880,13 +815,18 @@ const AppInternal: React.FC = () => {
     };
     
     useDebouncedEffect(() => {
+        const appMode = sessionStorage.getItem('appMode');
         // In presenter mode, we don't save data, we only receive it.
-        // Also, shared state is managed by the server, so we only save user-specific state.
-        if (playoutPolicy.playoutMode === 'presenter') return;
+        if (appMode === 'HOST' && playoutPolicy.playoutMode === 'presenter') return;
 
         const dataToSave = {
-            mediaLibrary,
-            playlist: playlist.filter(item => 'markerType' in item || item.type !== TrackType.LOCAL_FILE),
+            mediaLibrary: appMode === 'HOST' ? undefined : mediaLibrary,
+            playlist: appMode === 'HOST' ? undefined : playlist.filter(item => 'markerType' in item || item.type !== TrackType.LOCAL_FILE),
+            playbackState: appMode === 'HOST' ? undefined : {
+                currentPlayingItemId,
+                currentTrackIndex,
+                stopAfterTrackId,
+            },
             cartwallPages,
             broadcasts,
             settings: {
@@ -905,11 +845,6 @@ const AppInternal: React.FC = () => {
                 isAutoBackupOnStartupEnabled,
                 autoBackupInterval,
                 isAutoModeEnabled,
-            },
-            playbackState: {
-                currentPlayingItemId,
-                currentTrackIndex,
-                stopAfterTrackId,
             },
             audioConfig: {
                 buses: audioBuses,
@@ -933,18 +868,7 @@ const AppInternal: React.FC = () => {
     
     useEffect(() => {
         return () => {
-            playlistRef.current.forEach(item => {
-                if (!('markerType' in item) && item.src && item.src.startsWith('blob:')) {
-                    URL.revokeObjectURL(item.src);
-                }
-            });
-            if (playerAUrlRef.current) URL.revokeObjectURL(playerAUrlRef.current);
-            if (playerBUrlRef.current) URL.revokeObjectURL(playerBUrlRef.current);
             if (pflAudioUrlRef.current) URL.revokeObjectURL(pflAudioUrlRef.current);
-            audioBufferRef.current.forEach(blob => {
-                if (blob instanceof File) URL.revokeObjectURL(URL.createObjectURL(blob));
-            });
-            audioBufferRef.current.clear();
         };
     }, []);
 
@@ -1013,131 +937,28 @@ const AppInternal: React.FC = () => {
         sendStudioAction('setPlayerState', { stopAfterTrackId: id });
     }, [sendStudioAction]);
 
-    const handleSetCurrentTrack = useCallback((newIndex: number, source: 'manual' | 'auto-next' | 'marker-jump') => {
-        if (playoutPolicyRef.current.playoutMode === 'presenter') return;
-    
-        const currentPlaylist = playlistRef.current;
-        const oldIndex = currentTrackIndexRef.current;
-        const timeline = timelineRef.current;
-        const isForwardMove = newIndex > oldIndex;
-    
-        let finalPlaylist = currentPlaylist;
-        let finalIndex = newIndex;
-    
-        if (playoutPolicyRef.current.removePlayedTracks && isForwardMove) {
-            finalPlaylist = currentPlaylist.slice(newIndex);
-            finalIndex = 0;
-        } else {
-            let shouldCleanup = false;
-            const checkStartIndex = (source === 'auto-next') ? oldIndex + 1 : 0;
-    
-            if ((isForwardMove || source === 'manual') && newIndex > -1) {
-                for (let i = checkStartIndex; i < newIndex; i++) {
-                    const item = currentPlaylist[i];
-                    if (!item) continue;
-                    if ('markerType' in item || timeline.get(item.id)?.isSkipped) {
-                        shouldCleanup = true;
-                        break;
-                    }
-                }
-            }
-    
-            if (shouldCleanup) {
-                finalPlaylist = currentPlaylist.slice(newIndex);
-                finalIndex = 0;
-            }
-        }
-    
-        // Update local state optimistically
-        setPlaylist(finalPlaylist);
-        setCurrentTrackIndex(finalIndex);
-    
-        // Send actions to the server
-        sendStudioAction('setPlaylist', finalPlaylist);
-        sendStudioAction('setPlayerState', { currentTrackIndex: finalIndex });
-    
+    const handleNext = useCallback(() => {
+        sendStudioAction('next-track', null);
     }, [sendStudioAction]);
 
-    const handleNext = useCallback(() => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-        const nextIndex = findNextPlayableIndex(currentTrackIndexRef.current, 1);
-    
-        if (nextIndex !== -1) {
-            handleSetCurrentTrack(nextIndex, 'auto-next');
-            setActivePlayer(p => p === 'A' ? 'B' : 'A');
-        } else {
-            setIsPlaying(false);
-            setCurrentPlayingItemId(null);
-            sendStudioAction('setPlayerState', { isPlaying: false, currentPlayingItemId: null });
-
-            if (playoutPolicyRef.current.removePlayedTracks) {
-                setPlaylist([]);
-                sendStudioAction('setPlaylist', []);
-            }
-        }
-    }, [findNextPlayableIndex, handleSetCurrentTrack, playoutPolicy.playoutMode, sendStudioAction]);
-
     const handlePrevious = useCallback(() => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-        const prevIndex = findNextPlayableIndex(currentTrackIndexRef.current, -1);
-        if (prevIndex !== -1) {
-            setActivePlayer(p => p === 'A' ? 'B' : 'A');
-            setCurrentTrackIndex(prevIndex);
-            sendStudioAction('setPlayerState', { currentTrackIndex: prevIndex });
-        }
-    }, [findNextPlayableIndex, playoutPolicy.playoutMode, sendStudioAction]);
+        sendStudioAction('previous-track', null);
+    }, [sendStudioAction]);
     
-    const handleTogglePlay = useCallback(async () => {
+    const handleTogglePlay = useCallback(() => {
         if (playoutPolicy.playoutMode === 'presenter') return;
-        if (!audioGraphRef.current.isInitialized) {
-            await initializeAudioGraph();
-        }
-        if (playlistRef.current.length === 0) return;
-
-        const shouldPlay = !isPlayingRef.current;
-        if (shouldPlay) {
-            stopPfl();
-        }
-        setIsPlaying(shouldPlay);
-
-        if (shouldPlay) {
-            const currentItem = playlistRef.current[currentTrackIndexRef.current];
-            if (currentItem?.id !== currentPlayingItemId) {
-                setCurrentPlayingItemId(currentItem?.id || null);
-                sendStudioAction('setPlayerState', { isPlaying: shouldPlay, currentPlayingItemId: currentItem?.id || null });
-            } else {
-                sendStudioAction('setPlayerState', { isPlaying: shouldPlay });
-            }
+        
+        if (isPlaying) {
+            sendStudioAction('stop-engine', null);
         } else {
-            sendStudioAction('setPlayerState', { isPlaying: shouldPlay });
+            sendStudioAction('start-engine', null);
         }
-    }, [stopPfl, playoutPolicy.playoutMode, sendStudioAction, currentPlayingItemId]);
+    }, [isPlaying, playoutPolicy.playoutMode, sendStudioAction]);
     
-    const handlePlayTrack = useCallback(async (itemId: string) => {
+    const handlePlayTrack = useCallback((itemId: string) => {
         if (playoutPolicy.playoutMode === 'presenter') return;
-        if (!audioGraphRef.current.isInitialized) {
-            await initializeAudioGraph();
-        }
-        
-        const targetIndex = playlistRef.current.findIndex(item => item.id === itemId);
-        if (targetIndex === -1) return;
-
-        const newTrack = playlistRef.current[targetIndex];
-        if ('markerType' in newTrack) return;
-
-        stopPfl();
-        
-        handleSetCurrentTrack(targetIndex, 'manual');
-
-        setActivePlayer(p => p === 'A' ? 'B' : 'A');
-        
-        // Optimistic local updates
-        setCurrentPlayingItemId(newTrack.id);
-        setIsPlaying(true);
-        // Send action to server
-        sendStudioAction('setPlayerState', { currentPlayingItemId: newTrack.id, isPlaying: true });
-
-    }, [stopPfl, handleSetCurrentTrack, playoutPolicy.playoutMode, sendStudioAction]);
+        sendStudioAction('play-track', itemId);
+    }, [playoutPolicy.playoutMode, sendStudioAction]);
     
     const getTrackSrc = useCallback(async (track: Track): Promise<string | null> => {
         const trackWithOriginalId = { ...track, id: track.originalId || track.id };
@@ -1145,7 +966,7 @@ const AppInternal: React.FC = () => {
     }, []);
 
     const initializeAudioGraph = useCallback(async () => {
-       if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !playerARef.current || !playerBRef.current || !pflAudioRef.current) return;
+       if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !pflAudioRef.current) return;
     
         try {
             setIsAudioEngineInitializing(true);
@@ -1153,8 +974,6 @@ const AppInternal: React.FC = () => {
             audioGraphRef.current.context = context;
             
             const sources: AdvancedAudioGraph['sources'] = {
-                playerA: context.createMediaElementSource(playerARef.current),
-                playerB: context.createMediaElementSource(playerBRef.current),
                 pfl: context.createMediaElementSource(pflAudioRef.current),
             };
             audioGraphRef.current.sources = sources;
@@ -1165,15 +984,6 @@ const AppInternal: React.FC = () => {
             const busGains: AdvancedAudioGraph['busGains'] = {};
             const busDestinations: AdvancedAudioGraph['busDestinations'] = {};
             const analysers: AdvancedAudioGraph['analysers'] = {};
-
-            const playerMixerBlob = new Blob([mixerWorkletCode], { type: 'application/javascript' });
-            const playerMixerUrl = URL.createObjectURL(playerMixerBlob);
-            await context.audioWorklet.addModule(playerMixerUrl);
-            URL.revokeObjectURL(playerMixerUrl);
-            const playerMixerNode = new AudioWorkletNode(context, 'mixer-processor', { numberOfInputs: 2 });
-            sources.playerA.connect(playerMixerNode, 0, 0);
-            sources.playerB.connect(playerMixerNode, 0, 1);
-            audioGraphRef.current.playerMixerNode = playerMixerNode;
             
             const sourceIds: AudioSourceId[] = ['mainPlayer', 'mic', 'pfl', 'cartwall'];
             sourceIds.forEach(id => {
@@ -1182,8 +992,7 @@ const AppInternal: React.FC = () => {
                 analysers[id]!.fftSize = 256;
                 sourceGains[id]!.connect(analysers[id]!);
             });
-
-            playerMixerNode.connect(sourceGains.mainPlayer!);
+            
             sources.pfl.connect(sourceGains.pfl!);
 
             audioBuses.forEach(bus => {
@@ -1191,29 +1000,7 @@ const AppInternal: React.FC = () => {
                 busDestinations[bus.id] = context.createMediaStreamDestination();
                 analysers[bus.id] = context.createAnalyser();
                 analysers[bus.id]!.fftSize = 256;
-
-                if (bus.id === 'main') {
-                    const compressor = context.createDynamicsCompressor();
-                    const eqBass = context.createBiquadFilter();
-                    const eqMid = context.createBiquadFilter();
-                    const eqTreble = context.createBiquadFilter();
-
-                    eqBass.type = 'lowshelf'; eqBass.frequency.value = 120;
-                    eqMid.type = 'peaking'; eqMid.frequency.value = 1000; eqMid.Q.value = 1;
-                    eqTreble.type = 'highshelf'; eqTreble.frequency.value = 8000;
-                    
-                    analysers[bus.id]!.connect(compressor);
-                    compressor.connect(eqBass);
-                    eqBass.connect(eqMid);
-                    eqMid.connect(eqTreble);
-                    eqTreble.connect(busGains[bus.id]!);
-
-                    audioGraphRef.current.mainBusCompressor = compressor;
-                    audioGraphRef.current.mainBusEq = { bass: eqBass, mid: eqMid, treble: eqTreble };
-                } else {
-                    analysers[bus.id]!.connect(busGains[bus.id]!);
-                }
-                
+                analysers[bus.id]!.connect(busGains[bus.id]!);
                 busGains[bus.id]!.connect(busDestinations[bus.id]!);
             });
 
@@ -1239,22 +1026,13 @@ const AppInternal: React.FC = () => {
                 ...audioGraphRef.current, sourceGains, routingGains, duckingGains, busGains, busDestinations, analysers, isInitialized: true,
             };
 
-            if(mainBusAudioRef.current && busDestinations.main) mainBusAudioRef.current.srcObject = busDestinations.main.stream;
             if(monitorBusAudioRef.current && busDestinations.monitor) monitorBusAudioRef.current.srcObject = busDestinations.monitor.stream;
-
-            setMainBusStream(busDestinations.main?.stream ?? null);
 
             if (context.state === 'suspended') await context.resume();
 
         } catch (error) { console.error("Failed to initialize Audio graph:", error); }
         finally { setIsAudioEngineInitializing(false); }
-    }, [audioBuses, mixerWorkletCode]);
-
-    useEffect(() => {
-        if (activeRightColumnTab === 'stream') {
-            initializeAudioGraph();
-        }
-    }, [activeRightColumnTab, initializeAudioGraph]);
+    }, [audioBuses]);
 
     useEffect(() => {
         let animationFrameId: number;
@@ -1288,161 +1066,6 @@ const AppInternal: React.FC = () => {
         return () => cancelAnimationFrame(animationFrameId);
     }, []);
 
-    const performCrossfade = useCallback(async (nextIndex: number, customFadeOut?: number, customFadeIn?: number) => {
-        const graph = audioGraphRef.current;
-        const playerMixerNode = graph.playerMixerNode;
-        if (!graph.isInitialized || !graph.context || !playerMixerNode || isCrossfadingRef.current) return;
-    
-        isCrossfadingRef.current = true;
-        stopPfl();
-    
-        const policy = playoutPolicyRef.current;
-        const fadeOutDuration = customFadeOut ?? policy.crossfadeDuration;
-        const fadeInDuration = customFadeIn ?? policy.crossfadeDuration;
-        const { context } = graph;
-        const now = context.currentTime;
-    
-        const inactivePlayerRef = activePlayer === 'A' ? playerBRef : playerARef;
-        const inactiveUrlRef = activePlayer === 'A' ? playerBUrlRef : playerAUrlRef;
-        const inactiveLoadedIdRef = activePlayer === 'A' ? playerBLoadedIdRef : playerALoadedIdRef;
-    
-        const nextItem = playlistRef.current[nextIndex];
-        if (!nextItem || 'markerType' in nextItem) {
-            isCrossfadingRef.current = false;
-            return;
-        }
-    
-        const src = await getTrackSrc(nextItem);
-        const inactivePlayer = inactivePlayerRef.current;
-    
-        if (!src || !inactivePlayer) {
-            isCrossfadingRef.current = false;
-            return;
-        }
-    
-        if (inactiveUrlRef.current && inactiveUrlRef.current.startsWith('blob:')) {
-            URL.revokeObjectURL(inactiveUrlRef.current);
-        }
-        inactivePlayer.src = src;
-        inactiveUrlRef.current = src;
-        inactiveLoadedIdRef.current = nextItem.id;
-        inactivePlayer.load();
-    
-        try {
-            const gainAParam = playerMixerNode.parameters.get('gainA')!;
-            const gainBParam = playerMixerNode.parameters.get('gainB')!;
-            const activeParam = activePlayer === 'A' ? gainAParam : gainBParam;
-            const inactiveParam = activePlayer === 'A' ? gainBParam : gainAParam;
-            
-            await inactivePlayer.play();
-    
-            activeParam.cancelScheduledValues(now);
-            activeParam.linearRampToValueAtTime(0, now + fadeOutDuration);
-    
-            inactiveParam.cancelScheduledValues(now);
-            inactiveParam.linearRampToValueAtTime(1.0, now + fadeInDuration);
-    
-            setTimeout(() => {
-                const oldIndex = currentTrackIndexRef.current;
-                const oldPlaylist = playlistRef.current;
-                const endedItem = oldPlaylist[oldIndex];
-                
-                if (endedItem && !('markerType' in endedItem)) {
-                    setPlayoutHistory(prev => [...prev, { trackId: endedItem.originalId || endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
-                }
-
-                // Local optimistic updates
-                setCurrentPlayingItemId(nextItem.id);
-                setActivePlayer(p => p === 'A' ? 'B' : 'A');
-                
-                // This function sends its own actions
-                handleSetCurrentTrack(nextIndex, 'auto-next');
-                
-                // Send current playing item ID update separately
-                sendStudioAction('setPlayerState', { currentPlayingItemId: nextItem.id });
-
-                isCrossfadingRef.current = false;
-
-            }, Math.max(fadeOutDuration, fadeInDuration) * 1000 + 100);
-    
-        } catch (e) {
-            console.error("Crossfade playback failed:", e);
-            isCrossfadingRef.current = false;
-        }
-    }, [activePlayer, getTrackSrc, stopPfl, handleSetCurrentTrack, sendStudioAction]);
-
-    useEffect(() => {
-        const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
-        const activeLoadedIdRef = activePlayer === 'A' ? playerALoadedIdRef : playerBLoadedIdRef;
-        const activeUrlRef = activePlayer === 'A' ? playerAUrlRef : playerBUrlRef;
-
-        const loadAndPlay = async () => {
-             if (isPlaying) stopPfl();
-            if (!currentTrack) {
-                if (isPlaying) {
-                    setIsPlaying(false);
-                    if (isStudio) sendStudioAction('setPlayerState', { isPlaying: false, currentPlayingItemId: null });
-                }
-                 setCurrentPlayingItemId(null);
-                return;
-            }
-
-            const currentPlayer = activePlayerRef.current;
-            if (!currentPlayer) return;
-
-            if (activeLoadedIdRef.current !== currentTrack.id) {
-                currentPlayer.pause();
-                if (activeUrlRef.current && activeUrlRef.current.startsWith('blob:')) URL.revokeObjectURL(activeUrlRef.current);
-                const src = await getTrackSrc(currentTrack);
-                if (src) {
-                    currentPlayer.src = src;
-                    activeUrlRef.current = src;
-                    activeLoadedIdRef.current = currentTrack.id;
-                    currentPlayer.load();
-                } else {
-                    console.error(`Could not load track: ${currentTrack.title}`);
-                    if (isStudio) handleNext();
-                    return;
-                }
-            }
-
-            if (isPlaying && currentPlayer.paused) {
-                try {
-                    await currentPlayer.play();
-                    
-                    if (isStudio) {
-                        const playlist = playlistRef.current;
-                        const currentIndex = currentTrackIndexRef.current;
-                        const track = playlist[currentIndex];
-                        
-                        if (track && !('markerType' in track) && track.addedBy === 'broadcast') {
-                            const previousItem = currentIndex > 0 ? playlist[currentIndex - 1] : null;
-                            if (!previousItem || 'markerType' in previousItem || (!('markerType' in previousItem) && previousItem.addedBy !== 'broadcast')) {
-                                console.log('[Broadcast] First track starting. Clearing previous playlist items.');
-                                const newPlaylist = currentList => currentList.slice(currentIndex);
-                                setPlaylist(newPlaylist);
-                                setCurrentTrackIndex(0);
-                                sendStudioAction('setPlaylist', newPlaylist(playlistRef.current));
-                                sendStudioAction('setPlayerState', { currentTrackIndex: 0 });
-                            }
-                        }
-                    }
-
-                } catch (e) {
-                    console.error("Playback failed:", e);
-                    setIsPlaying(false);
-                    setCurrentPlayingItemId(null);
-                    if (isStudio) sendStudioAction('setPlayerState', { isPlaying: false, currentPlayingItemId: null });
-                }
-            } else if (!isPlaying && !currentPlayer.paused) {
-                currentPlayer.pause();
-            }
-        };
-
-        loadAndPlay();
-        
-    }, [currentTrack, isPlaying, activePlayer, handleNext, getTrackSrc, stopPfl, isStudio, sendStudioAction]);
-
     const timeline = useMemo(() => {
         const timelineMap = new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>();
         if (playlist.length === 0) return timelineMap;
@@ -1467,7 +1090,6 @@ const AppInternal: React.FC = () => {
             }
         }
         
-        // Step 1. Calculate a "provisional" timeline starting from now.
         const provisionalTimelineMap = new Map<string, { startTime: number, endTime: number, duration: number, isSkipped: boolean, shortenedBy: number }>();
         let provisionalPlayhead = now;
         
@@ -1512,7 +1134,6 @@ const AppInternal: React.FC = () => {
             }
         }
     
-        // Step 2. Calculate offset based on current playback state
         let offset = 0;
         if (currentPlayingItemId && isPlaying) {
             const provisionalData = provisionalTimelineMap.get(currentPlayingItemId);
@@ -1530,7 +1151,6 @@ const AppInternal: React.FC = () => {
             }
         }
         
-        // Step 3. Create final timeline by applying offset
         for (const [id, data] of provisionalTimelineMap.entries()) {
             timelineMap.set(id, {
                 ...data,
@@ -1542,202 +1162,6 @@ const AppInternal: React.FC = () => {
         return timelineMap;
     }, [playlist, currentPlayingItemId, trackProgress, isPlaying, currentTrackIndex]);
     timelineRef.current = timeline;
-
-    const lastProgressUpdateRef = useRef(0);
-    useEffect(() => {
-        const playerA = playerARef.current;
-        const playerB = playerBRef.current;
-
-        const handleTimeUpdate = (e: Event) => {
-            const player = e.target as HTMLAudioElement;
-            const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
-            if (player !== activePlayerRef.current) return;
-            setTrackProgress(player.currentTime);
-
-            // Send throttled progress updates if studio
-            if (isStudio) {
-                const now = Date.now();
-                if (now - lastProgressUpdateRef.current > 1000) {
-                    sendStudioAction('setPlayerState', { trackProgress: player.currentTime });
-                    lastProgressUpdateRef.current = now;
-                }
-            }
-
-            if (playoutPolicyRef.current.playoutMode === 'presenter') return;
-
-            if (isCrossfadingRef.current || player.duration <= 0) return;
-            const policy = playoutPolicyRef.current;
-            const currentItem = playlistRef.current[currentTrackIndexRef.current];
-            if (currentItem && 'markerType' in currentItem) return;
-        
-            if (currentItem?.type === TrackType.VOICETRACK && currentItem.vtMix) {
-                const nextTrackIndex = findNextPlayableIndex(currentTrackIndexRef.current, 1);
-                if (nextTrackIndex !== -1) {
-                    const triggerTime = currentItem.vtMix.nextStartOffsetFromVtStart;
-                    if (player.currentTime >= triggerTime) {
-                        performCrossfade(nextTrackIndex, currentItem.vtMix.vtFadeOut, currentItem.vtMix.nextFadeIn);
-                    }
-                }
-                return;
-            }
-        
-            const nextIndex = findNextPlayableIndex(currentTrackIndexRef.current, 1);
-            if (nextIndex === -1) return;
-            const nextItem = playlistRef.current[nextIndex];
-            
-            if (nextItem && !('markerType' in nextItem) && nextItem?.type === TrackType.VOICETRACK && nextItem.vtMix) {
-                const triggerTime = player.duration + nextItem.vtMix.startOffsetFromPrevEnd;
-                if (player.currentTime >= triggerTime) {
-                    performCrossfade(nextIndex, nextItem.vtMix.prevFadeOut, nextItem.vtMix.vtFadeIn);
-                }
-            } 
-            else if (policy.crossfadeEnabled && (player.duration - player.currentTime < policy.crossfadeDuration)) {
-                if (nextItem && !('markerType' in nextItem) && nextItem?.type !== TrackType.VOICETRACK) {
-                    performCrossfade(nextIndex);
-                }
-            }
-        };
-
-        const handleEnded = (e: Event) => {
-            const player = e.target as HTMLAudioElement;
-            if (playoutPolicyRef.current.playoutMode === 'presenter') return;
-
-            if (!isNaN(player.duration) && player.duration > 2 && player.currentTime < player.duration - 2) {
-                console.warn(`Ignored premature 'ended' event. CurrentTime: ${player.currentTime.toFixed(2)}, Duration: ${player.duration.toFixed(2)}`);
-                if (player.paused) player.play().catch(err => console.error("Could not resume stalled player:", err));
-                return;
-            }
-
-            const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
-            if (player !== activePlayerRef.current || isCrossfadingRef.current) return;
-            
-            const endedItem = playlistRef.current[currentTrackIndexRef.current];
-            if (!endedItem || 'markerType' in endedItem) return;
-            
-            setPlayoutHistory(prev => [...prev, { trackId: endedItem.originalId || endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
-            
-            if (stopAfterTrackIdRef.current && stopAfterTrackIdRef.current === endedItem.id) {
-                setIsPlaying(false); 
-                handleSetStopAfterTrackId(null);
-                if (remoteStudioRef.current) remoteStudioRef.current.goOnAir();
-                return;
-            }
-
-            const endedIndex = currentTrackIndexRef.current;
-            const currentPlaylist = playlistRef.current;
-            const currentTimeline = timelineRef.current;
-            let nextIndex = -1;
-
-            const now = Date.now();
-            let lastPassedSoftMarkerIndex = -1;
-            currentPlaylist.forEach((item, index) => {
-                if ('markerType' in item && item.markerType === TimeMarkerType.SOFT && item.time < now) {
-                    lastPassedSoftMarkerIndex = index;
-                }
-            });
-
-            for (let i = endedIndex + 1; i < currentPlaylist.length; i++) {
-                const item = currentPlaylist[i];
-                if (!('markerType' in item)) {
-                    const timelineData = currentTimeline.get(item.id);
-                    const isSkippedByHardMarker = timelineData ? timelineData.startTime >= timelineData.endTime : false;
-                    const isSkippedBySoftMarker = lastPassedSoftMarkerIndex > endedIndex && i < lastPassedSoftMarkerIndex;
-                    if (!isSkippedByHardMarker && !isSkippedBySoftMarker) {
-                        nextIndex = i;
-                        break;
-                    }
-                }
-            }
-
-            if (nextIndex !== -1) {
-                handleSetCurrentTrack(nextIndex, 'auto-next');
-                setActivePlayer(p => (p === 'A' ? 'B' : 'A'));
-            } else {
-                setIsPlaying(false);
-                setCurrentPlayingItemId(null);
-                sendStudioAction('setPlayerState', { isPlaying: false, currentPlayingItemId: null });
-
-                if (playoutPolicyRef.current.removePlayedTracks) {
-                    setPlaylist([]);
-                    sendStudioAction('setPlaylist', []);
-                }
-            }
-        };
-        
-        const players = [playerA, playerB];
-        players.forEach(p => { if (p) { p.addEventListener('timeupdate', handleTimeUpdate); p.addEventListener('ended', handleEnded); } });
-        return () => { players.forEach(p => { if (p) { p.removeEventListener('timeupdate', handleTimeUpdate); p.removeEventListener('ended', handleEnded); } }); };
-    }, [activePlayer, findNextPlayableIndex, performCrossfade, handleSetCurrentTrack, isStudio, sendStudioAction, handleSetStopAfterTrackId]);
-
-    const triggerHardMarkerFadeAndJump = useCallback(async (nextIndex: number) => {
-        if (isCrossfadingRef.current) return;
-        isCrossfadingRef.current = true;
-    
-        const graph = audioGraphRef.current;
-        if (!graph.context || !graph.playerMixerNode) {
-            isCrossfadingRef.current = false;
-            return;
-        }
-    
-        const FADE_DURATION = 0.8; // 800ms
-        const { context, playerMixerNode } = graph;
-        const now = context.currentTime;
-    
-        const gainAParam = playerMixerNode.parameters.get('gainA')!;
-        const gainBParam = playerMixerNode.parameters.get('gainB')!;
-        const activeParam = activePlayer === 'A' ? gainAParam : gainBParam;
-    
-        activeParam.cancelScheduledValues(now);
-        activeParam.linearRampToValueAtTime(0, now + FADE_DURATION);
-    
-        setTimeout(() => {
-            const endedItem = playlistRef.current[currentTrackIndexRef.current];
-            if (endedItem && !('markerType' in endedItem)) {
-                setPlayoutHistory(prev => [...prev, { trackId: endedItem.originalId || endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
-            }
-            
-            handleSetCurrentTrack(nextIndex, 'marker-jump');
-            setActivePlayer(p => (p === 'A' ? 'B' : 'A'));
-    
-            isCrossfadingRef.current = false;
-        }, FADE_DURATION * 1000);
-    
-    }, [activePlayer, setPlayoutHistory, handleSetCurrentTrack]);
-
-    useEffect(() => {
-        if (!isPlaying || playoutPolicy.playoutMode === 'presenter') return;
-    
-        const intervalId = setInterval(() => {
-            const now = Date.now();
-            const playlist = playlistRef.current;
-            const currentIdx = currentTrackIndexRef.current;
-    
-            let triggerMarker: TimeMarker | null = null;
-            let markerIndex = -1;
-
-            let latestHardMarkerTime = 0;
-            for (let i = 0; i < playlist.length; i++) {
-                const item = playlist[i];
-                if ('markerType' in item && item.markerType === TimeMarkerType.HARD && now >= item.time && item.time > latestHardMarkerTime) {
-                    triggerMarker = item;
-                    markerIndex = i;
-                    latestHardMarkerTime = item.time;
-                }
-            }
-    
-            if (triggerMarker && markerIndex > currentIdx) {
-                const nextPlayableIndex = findNextPlayableIndex(markerIndex, 1);
-                
-                if (nextPlayableIndex !== -1 && nextPlayableIndex !== currentIdx) {
-                    console.log(`[Hard Marker] Triggered at ${new Date(triggerMarker.time).toLocaleTimeString()}. Jumping to track index ${nextPlayableIndex}.`);
-                    triggerHardMarkerFadeAndJump(nextPlayableIndex);
-                }
-            }
-        }, 1000); 
-    
-        return () => clearInterval(intervalId);
-    
-    }, [isPlaying, findNextPlayableIndex, triggerHardMarkerFadeAndJump, playoutPolicy.playoutMode]);
 
     useEffect(() => {
         const graph = audioGraphRef.current;
@@ -1793,34 +1217,17 @@ const AppInternal: React.FC = () => {
             newConfig.cartwall.sends.monitor.gain = monitorGain;
             return newConfig;
         })
-    }, [isPflPlaying, playoutPolicy.pflDuckingLevel]);
+    }, [isPflPlaying, playoutPolicy.pflDuckingLevel, setMixerConfig]);
 
-
-    useEffect(() => {
-        const graph = audioGraphRef.current;
-        const playerMixerNode = graph.playerMixerNode;
-        if (!graph.isInitialized || !graph.context || !playerMixerNode || isCrossfadingRef.current) return;
-
-        const now = graph.context.currentTime;
-        const gainAParam = playerMixerNode.parameters.get('gainA')!;
-        const gainBParam = playerMixerNode.parameters.get('gainB')!;
-
-        if (activePlayer === 'A') {
-            gainAParam.cancelScheduledValues(now);
-            gainAParam.linearRampToValueAtTime(1.0, now + 0.1);
-            gainBParam.cancelScheduledValues(now);
-            gainBParam.linearRampToValueAtTime(0.0, now + 0.5);
-        } else {
-            gainBParam.cancelScheduledValues(now);
-            gainBParam.linearRampToValueAtTime(1.0, now + 0.1);
-            gainAParam.cancelScheduledValues(now);
-            gainAParam.linearRampToValueAtTime(0.0, now + 0.5);
-        }
-    }, [activePlayer]);
-    
     const handleSourceStream = useCallback(async (stream: MediaStream | null, sourceId: AudioSourceId = 'mic') => {
+        if (!audioGraphRef.current.isInitialized) {
+            await initializeAudioGraph();
+        }
         const graph = audioGraphRef.current;
-        if (!graph.isInitialized || !graph.context) return;
+        if (!graph.isInitialized || !graph.context) {
+            console.log("[AudioGraph] Cannot handle source stream, graph not ready.");
+            return;
+        }
     
         if (graph.context.state === 'suspended') {
             await graph.context.resume();
@@ -1832,25 +1239,34 @@ const AppInternal: React.FC = () => {
     
         if (stream) {
             try {
-                // If this is a new remote source, create its nodes in the graph
                 if (sourceId.startsWith('remote_') && !graph.sourceGains[sourceId]) {
                     console.log(`[AudioGraph] Creating nodes for new remote source: ${sourceId}`);
                     const context = graph.context;
                     graph.sourceGains[sourceId] = context.createGain();
                     graph.analysers[sourceId] = context.createAnalyser();
                     graph.analysers[sourceId]!.fftSize = 256;
-                    
-                    // Path for metering: connect the source's gain to its dedicated analyser.
                     graph.sourceGains[sourceId]!.connect(graph.analysers[sourceId]!);
     
                     audioBuses.forEach(bus => {
                         const routingGain = context.createGain();
                         graph.routingGains[`${sourceId}_to_${bus.id}`] = routingGain;
-                        
-                        // Path for audio output: connect the source's gain directly to the routing gain for each bus.
                         graph.sourceGains[sourceId]!.connect(routingGain); 
-                        
                         routingGain.connect(graph.analysers[bus.id]!);
+                    });
+                     setMixerConfig(prevConfig => {
+                        if (prevConfig[sourceId]) return prevConfig;
+                        
+                        console.log(`[Mixer] Adding new channel for remote source: ${sourceId}`);
+                        const newConfig = JSON.parse(JSON.stringify(prevConfig));
+                        newConfig[sourceId] = { 
+                            gain: 1, 
+                            muted: false, 
+                            sends: { 
+                                main: { enabled: false, gain: 1 }, 
+                                monitor: { enabled: true, gain: 1 } 
+                            } 
+                        };
+                        return newConfig;
                     });
                 }
     
@@ -1863,7 +1279,7 @@ const AppInternal: React.FC = () => {
         } else {
             delete graph.sources[sourceId];
         }
-    }, [audioBuses]);
+    }, [audioBuses, initializeAudioGraph, setMixerConfig]);
 
     useEffect(() => {
         const graph = audioGraphRef.current;
@@ -1906,8 +1322,9 @@ const AppInternal: React.FC = () => {
     }, [mixerConfig, audioBuses]);
     
     useEffect(() => {
-        const busPlayers = { main: mainBusAudioRef.current, monitor: monitorBusAudioRef.current };
+        const busPlayers = { monitor: monitorBusAudioRef.current };
         audioBuses.forEach(bus => {
+            if (bus.id === 'main') return;
             const player = busPlayers[bus.id];
             if (player && typeof (player as any).setSinkId === 'function') {
                 (player as any).setSinkId(bus.outputDeviceId).catch((e: Error) => {
@@ -1917,63 +1334,6 @@ const AppInternal: React.FC = () => {
         });
     }, [audioBuses]);
 
-    useEffect(() => {
-        const graph = audioGraphRef.current;
-        if (!graph.isInitialized || !graph.context) return;
-        const { context } = graph;
-        const now = context.currentTime;
-        const RAMP_TIME = 0.05;
-
-        if (graph.mainBusCompressor) {
-            const { normalizationEnabled, normalizationTargetDb } = playoutPolicy;
-            const compressor = graph.mainBusCompressor;
-            compressor.threshold.linearRampToValueAtTime(normalizationEnabled ? normalizationTargetDb : 0, now + RAMP_TIME);
-            compressor.knee.linearRampToValueAtTime(normalizationEnabled ? 5 : 0, now + RAMP_TIME);
-            compressor.ratio.linearRampToValueAtTime(normalizationEnabled ? 12 : 1, now + RAMP_TIME);
-            compressor.attack.setValueAtTime(0.003, now);
-            compressor.release.setValueAtTime(0.25, now);
-        }
-        
-        if (graph.mainBusEq) {
-            const { equalizerEnabled, equalizerBands } = playoutPolicy;
-            const eq = graph.mainBusEq;
-            eq.bass.gain.linearRampToValueAtTime(equalizerEnabled ? equalizerBands.bass : 0, now + RAMP_TIME);
-            eq.mid.gain.linearRampToValueAtTime(equalizerEnabled ? equalizerBands.mid : 0, now + RAMP_TIME);
-            eq.treble.gain.linearRampToValueAtTime(equalizerEnabled ? equalizerBands.treble : 0, now + RAMP_TIME);
-        }
-    }, [playoutPolicy]);
-
-
-    useEffect(() => {
-        const writeNowPlaying = async () => {
-            if (!isNowPlayingExportEnabled || !nowPlayingFileHandleRef.current) {
-                if (nowPlayingFileHandleRef.current) {
-                     const writable = await nowPlayingFileHandleRef.current.createWritable();
-                     await writable.write('');
-                     await writable.close();
-                }
-                return;
-            }
-            
-            let text = 'Silence';
-            if (isPlaying && currentTrack) {
-                const suppression = getSuppressionSettings(currentTrack, mediaLibrary);
-                if (suppression?.enabled) {
-                    text = suppression.customText || 'radiohost.cloud';
-                } else {
-                    text = metadataFormat.replace(/%artist%/g, currentTrack.artist || '').replace(/%title%/g, currentTrack.title || '');
-                }
-            }
-            
-            try {
-                const writable = await nowPlayingFileHandleRef.current.createWritable();
-                await writable.write(text);
-                await writable.close();
-            } catch (e) { console.error("Failed to write to 'Now Playing' file:", e); }
-        };
-        writeNowPlaying();
-    }, [isPlaying, currentTrack, isNowPlayingExportEnabled, mediaLibrary, metadataFormat]);
-    
     const handlePflTrack = useCallback(async (trackId: string) => {
         const player = pflAudioRef.current;
         if (!player) return;
@@ -1985,6 +1345,9 @@ const AppInternal: React.FC = () => {
 
         if (isPflPlaying) stopPfl();
 
+        if (!audioGraphRef.current.isInitialized) {
+            await initializeAudioGraph();
+        }
         const graph = audioGraphRef.current;
         if (graph.context && graph.context.state === 'suspended') await graph.context.resume();
 
@@ -2008,7 +1371,7 @@ const AppInternal: React.FC = () => {
             console.error(`Could not load PFL track: ${track.title}`);
             stopPfl();
         }
-    }, [getTrackSrc, isPflPlaying, pflTrackId, stopPfl]);
+    }, [getTrackSrc, isPflPlaying, pflTrackId, stopPfl, initializeAudioGraph]);
 
     useEffect(() => {
         const player = pflAudioRef.current;
@@ -2146,29 +1509,8 @@ const AppInternal: React.FC = () => {
     }, [addVoiceTrackToState]);
 
     const handleRemoveFromPlaylist = useCallback((itemIdToRemove: string) => {
-        const itemToRemove = playlistRef.current.find(item => item.id === itemIdToRemove);
-        if (itemToRemove && !('markerType' in itemToRemove) && itemToRemove.src && itemToRemove.src.startsWith('blob:')) URL.revokeObjectURL(itemToRemove.src);
-        
-        const newPlaylist = playlistRef.current.filter(item => item.id !== itemIdToRemove);
-        setPlaylist(newPlaylist);
-        sendStudioAction('setPlaylist', newPlaylist);
-
-        if (currentPlayingItemId) {
-            if (currentPlayingItemId === itemIdToRemove) {
-                setIsPlaying(false);
-                setCurrentPlayingItemId(null);
-                const firstPlayable = findNextPlayableIndex(-1, 1);
-                setCurrentTrackIndex(firstPlayable > -1 ? firstPlayable : 0);
-                sendStudioAction('setPlayerState', { isPlaying: false, currentPlayingItemId: null, currentTrackIndex: firstPlayable > -1 ? firstPlayable : 0 });
-            } else {
-                const newIndex = newPlaylist.findIndex(item => item.id === currentPlayingItemId);
-                if (newIndex !== -1) {
-                    setCurrentTrackIndex(newIndex);
-                    sendStudioAction('setPlayerState', { currentTrackIndex: newIndex });
-                }
-            }
-        }
-    }, [currentPlayingItemId, findNextPlayableIndex, sendStudioAction]);
+        sendStudioAction('setPlaylist', playlistRef.current.filter(item => item.id !== itemIdToRemove));
+    }, [sendStudioAction]);
 
     const handleReorderPlaylist = useCallback((draggedId: string, dropTargetId: string | null) => {
         const newPlaylist = [...playlistRef.current];
@@ -2179,36 +1521,16 @@ const AppInternal: React.FC = () => {
         if (dropIndex === -1) newPlaylist.push(draggedItem);
         else newPlaylist.splice(dropIndex, 0, draggedItem);
         
-        setPlaylist(newPlaylist);
         sendStudioAction('setPlaylist', newPlaylist);
-
-        if (currentPlayingItemId) {
-            const newCurrentIndex = newPlaylist.findIndex(item => item.id === currentPlayingItemId);
-            if (newCurrentIndex !== -1) {
-                setCurrentTrackIndex(newCurrentIndex);
-                sendStudioAction('setPlayerState', { currentTrackIndex: newCurrentIndex });
-            }
-        }
-    }, [currentPlayingItemId, sendStudioAction]);
-
+    }, [sendStudioAction]);
 
     const handleClearPlaylist = useCallback(() => {
-        playlistRef.current.forEach(item => {
-            if (!('markerType' in item) && item.src && item.src.startsWith('blob:')) URL.revokeObjectURL(item.src);
-        });
         const newPlaylist = currentTrack ? [currentTrack] : [];
         setPlaylist(newPlaylist);
         setCurrentTrackIndex(0);
         sendStudioAction('setPlaylist', newPlaylist);
         sendStudioAction('setPlayerState', { currentTrackIndex: 0 });
-        if (!currentTrack) {
-            setCurrentPlayingItemId(null);
-            setIsPlaying(false);
-            setTrackProgress(0);
-            handleSetStopAfterTrackId(null);
-            sendStudioAction('setPlayerState', { currentPlayingItemId: null, isPlaying: false, trackProgress: 0 });
-        }
-    }, [currentTrack, handleSetStopAfterTrackId, sendStudioAction]);
+    }, [currentTrack, sendStudioAction]);
 
     const updateMediaLibrary = useCallback((updateFn: (prev: Folder) => Folder) => {
         const newLibrary = updateFn(mediaLibraryRef.current);
@@ -2913,22 +2235,12 @@ const AppInternal: React.FC = () => {
             const newPlaylist = [ ...playlistRef.current.slice(0, 1), ...allItemsToInsert, ...playlistRef.current.slice(1) ];
             setPlaylist(newPlaylist);
             sendStudioAction('setPlaylist', newPlaylist);
-
-            const firstItem = allItemsToInsert.length > 0 ? allItemsToInsert[0] : null;
-            if ( isPlayingRef.current && firstItem && 'markerType' in firstItem && firstItem.markerType === TimeMarkerType.HARD ) {
-                console.log('[Broadcast] Initial hard marker detected. Triggering immediate jump.');
-                const firstPlayableIndexInBlock = allItemsToInsert.findIndex((item, index) => index > 0 && !('markerType' in item));
-                if (firstPlayableIndexInBlock !== -1) {
-                    const targetPlaylistIndex = 1 + firstPlayableIndexInBlock;
-                    triggerHardMarkerFadeAndJump(targetPlaylistIndex);
-                }
-            }
     
             const now = Date.now();
             const loadedIds = new Set(broadcastsToLoad.map(b => b.id));
             setBroadcasts(currentBroadcasts => currentBroadcasts.map(b => loadedIds.has(b.id) ? { ...b, lastLoaded: now } : b));
         }
-    }, [isStudio, sendStudioAction, triggerHardMarkerFadeAndJump]);
+    }, [isStudio, sendStudioAction]);
 
     const handleManualLoadBroadcast = useCallback((broadcastId: string) => {
         const broadcastToLoad = broadcastsRef.current.find(b => b.id === broadcastId);
@@ -3021,7 +2333,7 @@ const AppInternal: React.FC = () => {
                 setRtcSignal(data);
             } else if (data.type === 'chatMessage') {
                 setChatMessages(prev => [...prev.slice(-100), data.payload]);
-                if (activeRightColumnTabRef.current !== 'chat' && !isMobile) {
+                if (activeRightColumnTabRef.current !== 'chat' || isMobile) {
                     setHasUnreadChat(true);
                 }
             } else if (playoutPolicyRef.current.playoutMode === 'studio' && data.type === 'voiceTrackAdd') {
@@ -3033,22 +2345,6 @@ const AppInternal: React.FC = () => {
                         console.log('[Studio] Received and added new VT from presenter.');
                     })
                     .catch(err => console.error("Failed to process incoming VT blob:", err));
-            } else if (data.type === 'presenter-on-air-request') {
-                if (playoutPolicyRef.current.playoutMode === 'studio') {
-                    const { presenterEmail, onAir } = data.payload;
-                    const sourceId: AudioSourceId = `remote_${presenterEmail}`;
-                    
-                    setMixerConfig(prevConfig => {
-                        if (!prevConfig[sourceId]) {
-                            console.warn(`Received on-air request for unknown remote user: ${presenterEmail}`);
-                            return prevConfig;
-                        }
-                        const newConfig = JSON.parse(JSON.stringify(prevConfig));
-                        newConfig[sourceId].sends.main.enabled = onAir;
-                        console.log(`[Studio] Setting ${presenterEmail} onAir status to ${onAir}`);
-                        return newConfig;
-                    });
-                }
             } else if (data.type === 'presenters-update') {
                 console.log('[WebSocket] Received presenters update:', data.payload.presenters);
                 setOnlinePresenters(data.payload.presenters);
@@ -3119,135 +2415,21 @@ const AppInternal: React.FC = () => {
         }
     }, [logoSrc, isStudio, wsStatus]);
     
-    // --- Public Stream State (lifted from PublicStream.tsx) ---
-    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const lastSentMetadataRef = useRef<string | null>(null);
-
-    const availableFormats = useMemo(() => {
-        if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined' || !isSecureContext) return [];
-        const formats = [
-            { id: 'opus', name: 'Opus (High Quality)', mimeType: 'audio/webm; codecs=opus', bitrates: [64000, 96000, 128000, 192000, 256000] },
-            { id: 'aac', name: 'AAC (High Compatibility)', mimeType: 'audio/mp4; codecs=mp4a.40.2', bitrates: [64000, 96000, 128000, 192000, 256000] },
-            { id: 'mp3', name: 'MP3 (Universal)', mimeType: 'audio/mpeg', bitrates: [64000, 96000, 128000, 192000, 256000, 320000] },
-        ];
-        return formats.filter(f => MediaRecorder.isTypeSupported(f.mimeType));
-    }, [isSecureContext]);
-
+    // --- Public Stream State & Logic ---
     const [isPublicStreamEnabled, setIsPublicStreamEnabled] = useState(false);
     const [publicStreamStatus, setPublicStreamStatus] = useState<StreamStatus>('inactive');
     const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
-    const [publicStreamCodec, setPublicStreamCodec] = useState(availableFormats[0]?.id || '');
-    const [publicStreamBitrate, setPublicStreamBitrate] = useState(128000);
-    
-    // --- Public Stream Logic ---
 
-    const stopPublicStream = useCallback(() => {
-        setPublicStreamStatus('stopping');
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-            mediaRecorderRef.current.stop();
-        }
-        mediaRecorderRef.current = null;
-        setPublicStreamStatus('inactive');
-    }, []);
-
-    const startPublicStream = useCallback(async () => {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !mainBusStream) {
-            setPublicStreamError("Connection or audio stream not available.");
-            setPublicStreamStatus('error');
-            return;
-        }
-
-        setPublicStreamStatus('starting');
-        setPublicStreamError(null);
-
-        try {
-            const selectedFormat = availableFormats.find(f => f.id === publicStreamCodec);
-            if (!selectedFormat) {
-                throw new Error("Selected codec is not supported by your browser.");
-            }
-            const mimeType = selectedFormat.mimeType;
-            
-            wsRef.current.send(JSON.stringify({ type: 'streamConfigUpdate', payload: { mimeType } }));
-
-            const recorder = new MediaRecorder(mainBusStream, { mimeType, audioBitsPerSecond: publicStreamBitrate });
-            mediaRecorderRef.current = recorder;
-
-            recorder.ondataavailable = async (event) => {
-                if (event.data.size > 0 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                    const MSG_TYPE_PUBLIC_STREAM_CHUNK = 1;
-                    const arrayBuffer = await event.data.arrayBuffer();
-                    const messageBuffer = new ArrayBuffer(arrayBuffer.byteLength + 1);
-                    const view = new Uint8Array(messageBuffer);
-                    view[0] = MSG_TYPE_PUBLIC_STREAM_CHUNK;
-                    view.set(new Uint8Array(arrayBuffer), 1);
-                    wsRef.current.send(messageBuffer);
-                }
-            };
-            
-            recorder.onstop = () => {
-                 console.log("MediaRecorder stopped.");
-                 setPublicStreamStatus('inactive');
-            };
-
-            recorder.onerror = (event) => {
-                console.error("MediaRecorder error:", event);
-                setPublicStreamError("An error occurred during media recording.");
-                setPublicStreamStatus('error');
-                stopPublicStream();
-            };
-
-            recorder.start(1000); 
-            setPublicStreamStatus('broadcasting');
-
-        } catch (err) {
-            console.error("Failed to start public stream:", err);
-            setPublicStreamError(err instanceof Error ? err.message : "An unknown error occurred.");
-            setPublicStreamStatus('error');
-            stopPublicStream();
-        }
-    }, [wsRef, mainBusStream, availableFormats, publicStreamCodec, publicStreamBitrate, stopPublicStream]);
-    
     const handleTogglePublicStream = (enabled: boolean) => {
         setIsPublicStreamEnabled(enabled);
+        sendStudioAction('togglePublicStream', enabled);
+        // The server will handle status updates. For now, we can optimistically update.
         if (enabled) {
-            startPublicStream();
+            setPublicStreamStatus('broadcasting'); // Assume success
         } else {
-            stopPublicStream();
+            setPublicStreamStatus('inactive');
         }
     };
-
-    const handlePublicStreamConfigChange = ({ codec, bitrate }: { codec: string, bitrate: number }) => {
-        setPublicStreamCodec(codec);
-        setPublicStreamBitrate(bitrate);
-    };
-
-    // Effect for metadata updates
-    useEffect(() => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && publicStreamStatus === 'broadcasting') {
-            const nextTrackTitle = (isPlayingRef.current && nextTrack)
-                ? `${nextTrack.artist || ''} - ${nextTrack.title || ''}`.replace(/^ - /, '').trim()
-                : null;
-    
-            const metadataHeader = playoutPolicyRef.current.streamingConfig.metadataHeader;
-            const trackTitle = isPlayingRef.current ? (displayTrack?.title || '...') : 'Silence';
-            const finalTitle = metadataHeader && metadataHeader.trim() !== ''
-                ? `${metadataHeader.trim()}: ${trackTitle}`
-                : trackTitle;
-
-            const metadataPayload = {
-                title: finalTitle,
-                artist: isPlayingRef.current ? (displayTrack?.artist || 'RadioHost.cloud') : 'RadioHost.cloud',
-                artworkUrl: isPlayingRef.current ? loadedArtworkUrl : null,
-                nextTrackTitle: nextTrackTitle
-            };
-            const metadataString = JSON.stringify(metadataPayload);
-
-            if (metadataString !== lastSentMetadataRef.current) {
-                wsRef.current.send(JSON.stringify({ type: 'metadataUpdate', payload: metadataPayload }));
-                lastSentMetadataRef.current = metadataString;
-            }
-        }
-    }, [displayTrack, isPlaying, loadedArtworkUrl, publicStreamStatus, nextTrack]);
 
     const handleSendChatMessage = useCallback((text: string, from?: string) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -3260,20 +2442,11 @@ const AppInternal: React.FC = () => {
                 type: 'chatMessage',
                 payload: message
             }));
-            // Optimistically add the message to the sender's own UI, as the server
-            // might not echo it back to the studio/presenter client.
+            // Optimistically add the message to the sender's own UI
             setChatMessages(prev => [...prev.slice(-100), message]);
         }
     }, []);
 
-    // Cleanup effect
-    useEffect(() => {
-        return () => {
-            if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-                mediaRecorderRef.current.stop();
-            }
-        }
-    }, []);
 
     if (isLoadingSession) {
         return (
@@ -3436,20 +2609,13 @@ const AppInternal: React.FC = () => {
                                     {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
                                     {isStudio && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
                                     {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} />}
-                                    {/* FIX: Corrected typo from `availableOutputDevices` to `availableAudioDevices` to match the state variable name. */}
-                                    {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} />}
+                                    {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} onlinePresenters={onlinePresenters}/>}
                                     {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
                                     {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
                                         isPublicStreamEnabled={isPublicStreamEnabled}
                                         publicStreamStatus={publicStreamStatus}
                                         publicStreamError={publicStreamError}
-                                        publicStreamCodec={publicStreamCodec}
-                                        publicStreamBitrate={publicStreamBitrate}
                                         onTogglePublicStream={handleTogglePublicStream}
-                                        onConfigChange={handlePublicStreamConfigChange}
-                                        availableFormats={availableFormats}
-                                        isAudioEngineReady={audioGraphRef.current.isInitialized} 
-                                        isAudioEngineInitializing={isAudioEngineInitializing}
                                         isSecureContext={isSecureContext}
                                         policy={playoutPolicy}
                                         onUpdatePolicy={setPlayoutPolicy}
@@ -3541,10 +2707,7 @@ const AppInternal: React.FC = () => {
                 policy={playoutPolicy}
             />
             
-            <audio ref={playerARef} crossOrigin="anonymous"></audio>
-            <audio ref={playerBRef} crossOrigin="anonymous"></audio>
             <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
-            <audio ref={mainBusAudioRef} autoPlay></audio>
             <audio ref={monitorBusAudioRef} autoPlay></audio>
         </div>
     );
