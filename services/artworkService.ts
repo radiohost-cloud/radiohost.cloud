@@ -15,10 +15,16 @@ export const fetchArtwork = async (artist: string, title: string): Promise<strin
         }
 
         const data = await response.json();
-        if (data.resultCount > 0 && data.results[0].artworkUrl100) {
-            const artworkUrl: string = data.results[0].artworkUrl100;
-            // Replace '100x100' with a higher resolution, e.g., '600x600' for better quality
-            return artworkUrl.replace(/100x100(bb)?\.jpg/, '600x600bb.jpg');
+        if (data.resultCount > 0 && data.results[0]) {
+            const result = data.results[0];
+            // Find the best available artwork URL provided by the API
+            const artworkUrl = result.artworkUrl100 || result.artworkUrl60 || result.artworkUrl30;
+            
+            if (artworkUrl && typeof artworkUrl === 'string') {
+                // Replace the size in the URL to request a higher resolution image.
+                // This is more robust than matching a specific size like '100x100'.
+                return artworkUrl.replace(/\/\d+x\d+[^/]*$/, '/600x600bb.jpg');
+            }
         }
 
         return null;
