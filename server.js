@@ -179,7 +179,12 @@ const playNextTrack = async () => {
         return;
     }
 
-    const trackPath = path.join(__dirname, track.src);
+    let relativeTrackPath = track.src;
+    if (relativeTrackPath.toLowerCase().startsWith('/media/')) {
+        relativeTrackPath = relativeTrackPath.substring('/media/'.length);
+    }
+    const trackPath = path.join(mediaDir, relativeTrackPath);
+
 
     if (!fs.existsSync(trackPath)) {
         console.error(`[Playback] Track file not found: ${trackPath}. Skipping.`);
@@ -392,7 +397,7 @@ app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { nam
         
         const newTrack = {
             ...metadata,
-            src: `/media/${relativeAudioPath.replace(/\\/g, '/')}`,
+            src: `/Media/${relativeAudioPath.replace(/\\/g, '/')}`,
             hasEmbeddedArtwork: !!artworkFile
         };
 
@@ -497,7 +502,7 @@ app.get('/stream/live.:ext', (req, res) => {
 // This must come AFTER all API routes
 
 // Serve media and artwork files from their respective directories
-app.use('/media', express.static(mediaDir));
+app.use('/Media', express.static(mediaDir));
 app.use('/artwork', express.static(artworkDir));
 
 // Serve the built frontend app from the 'dist' directory

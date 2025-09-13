@@ -20,15 +20,7 @@ export default defineConfig(({ mode }) => {
           target: 'http://localhost:3000',
           changeOrigin: true,
         },
-        '/media': {
-            target: 'http://localhost:3000',
-            changeOrigin: true,
-        },
-        '/artwork': {
-            target: 'http://localhost:3000',
-            changeOrigin: true,
-        },
-        '/stream': {
+        '/Media': {
             target: 'http://localhost:3000',
             changeOrigin: true,
         },
