@@ -125,9 +125,10 @@ const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
                         <li><strong>Customize Grid:</strong> Click the <Key>⚙️</Key> icon to change the number of rows and columns.</li>
                         <li><strong>Color Code:</strong> Right-click a loaded cart to assign it a color for easy identification.</li>
                     </ul>
-                    <SubTitle>Wikipedia Assistant</SubTitle>
+                    <SubTitle>Last.fm Assistant</SubTitle>
                     <ul className="list-disc list-inside space-y-1 pl-4">
-                        <li><strong>Wikipedia Assistant:</strong> Get interesting facts about the currently playing song directly from Wikipedia to share with your listeners. You can select the language for the article you want to read.</li>
+                        <li>Get interesting facts, artist bios, and similar artists for the currently playing song from Last.fm.</li>
+                         <li><strong>Note:</strong> This feature requires a free API key from Last.fm. You can get one and add it in the <Key>Settings</Key> tab under "Integrations".</li>
                     </ul>
                     <SubTitle>Streaming</SubTitle>
                     <p>Connect to an Icecast or Shoutcast server to broadcast live.</p>
@@ -145,7 +146,7 @@ const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
                         <li><strong>Ducking &amp; Processing:</strong> Configure automatic music ducking and apply master EQ/compression from this tab.</li>
                     </ul>
                     <SubTitle>Settings</SubTitle>
-                    <p>Configure playout rules, Auto-Fill, "Now Playing" export, and data management.</p>
+                    <p>Configure playout rules, Auto-Fill, "Now Playing" export, integrations, and data management.</p>
                     
                     <SectionTitle>6. Live Presenter Mode (Microphone Panel)</SectionTitle>
                     <p>This panel is at the bottom of the right column.</p>

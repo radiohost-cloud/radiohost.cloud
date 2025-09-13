@@ -114,6 +114,14 @@ const broadcastLibrary = () => {
     });
 };
 
+const broadcastMetadata = () => {
+    browserPlayerClients.forEach(clientWs => {
+        if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(JSON.stringify({ type: 'metadataUpdate', payload: { ...currentMetadata, logoSrc: currentLogoSrc } }));
+        }
+    });
+};
+
 const broadcastPresenterList = async () => {
     if (!studioClientEmail) return;
     const studioWs = clients.get(studioClientEmail);
@@ -145,7 +153,7 @@ const findNextPlayableTrackIndex = (startIndex) => {
     return -1; // No playable tracks found
 };
 
-const stopPlaybackEngine = () => {
+const stopPlaybackEngine = async () => {
     console.log('[Playback Engine] Stopping...');
     if (playbackEngineState.playheadTimeout) clearTimeout(playbackEngineState.playheadTimeout);
     if (playbackEngineState.progressInterval) clearInterval(playbackEngineState.progressInterval);
@@ -156,6 +164,15 @@ const stopPlaybackEngine = () => {
     db.data.sharedPlayerState.isPlaying = false;
     db.data.sharedPlayerState.trackProgress = 0;
     db.data.sharedPlayerState.currentPlayingItemId = null;
+
+    const stationSettings = await getStationSettings();
+    currentMetadata = {
+        title: stationSettings.stationName || "RadioHost.cloud",
+        artist: "Stream Offline",
+        artworkUrl: stationSettings.logoSrc,
+        nextTrackTitle: null
+    };
+    broadcastMetadata();
     broadcastState();
 };
 
@@ -191,6 +208,17 @@ const playNextTrack = async () => {
     }
     
     console.log(`[Playback Engine] Playing track: ${track.title} (Index: ${currentIndex})`);
+    
+    // Update metadata
+    const nextPlayableIndex = findNextPlayableTrackIndex(currentIndex);
+    const nextTrack = nextPlayableIndex > -1 ? playlist[nextPlayableIndex] : null;
+    currentMetadata = {
+        title: track.title,
+        artist: track.artist || '',
+        artworkUrl: track.hasEmbeddedArtwork ? `/api/artwork/${track.id}` : (track.remoteArtworkUrl || null),
+        nextTrackTitle: nextTrack ? `${nextTrack.artist || ''} - ${nextTrack.title}` : null
+    };
+    broadcastMetadata();
 
     db.data.sharedPlayerState.currentPlayingItemId = track.id;
     db.data.sharedPlayerState.currentTrackIndex = currentIndex;
@@ -446,21 +474,7 @@ wss.on('connection', async (ws, req) => {
                     if (studioClientEmail && studioClientEmail === email) {
                         currentLogoSrc = data.payload.logoSrc;
                         console.log(`[WebSocket] Studio updated logo.`);
-                        browserPlayerClients.forEach(clientWs => {
-                            if (clientWs.readyState === ws.OPEN) {
-                                clientWs.send(JSON.stringify({ type: 'configUpdate', payload: { logoSrc: currentLogoSrc } }));
-                            }
-                        });
-                    }
-                    break;
-                case 'metadataUpdate':
-                    if (studioClientEmail && studioClientEmail === email) {
-                        currentMetadata = data.payload;
-                        browserPlayerClients.forEach(clientWs => {
-                            if (clientWs.readyState === ws.OPEN) {
-                                clientWs.send(JSON.stringify({ type: 'metadataUpdate', payload: { ...currentMetadata, logoSrc: currentLogoSrc } }));
-                            }
-                        });
+                        broadcastMetadata();
                     }
                     break;
                 
@@ -774,136 +788,4 @@ app.post('/api/signup', async (req, res) => {
     await db.read();
     const existingUser = db.data.users.find(u => u.email === email);
     if (existingUser) {
-        return res.status(409).json({ message: 'User already exists' });
-    }
-
-    const isFirstUser = db.data.users.length === 0;
-    const newUser = { email, password, nickname, role: isFirstUser ? 'studio' : 'presenter' };
-    db.data.users.push(newUser);
-    await db.write();
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { password: _, ...userWithoutPassword } = newUser;
-    res.status(201).json(userWithoutPassword);
-});
-
-app.get('/api/users', async (req, res) => {
-    await db.read();
-    const users = db.data.users.map(({ password, ...user }) => user);
-    res.json(users);
-});
-
-app.put('/api/user/:email/role', async (req, res) => {
-    const { email } = req.params;
-    const { role } = req.body;
-    await db.read();
-    const user = db.data.users.find(u => u.email === email);
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    if (role !== 'studio' && role !== 'presenter') return res.status(400).json({ message: 'Invalid role' });
-    user.role = role;
-    await db.write();
-    const { password, ...userWithoutPassword } = user;
-    res.json(userWithoutPassword);
-});
-
-
-app.get('/api/userdata/:email', async (req, res) => {
-    await db.read();
-    const userData = db.data.userdata[req.params.email] || {};
-    res.json(userData);
-});
-
-app.post('/api/userdata/:email', async (req, res) => {
-    await db.read();
-    db.data.userdata[req.params.email] = req.body;
-    await db.write();
-    res.status(200).json({ message: 'User data saved' });
-});
-
-app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { name: 'artworkFile', maxCount: 1 }]), async (req, res) => {
-    try {
-        const metadata = JSON.parse(req.body.metadata);
-        const destinationPath = req.body.destinationPath || '';
-        const audioFile = req.files['audioFile'][0];
-        const artworkFile = req.files['artworkFile'] ? req.files['artworkFile'][0] : null;
-
-        const finalDir = path.join(mediaDir, destinationPath);
-        if (!fs.existsSync(finalDir)) {
-            await fsPromises.mkdir(finalDir, { recursive: true });
-        }
-        
-        const fileName = `${metadata.id}_${audioFile.originalname}`;
-        const filePath = path.join(finalDir, fileName);
-        await fsPromises.writeFile(filePath, audioFile.buffer);
-
-        metadata.src = `/media/${path.join(destinationPath, fileName).replace(/\\/g, '/')}`;
-
-        if (artworkFile) {
-            const artworkPath = path.join(artworkDir, `${metadata.id}.jpg`);
-            await fsPromises.writeFile(artworkPath, artworkFile.buffer);
-            metadata.hasEmbeddedArtwork = true;
-        }
-
-        res.status(201).json(metadata);
-    } catch (error) {
-        console.error('Upload error:', error);
-        res.status(500).json({ message: 'Error uploading file' });
-    }
-});
-
-app.get('/api/artwork/:trackId', (req, res) => {
-    const trackId = req.params.trackId;
-    const artworkPath = path.join(artworkDir, `${trackId}.jpg`);
-    if (fs.existsSync(artworkPath)) {
-        res.sendFile(artworkPath);
-    } else {
-        res.status(404).send('Artwork not found');
-    }
-});
-
-
-app.post('/api/track/delete', async (req, res) => {
-    try {
-        const { id, src } = req.body;
-        if (src) {
-            const filePath = path.join(__dirname, src);
-            if (fs.existsSync(filePath)) {
-                await fsPromises.unlink(filePath);
-            }
-        }
-        const artworkPath = path.join(artworkDir, `${id}.jpg`);
-        if (fs.existsSync(artworkPath)) {
-            await fsPromises.unlink(artworkPath);
-        }
-        res.status(200).json({ message: 'Track deleted' });
-    } catch (error) {
-        console.error('Delete error:', error);
-        res.status(500).json({ message: 'Error deleting track' });
-    }
-});
-
-
-app.post('/api/folder', async (req, res) => {
-    try {
-        const { path: folderPath } = req.body;
-        const fullPath = path.join(mediaDir, folderPath);
-        if (!fs.existsSync(fullPath)) {
-            await fsPromises.mkdir(fullPath, { recursive: true });
-        }
-        res.status(201).json({ message: 'Folder created' });
-    } catch (error) {
-        console.error('Folder creation error:', error);
-        res.status(500).json({ message: 'Error creating folder' });
-    }
-});
-
-// --- Catch-all for SPA ---
-// This must be after all other API routes
-app.get('*', (req, res) => {
-    res.sendFile(path.join(distPath, 'index.html'));
-});
-
-
-// --- Server Listen ---
-server.listen(PORT, () => {
-    console.log(`RadioHost.cloud server running on http://localhost:${PORT}`);
-});
+        return res.status

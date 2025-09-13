@@ -125,6 +125,7 @@ export interface PlayoutPolicy {
   autoFillTargetDuration: number; // in minutes
   voiceTrackEditorPreviewDuration: number; // in seconds
   streamingConfig: StreamingConfig;
+  lastFmApiKey?: string;
 }
 
 export interface PlayoutHistoryEntry {

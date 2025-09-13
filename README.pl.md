@@ -11,7 +11,7 @@
 Aplikacja opiera się na elastycznej architekturze, która obsługuje dwa odrębne tryby działania:
 
 1.  **Tryb DEMO (PWA):** Działa w całości w przeglądarce, wykorzystując IndexedDB do przechowywania wszystkich danych i mediów. Jest to w pełni funkcjonalna, działająca w trybie offline Progresywna Aplikacja Webowa (PWA), idealna dla pojedynczych użytkowników, do testowania lub demonstracji.
-2.  **Tryb HOST (Klient-Serwer):** Łączy się z dedykowanym serwerem backendowym Node.js. Ten tryb jest przeznaczony dla środowisk wieloosobowych, umożliwiając współdzieloną bibliotekę mediów, synchronizację playlisty w czasie rzeczywistym oraz zdalny dostęp dla prezenterów.
+2.  **Tryb HOST (Klient-Serwer):** Łączy się z dedykowanym serwerem backendowym Node.js. Ten tryb jest przeznaczony dla środowisk wieloosobowych, umożliwiając współdzieloną bibliotekę mediów, synchronizację playlisty w czasie rzeczywistym oraz w pełni autonomiczny silnik odtwarzania 24/7.
 
 ## ✨ Kluczowe Funkcje
 
@@ -23,36 +23,40 @@ Aplikacja opiera się na elastycznej architekturze, która obsługuje dwa odręb
 *   **Wskaźniki Poziomu na Żywo:** Mierniki poziomu sygnału audio w czasie rzeczywistym dla wszystkich źródeł i szyn.
 
 ### 🎼 Inteligentna Oś Czasu i Playlista
-*   **Interfejs Przeciągnij i Upuść:** Łatwo buduj i zmieniaj kolejność elementów w swojej audycji.
-*   **Auto-Fill (Ochrona przed Ciszą):** Automatycznie dodaje utwory z określonego folderu lub tagu, aby zapobiec ciszy na antenie.
+*   **Interfejs Przeciągnij i Upuść:** Łatwo buduj i zmieniaj kolejność elementów w swojej audycji dzięki obliczeniom czasu rozpoczęcia w czasie rzeczywistym.
+*   **Auto-Fill (Ochrona przed Ciszą):** Automatycznie dodaje utwory z określonego folderu lub tagu, aby zapobiec ciszy na antenie, gdy playlista się kończy.
 *   **Znaczniki Czasu (Twarde i Miękkie):** Planuj precyzyjne przejścia, wymuszając skok do konkretnego elementu o dokładnym czasie (Twardy) lub po zakończeniu bieżącego utworu (Miękki).
-*   **Edytor Voice Tracków:** Potężny edytor do nagrywania i miksowania zapowiedzi głosowych bezpośrednio między utworami, z regulacją czasu, płynnymi przejściami (fade) i przycinaniem audio.
 
-### 📡 Transmisja na Żywo i Współpraca
-*   **Tryb Zdalnego Prezentera (WebRTC):** (Tryb HOST) Zaproś współprowadzących do połączenia się ze studiem z dowolnego miejsca. Dźwięk z ich mikrofonu jest przesyłany strumieniowo bezpośrednio do dedykowanego kanału w mikserze.
-*   **Publiczny Streaming:** (Tryb HOST) Nadawaj swoje główne wyjście audio bezpośrednio z przeglądarki na publiczny adres URL. System udostępnia stronę odtwarzacza dla słuchaczy, którą można udostępniać i która jest przyjazna dla urządzeń mobilnych.
-*   **Czat na Żywo ze Słuchaczami:** (Tryb HOST) Komunikuj się ze swoją publicznością w czasie rzeczywistym za pomocą widżetu czatu na publicznej stronie odtwarzacza.
-*   **Statystyki na Żywo:** Zobacz listę aktualnie podłączonych słuchaczy do Twojego publicznego streamu.
+### 🎙️ Profesjonalne Nagrywanie Voice Tracków
+*   **Edytor Liniowy:** Nagrywaj i miksuj zapowiedzi głosowe bezpośrednio między utworami, nie opuszczając osi czasu.
+*   **Wizualny Miks:** Dostosuj czas, płynne przejścia (fades) i przycinaj poziomy audio, przeciągając fale dźwiękowe, aby uzyskać idealne przejście.
+*   **Zdalne VT:** Prezenterzy mogą nagrywać i przesyłać voice tracki do studia za pomocą interfejsu mobilnego.
 
-### 🗂️ Biblioteka Mediów
+### 📡 Transmisja na Żywo i Współpraca (Tryb HOST)
+*   **Autonomiczne Odtwarzanie 24/7:** Serwer zarządza odtwarzaniem bezpośrednio, co oznacza, że stacja pozostaje na antenie, nawet jeśli przeglądarka studia jest zamknięta.
+*   **Tryb Zdalnego Prezentera (WebRTC):** Zaproś współprowadzących do połączenia się ze studiem z dowolnego miejsca. Dźwięk z ich mikrofonu jest przesyłany strumieniowo bezpośrednio do dedykowanego kanału w mikserze.
+*   **Publiczny Streaming:** Serwer nadaje główne wyjście audio na publiczny adres URL ze stroną odtwarzacza przyjazną dla urządzeń mobilnych.
+*   **Czat na Żywo ze Słuchaczami:** Komunikuj się ze swoją publicznością w czasie rzeczywistym za pomocą widżetu czatu na publicznej stronie odtwarzacza.
+*   **Zarządzanie Użytkownikami:** Przypisuj role użytkownikom, wyznaczając ich jako operatorów "Studia" z pełną kontrolą lub "Prezenterów" ze zdalnym dostępem.
+
+### 🗂️ Biblioteka Mediów i Zarządzanie
 *   **Centralne i Lokalne Przechowywanie:** Przesyłaj pliki na centralny serwer (Tryb HOST) lub przechowuj je lokalnie w przeglądarce (Tryb DEMO).
 *   **Organizacja:** Używaj folderów i tagów do kategoryzacji wszystkich zasobów. Tagowanie folderu stosuje tagi do całej jego zawartości.
 *   **Zaawansowany Import:** Przesyłaj pojedyncze pliki lub importuj całą strukturę folderów ze swojego komputera.
 *   **Metadane i Okładki:** Automatyczne parsowanie tagów ID3 i pobieranie okładek z API iTunes.
 *   **PFL (Odsłuch przed Emisją):** Podglądaj utwory z biblioteki na wyjściu monitorowym bez emitowania ich na antenę.
 
-### ⚙️ Planowanie i Zarządzanie
+### ⚙️ Planowanie i Automatyzacja
 *   **Harmonogram Audycji:** Planuj audycje z wyprzedzeniem. Twórz audycje z określonym czasem rozpoczęcia, powtarzalnymi harmonogramami (codziennie, tygodniowo, miesięcznie) i dedykowaną playlistą. Audycje są automatycznie ładowane na oś czasu, gdy nadchodzi ich pora.
-*   **Zarządzanie Użytkownikami:** (Tryb HOST) Przypisuj role użytkownikom, wyznaczając ich jako operatorów "Studia" z pełną kontrolą lub "Prezenterów" ze zdalnym dostępem.
 *   **Zarządzanie Danymi:** Eksportuj całą swoją konfigurację (bibliotekę, playlisty, ustawienia) do jednego pliku JSON w celu tworzenia kopii zapasowych lub migracji.
 *   **Automatyczne Kopie Zapasowe:** Skonfiguruj aplikację tak, aby automatycznie zapisywała pliki kopii zapasowych w lokalnym folderze w określonych odstępach czasu lub przy uruchomieniu.
 
-### 📱 Interfejs Użytkownika i Doświadczenie
+### 📱 Nowoczesny Interfejs Użytkownika
 *   **Elastyczny Układ:** W pełni konfigurowalny interfejs, w którym możesz przeciągać, aby zmieniać rozmiar wszystkich kolumn i głównego nagłówka.
 *   **Dwa Widoki Nagłówka:** Kompaktowy nagłówek dla maksymalnej przestrzeni roboczej, który rozszerza się do widoku z trzema odtwarzaczami, pokazując "Teraz Odtwarzane", "Następny" i "Kolejny" z dużymi okładkami.
 *   **Kartoteka (Cartwall):** Siatka do natychmiastowego odtwarzania dżingli, efektów dźwiękowych i reklam z wieloma konfigurowalnymi stronami.
-*   **Integracja z Last.fm:** Przeglądaj biografie artystów, podobnych wykonawców i informacje o aktualnie odtwarzanym utworze.
-*   **Interfejs Mobilny:** Dedykowany, przyjazny dla dotyku interfejs dla prezenterów, pozwalający na prowadzenie audycji na żywo i nagrywanie voice tracków z urządzeń mobilnych.
+*   **Integracja z Last.fm:** Przeglądaj biografie artystów, podobnych wykonawców i informacje o aktualnie odtwarzanym utworze. Wymaga darmowego klucza API Last.fm.
+*   **Interfejs Mobilny:** Dedykowany, przyjazny dla dotyku interfejs dla prezenterów, pozwalający na prowadzenie audycji na żywo, nagrywanie voice tracków i czatowanie z urządzeń mobilnych.
 *   **Progresywna Aplikacja Webowa (PWA):** Zainstaluj aplikację na swoim pulpicie, aby uzyskać doświadczenie zbliżone do natywnej aplikacji, działającej również w trybie offline.
 
 ## 🚀 Pierwsze Kroki

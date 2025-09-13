@@ -282,6 +282,26 @@ const Settings: React.FC<SettingsProps> = ({
                 </div>
             </div>
 
+            <hr className="border-neutral-200 dark:border-neutral-800" />
+
+            <div>
+                <h2 className="text-xl font-semibold">Integrations</h2>
+                <div className="mt-4 space-y-2">
+                    <label htmlFor="lastfm-api-key" className="block text-sm font-medium">Last.fm API Key</label>
+                     <input
+                        id="lastfm-api-key"
+                        type="password"
+                        value={policy.lastFmApiKey || ''}
+                        onChange={(e) => handlePolicyChange('lastFmApiKey', e.target.value)}
+                        placeholder="Enter your Last.fm API key"
+                        className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-black dark:text-white"
+                    />
+                    <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                        Enables fetching artist and track info. Get a free key from <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">last.fm</a>.
+                    </p>
+                </div>
+            </div>
+
              <hr className="border-neutral-200 dark:border-neutral-800" />
             
             <div>

@@ -11,7 +11,7 @@ English | [Polski](README.pl.md)
 The application is built around a flexible architecture that supports two distinct operational modes:
 
 1.  **DEMO Mode (PWA):** Runs entirely in the browser, leveraging IndexedDB for all data and media storage. It's a full-featured, offline-first Progressive Web App ideal for single users, testing, or demonstrations.
-2.  **HOST Mode (Client-Server):** Connects to a dedicated Node.js backend server. This mode is designed for collaborative, multi-user environments, enabling a central shared media library, real-time playlist synchronization, and remote presenter capabilities.
+2.  **HOST Mode (Client-Server):** Connects to a dedicated Node.js backend server. This mode is designed for collaborative, multi-user environments, enabling a central shared media library, real-time playlist synchronization, and a fully autonomous 24/7 playback engine.
 
 ## ✨ Key Features
 
@@ -23,36 +23,40 @@ The application is built around a flexible architecture that supports two distin
 *   **Live Metering:** Real-time audio level meters for all sources and buses.
 
 ### 🎼 Smart Timeline & Playlist
-*   **Drag-and-Drop Interface:** Easily build and reorder your show's timeline.
+*   **Drag-and-Drop Interface:** Easily build and reorder your show's timeline with real-time start time calculations.
 *   **Auto-Fill (Dead Air Protection):** Automatically adds tracks from a specified folder or tag to prevent silence when the playlist runs out.
 *   **Time Markers (Hard & Soft):** Schedule precise transitions, forcing playback to jump to a specific item at an exact time (Hard) or after the current track finishes (Soft).
-*   **Voice Track Editor:** A powerful in-line editor to record and mix voice-overs directly between tracks, with adjustable timing, fades, and audio trimming.
 
-### 📡 Live Streaming & Collaboration
-*   **Remote Presenter Mode (WebRTC):** (HOST Mode) Invite co-hosts to connect to the studio from anywhere. Their microphone audio is streamed directly into a dedicated mixer channel.
-*   **Public Streaming:** (HOST Mode) Broadcast your main output directly from the browser to a public URL. The system provides a shareable, mobile-friendly player page for listeners.
-*   **Live Listener Chat:** (HOST Mode) Engage with your audience in real-time through a chat widget on the public player page.
-*   **Live Stats:** View a list of current listeners connected to your public stream.
+### 🎙️ Professional Voice Tracking
+*   **In-Line Editor:** Record and mix voice-overs directly between tracks without leaving the timeline.
+*   **Visual Mixing:** Adjust timing, fades, and audio trim levels by dragging waveforms for a perfect transition.
+*   **Remote VT:** Presenters can record and submit voice tracks to the studio from the mobile UI.
 
-### 🗂️ Media Library
+### 📡 Live Streaming & Collaboration (HOST Mode)
+*   **Autonomous 24/7 Playout:** The server manages playback directly, meaning the station stays on-air even if the studio browser is closed.
+*   **Remote Presenter Mode (WebRTC):** Invite co-hosts to connect to the studio from anywhere. Their microphone audio is streamed directly into a dedicated mixer channel.
+*   **Public Streaming:** The server broadcasts the main output to a public URL with a mobile-friendly player page for listeners.
+*   **Live Listener Chat:** Engage with your audience in real-time through a chat widget on the public player page.
+*   **User Management:** Assign roles to users, designating them as "Studio" operators with full control or "Presenters" with remote access.
+
+### 🗂️ Media Library & Management
 *   **Central & Local Storage:** Upload files to a central server (HOST Mode) or store them locally in the browser (DEMO Mode).
 *   **Organization:** Use folders and tags to categorize all assets. Tagging a folder applies tags to all its contents.
 *   **Advanced Import:** Upload individual files or import an entire folder structure from your computer.
 *   **Metadata & Artwork:** Automatic ID3 tag parsing and artwork fetching from the iTunes API.
 *   **PFL (Pre-Fade Listen):** Preview tracks in the library through the monitor output without going on air.
 
-### ⚙️ Scheduling & Management
+### ⚙️ Scheduling & Automation
 *   **Broadcast Scheduler:** Plan shows in advance. Create broadcasts with specific start times, repeatable schedules (daily, weekly, monthly), and a dedicated playlist. Broadcasts are automatically loaded into the timeline when they are scheduled to start.
-*   **User Management:** (HOST Mode) Assign roles to users, designating them as "Studio" operators with full control or "Presenters" with remote access.
 *   **Data Management:** Export your entire setup (library, playlists, settings) to a single JSON file for backup or migration.
 *   **Automatic Backups:** Configure the app to automatically save backup files to a local folder at a set interval or on startup.
 
-### 📱 User Interface & Experience
+### 📱 Modern User Experience
 *   **Resizable Layout:** Fully customizable interface where you can drag to resize all columns and the main header.
 *   **Dual Header Views:** A compact header for maximum screen real estate, which expands into a multi-deck view showing "Now Playing," "Next," and "Up Next" with large artwork.
 *   **Cartwall:** An instant-playback grid for jingles, sound effects, and ads with multiple customizable pages.
-*   **Last.fm Integration:** View artist bios, similar artists, and track information for the currently playing song.
-*   **Mobile UI:** A dedicated, touch-friendly interface for presenters, allowing them to go live and record voice tracks from their mobile devices.
+*   **Last.fm Integration:** View artist bios, similar artists, and track information for the currently playing song. Requires a free Last.fm API key.
+*   **Mobile UI:** A dedicated, touch-friendly interface for presenters, allowing them to go live, record voice tracks, and chat from their mobile devices.
 *   **Progressive Web App (PWA):** Install the app on your desktop for an offline-first, native-like experience.
 
 ## 🚀 Getting Started
