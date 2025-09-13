@@ -23,7 +23,7 @@ export const fetchArtwork = async (artist: string, title: string): Promise<strin
             if (artworkUrl && typeof artworkUrl === 'string') {
                 // Replace the size in the URL to request a higher resolution image.
                 // This is more robust than matching a specific size like '100x100'.
-                return artworkUrl.replace(/\/\d+x\d+[^/]*$/, '/600x600bb.jpg');
+                return artworkUrl.replace('100x100bb', '600x600bb');
             }
         }
 
