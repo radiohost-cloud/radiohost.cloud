@@ -307,31 +307,10 @@ wss.on('connection', async (ws, req) => {
 // --- Express Middleware ---
 app.use(cors());
 app.use(express.json());
-app.use('/media', express.static(mediaDir));
-app.use('/artwork', express.static(artworkDir));
-
-// --- Multer Setup for File Uploads ---
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        const dir = file.fieldname === 'artworkFile' ? artworkDir : mediaDir;
-        const destinationPath = req.body.destinationPath || '';
-        const fullPath = path.join(dir, destinationPath);
-        fs.mkdirSync(fullPath, { recursive: true });
-        cb(null, fullPath);
-    },
-    filename: (req, file, cb) => {
-        const metadata = JSON.parse(req.body.metadata);
-        if (file.fieldname === 'artworkFile') {
-            cb(null, `${metadata.id}.jpg`);
-        } else {
-            cb(null, `${metadata.id}${path.extname(file.originalname)}`);
-        }
-    },
-});
-const upload = multer({ storage });
-
 
 // --- API Routes ---
+
+// These must come BEFORE the static file handlers and catch-all route
 
 // User Auth
 app.post('/api/login', async (req, res) => {
@@ -373,6 +352,27 @@ app.post('/api/userdata/:email', async (req, res) => {
     await db.write();
     res.json({ success: true });
 });
+
+// --- Multer Setup for File Uploads ---
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dir = file.fieldname === 'artworkFile' ? artworkDir : mediaDir;
+        const destinationPath = req.body.destinationPath || '';
+        const fullPath = path.join(dir, destinationPath);
+        fs.mkdirSync(fullPath, { recursive: true });
+        cb(null, fullPath);
+    },
+    filename: (req, file, cb) => {
+        const metadata = JSON.parse(req.body.metadata);
+        if (file.fieldname === 'artworkFile') {
+            cb(null, `${metadata.id}.jpg`);
+        } else {
+            cb(null, `${metadata.id}${path.extname(file.originalname)}`);
+        }
+    },
+});
+const upload = multer({ storage });
+
 
 // Media Upload
 app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { name: 'artworkFile', maxCount: 1 }]), async (req, res) => {
@@ -455,6 +455,14 @@ app.get('/stream/live.:ext', (req, res) => {
     res.on('close', () => {
         audioStream.unpipe(res);
     });
+});
+
+// --- Serve Static Files and SPA ---
+// This must come AFTER all API routes
+app.use(express.static(__dirname));
+
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
 });
 
 
