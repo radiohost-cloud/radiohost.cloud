@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -409,6 +410,7 @@ const AppInternal: React.FC = () => {
     const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
     const [audioLevels, setAudioLevels] = useState<Partial<Record<AudioSourceId | AudioBusId, number>>>({});
     const [isAudioEngineInitializing, setIsAudioEngineInitializing] = useState(false);
+    const [mainAudioStream, setMainAudioStream] = useState<MediaStream | null>(null);
 
     const monitorBusAudioRef = useRef<HTMLAudioElement>(null);
 
@@ -1028,6 +1030,10 @@ const AppInternal: React.FC = () => {
             };
 
             if(monitorBusAudioRef.current && busDestinations.monitor) monitorBusAudioRef.current.srcObject = busDestinations.monitor.stream;
+
+            if (busDestinations.main) {
+                setMainAudioStream(busDestinations.main.stream);
+            }
 
             if (context.state === 'suspended') await context.resume();
 
@@ -2488,6 +2494,8 @@ const AppInternal: React.FC = () => {
                 trackProgress={trackProgress}
                 isPlaying={isPlaying}
                 isSecureContext={isSecureContext}
+// FIX: Pass mainAudioStream to MobileApp component
+                mainAudioStream={mainAudioStream}
             />
         );
     }
@@ -2654,6 +2662,7 @@ const AppInternal: React.FC = () => {
                                         onlinePresenters={onlinePresenters}
                                         audioLevels={audioLevels}
                                         isSecureContext={isSecureContext}
+                                        mainAudioStream={mainAudioStream}
                                     />
                                 </div>
                             )}

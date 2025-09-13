@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { type User, type Track, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, type VtMixDetails, ChatMessage } from '../types';
 import RemoteStudio from './RemoteStudio';
@@ -32,6 +33,7 @@ interface MobileAppProps {
     trackProgress: number;
     isPlaying: boolean;
     isSecureContext: boolean;
+    mainAudioStream: MediaStream | null;
 }
 
 const MobilePlayer: React.FC<{ 
@@ -132,7 +134,7 @@ const BottomNavItem: React.FC<{
 const MobileApp: React.FC<MobileAppProps> = ({
     currentUser, onLogout, displayTrack, nextTrack, mixerConfig, onMixerChange, onStreamAvailable,
     ws, isStudio, incomingSignal, onlinePresenters, audioLevels, onInsertVoiceTrack, chatMessages,
-    onSendChatMessage, logoSrc, wsStatus, trackProgress, isPlaying, isSecureContext
+    onSendChatMessage, logoSrc, wsStatus, trackProgress, isPlaying, isSecureContext, mainAudioStream
 }) => {
     const [activeTab, setActiveTab] = useState<'player' | 'mic'>('player');
     const [isVtRecorderOpen, setIsVtRecorderOpen] = useState(false);
@@ -196,6 +198,7 @@ const MobileApp: React.FC<MobileAppProps> = ({
                         mixerConfig={mixerConfig} onMixerChange={onMixerChange} onStreamAvailable={onStreamAvailable}
                         ws={ws} currentUser={currentUser} isStudio={isStudio} incomingSignal={incomingSignal}
                         onlinePresenters={onlinePresenters} audioLevels={audioLevels} isSecureContext={isSecureContext}
+                        mainAudioStream={mainAudioStream}
                     />
                 </div>
             </main>
