@@ -170,8 +170,17 @@ export const getArtworkUrl = async (track: Track): Promise<string | null> => {
     const idToUse = track.originalId || track.id;
 
     if (mode === 'HOST') {
-        return track.hasEmbeddedArtwork ? `/api/artwork/${idToUse}` : track.remoteArtworkUrl || null;
+        // Prioritize high-quality remote artwork URL if available
+        if (track.remoteArtworkUrl) {
+            return track.remoteArtworkUrl;
+        }
+        // Fallback to embedded artwork served from our backend
+        if (track.hasEmbeddedArtwork) {
+            return `/api/artwork/${idToUse}`;
+        }
+        return null;
     }
+    // DEMO mode logic remains the same
     if (track.remoteArtworkUrl) {
         return track.remoteArtworkUrl;
     }

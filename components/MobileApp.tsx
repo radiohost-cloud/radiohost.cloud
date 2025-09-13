@@ -179,11 +179,11 @@ const MobileApp: React.FC<MobileAppProps> = ({
                 audioEl.play().catch(e => console.error("Mobile monitor autoplay failed", e));
             }
         }
-    }, [monitorStreamUrl, isPlaying]);
+    }, [monitorStreamUrl]);
 
     return (
         <div className="flex flex-col h-full bg-black text-white font-sans">
-            <audio ref={mobileMonitorAudioRef} autoPlay playsInline style={{ display: 'none' }} />
+            <audio ref={mobileMonitorAudioRef} autoPlay playsInline muted={false} style={{ display: 'none' }} />
             <header className="flex-shrink-0 flex items-center justify-between p-4 bg-neutral-900 border-b border-neutral-800 z-20 relative">
                 <div className="w-10"></div>
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none">

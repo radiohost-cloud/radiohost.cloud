@@ -823,11 +823,11 @@ const AppInternal: React.FC = () => {
     const isStudio = playoutPolicy.playoutMode === 'studio';
     const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
 
-    // FIX: In HOST mode, set the source for the monitor audio element.
+    // FIX: In HOST mode, set the source for the monitor audio element more reliably.
     useEffect(() => {
         if (isHostMode && monitorStreamAudioRef.current) {
             const codec = playoutPolicy.streamingConfig.codec || 'mp3';
-            const streamUrl = `/stream/live.${codec}?t=${Date.now()}`; // Cache bust
+            const streamUrl = `/stream/live.${codec}?t=${Date.now()}`; // Cache bust on mount
             if (monitorStreamAudioRef.current.src !== streamUrl) {
                 console.log("[Audio] Setting studio monitor stream source to:", streamUrl);
                 monitorStreamAudioRef.current.src = streamUrl;
@@ -835,7 +835,7 @@ const AppInternal: React.FC = () => {
                 monitorStreamAudioRef.current.play().catch(e => console.error("Autoplay failed for monitor stream. User interaction might be required.", e));
             }
         }
-    }, [isHostMode, playoutPolicy.streamingConfig.codec, isPlaying]); // Re-set src when playback starts
+    }, [isHostMode, playoutPolicy.streamingConfig.codec]);
 
 
     useEffect(() => {

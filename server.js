@@ -472,6 +472,7 @@ app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { nam
             ...metadata,
             src: `/Media/${relativeAudioPath.replace(/\\/g, '/')}`,
             hasEmbeddedArtwork: !!artworkFile,
+            remoteArtworkUrl: metadata.remoteArtworkUrl, // Explicitly save remote artwork URL
             loudness: loudnessData, // Add loudness data to the track object
         };
 
