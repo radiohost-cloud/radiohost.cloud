@@ -1,4 +1,5 @@
 
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -582,119 +583,125 @@ const AppInternal: React.FC = () => {
     // Check for saved user session or guest session on initial load
     useEffect(() => {
         const loadInitialData = async () => {
-            const savedUserEmail = await dataService.getAppState<string>('currentUserEmail');
-            const savedAppMode = sessionStorage.getItem('appMode') as 'HOST' | 'DEMO' | null;
-            const savedPlayoutMode = sessionStorage.getItem('playoutMode') as 'studio' | 'presenter' | null;
-            
-            let initialUserData: any | null = null;
-            let loggedInUser: User | null = null;
-
-            if (savedUserEmail) {
-                const user = await dataService.getUser(savedUserEmail);
-                if (user) {
-                    loggedInUser = { email: user.email, nickname: user.nickname || user.email.split('@')[0], role: user.role };
-                    initialUserData = await dataService.getUserData(savedUserEmail);
-                } else {
-                    // User in session but not in DB? Clear session.
-                    await dataService.putAppState('currentUserEmail', null);
-                }
-            }
-            
-            if (!loggedInUser) {
-                initialUserData = await dataService.getUserData('guest');
-            }
-
-            // --- Set base state first ---
-            if (loggedInUser) setCurrentUser(loggedInUser);
-            // In HOST mode, library/playlist come from WebSocket, so we don't load them here initially.
-            if(savedAppMode !== 'HOST') {
-                setMediaLibrary(initialUserData?.mediaLibrary || createInitialLibrary());
-                const initialPlaylist = initialUserData?.playlist || [];
-                setPlaylist(initialPlaylist);
+            try {
+                const savedUserEmail = await dataService.getAppState<string>('currentUserEmail');
+                const savedAppMode = sessionStorage.getItem('appMode') as 'HOST' | 'DEMO' | null;
+                const savedPlayoutMode = sessionStorage.getItem('playoutMode') as 'studio' | 'presenter' | null;
                 
-                const initialPlaybackState = initialUserData?.playbackState;
-                if (initialPlaybackState) {
-                    const restoredIndex = initialPlaybackState.currentTrackIndex ?? 0;
-                    if (restoredIndex >= 0 && restoredIndex < initialPlaylist.length) {
-                        setCurrentTrackIndex(restoredIndex);
+                let initialUserData: any | null = null;
+                let loggedInUser: User | null = null;
+
+                if (savedUserEmail) {
+                    const user = await dataService.getUser(savedUserEmail);
+                    if (user) {
+                        loggedInUser = { email: user.email, nickname: user.nickname || user.email.split('@')[0], role: user.role };
+                        initialUserData = await dataService.getUserData(savedUserEmail);
                     } else {
+                        // User in session but not in DB? Clear session.
+                        await dataService.putAppState('currentUserEmail', null);
+                    }
+                }
+                
+                if (!loggedInUser) {
+                    initialUserData = await dataService.getUserData('guest');
+                }
+
+                // --- Set base state first ---
+                if (loggedInUser) setCurrentUser(loggedInUser);
+                // In HOST mode, library/playlist come from WebSocket, so we don't load them here initially.
+                if(savedAppMode !== 'HOST') {
+                    setMediaLibrary(initialUserData?.mediaLibrary || createInitialLibrary());
+                    const initialPlaylist = initialUserData?.playlist || [];
+                    setPlaylist(initialPlaylist);
+                    
+                    const initialPlaybackState = initialUserData?.playbackState;
+                    if (initialPlaybackState) {
+                        const restoredIndex = initialPlaybackState.currentTrackIndex ?? 0;
+                        if (restoredIndex >= 0 && restoredIndex < initialPlaylist.length) {
+                            setCurrentTrackIndex(restoredIndex);
+                        } else {
+                            const firstPlayableIndex = initialPlaylist.findIndex((item: SequenceItem) => !('markerType' in item));
+                            setCurrentTrackIndex(firstPlayableIndex > -1 ? firstPlayableIndex : 0);
+                        }
+                        setCurrentPlayingItemId(null);
+                        setStopAfterTrackId(initialPlaybackState.stopAfterTrackId ?? null);
+                    } else if (initialPlaylist.length > 0) {
                         const firstPlayableIndex = initialPlaylist.findIndex((item: SequenceItem) => !('markerType' in item));
                         setCurrentTrackIndex(firstPlayableIndex > -1 ? firstPlayableIndex : 0);
+                        setCurrentPlayingItemId(null);
+                        setStopAfterTrackId(null);
                     }
-                    setCurrentPlayingItemId(null);
-                    setStopAfterTrackId(initialPlaybackState.stopAfterTrackId ?? null);
-                } else if (initialPlaylist.length > 0) {
-                    const firstPlayableIndex = initialPlaylist.findIndex((item: SequenceItem) => !('markerType' in item));
-                    setCurrentTrackIndex(firstPlayableIndex > -1 ? firstPlayableIndex : 0);
-                    setCurrentPlayingItemId(null);
-                    setStopAfterTrackId(null);
                 }
-            }
-            
-            const rawCartwallData = initialUserData?.cartwallPages;
-            let loadedPages: CartwallPage[] | null = null;
-            if (rawCartwallData && Array.isArray(rawCartwallData) && rawCartwallData.length > 0) {
-                 if (typeof rawCartwallData[0] === 'object' && rawCartwallData[0] !== null && 'id' in rawCartwallData[0] && 'name' in rawCartwallData[0] && 'items' in rawCartwallData[0]) {
-                    loadedPages = rawCartwallData;
-                } else {
-                    // Legacy format migration
-                    loadedPages = [{ id: 'default', name: 'Page 1', items: rawCartwallData as (CartwallItem | null)[] }];
-                }
-            }
-            setCartwallPages(loadedPages || [{ id: 'default', name: 'Page 1', items: Array(16).fill(null) }]);
-            setActiveCartwallPageId((loadedPages && loadedPages[0]?.id) || 'default');
-
-            setBroadcasts(initialUserData?.broadcasts || []);
-
-            const initialSettings = initialUserData?.settings || {};
-
-            let playoutPolicyToSet = { ...defaultPlayoutPolicy, ...initialSettings.playoutPolicy };
-            if (savedAppMode === 'HOST' && savedPlayoutMode) {
-                playoutPolicyToSet.playoutMode = savedPlayoutMode;
-            } else if (savedAppMode === 'DEMO') {
-                playoutPolicyToSet.playoutMode = 'studio'; // Demo mode is always 'studio'
-            }
-            setPlayoutPolicy(playoutPolicyToSet);
-            
-            setLogoSrc(initialSettings.logoSrc || null);
-            setLogoHeaderGradient(initialSettings.headerGradient || null);
-            setLogoHeaderTextColor(initialSettings.headerTextColor || 'white');
-            setIsNowPlayingExportEnabled(initialSettings.isNowPlayingExportEnabled || false);
-            setMetadataFormat(initialSettings.metadataFormat || '%artist% - %title%');
-            if (initialSettings.columnWidths) setColumnWidths(initialSettings.columnWidths);
-            setIsMicPanelCollapsed(initialSettings.isMicPanelCollapsed ?? false);
-            setHeaderHeight(initialSettings.headerHeight ?? 80);
-            setIsLibraryCollapsed(initialSettings.isLibraryCollapsed ?? false);
-            setIsRightColumnCollapsed(initialSettings.isRightColumnCollapsed ?? false);
-            setIsAutoBackupEnabled(initialSettings.isAutoBackupEnabled || false);
-            setIsAutoBackupOnStartupEnabled(initialSettings.isAutoBackupOnStartupEnabled || false);
-            setAutoBackupInterval(initialSettings.autoBackupInterval ?? 24);
-            setIsAutoModeEnabled(initialSettings.isAutoModeEnabled || false);
-
-            const initialAudioConfig = initialUserData?.audioConfig;
-            if (initialAudioConfig) {
-                const mergedBuses = initialBuses.map(defaultBus => {
-                    const savedBus = initialAudioConfig.buses?.find((b: AudioBus) => b.id === defaultBus.id);
-                    return { ...defaultBus, ...(savedBus || {}) };
-                });
-                setAudioBuses(mergedBuses);
-
-                const mergedMixerConfig = { ...initialMixerConfig };
-                (Object.keys(initialMixerConfig) as Array<AudioSourceId>).forEach(sourceId => {
-                    const savedSourceConfig = initialAudioConfig.mixer?.[sourceId];
-                    if (savedSourceConfig) {
-                        mergedMixerConfig[sourceId] = {
-                            ...initialMixerConfig[sourceId],
-                            ...savedSourceConfig,
-                            sends: { ...initialMixerConfig[sourceId].sends, ...(savedSourceConfig.sends || {}), },
-                        };
+                
+                const rawCartwallData = initialUserData?.cartwallPages;
+                let loadedPages: CartwallPage[] | null = null;
+                if (rawCartwallData && Array.isArray(rawCartwallData) && rawCartwallData.length > 0) {
+                     if (typeof rawCartwallData[0] === 'object' && rawCartwallData[0] !== null && 'id' in rawCartwallData[0] && 'name' in rawCartwallData[0] && 'items' in rawCartwallData[0]) {
+                        loadedPages = rawCartwallData;
+                    } else {
+                        // Legacy format migration
+                        loadedPages = [{ id: 'default', name: 'Page 1', items: rawCartwallData as (CartwallItem | null)[] }];
                     }
-                });
-                setMixerConfig(mergedMixerConfig);
+                }
+                setCartwallPages(loadedPages || [{ id: 'default', name: 'Page 1', items: Array(16).fill(null) }]);
+                setActiveCartwallPageId((loadedPages && loadedPages[0]?.id) || 'default');
+
+                setBroadcasts(initialUserData?.broadcasts || []);
+
+                const initialSettings = initialUserData?.settings || {};
+
+                let playoutPolicyToSet = { ...defaultPlayoutPolicy, ...initialSettings.playoutPolicy };
+                if (savedAppMode === 'HOST' && savedPlayoutMode) {
+                    playoutPolicyToSet.playoutMode = savedPlayoutMode;
+                } else if (savedAppMode === 'DEMO') {
+                    playoutPolicyToSet.playoutMode = 'studio'; // Demo mode is always 'studio'
+                }
+                setPlayoutPolicy(playoutPolicyToSet);
+                
+                setLogoSrc(initialSettings.logoSrc || null);
+                setLogoHeaderGradient(initialSettings.headerGradient || null);
+                setLogoHeaderTextColor(initialSettings.headerTextColor || 'white');
+                setIsNowPlayingExportEnabled(initialSettings.isNowPlayingExportEnabled || false);
+                setMetadataFormat(initialSettings.metadataFormat || '%artist% - %title%');
+                if (initialSettings.columnWidths) setColumnWidths(initialSettings.columnWidths);
+                setIsMicPanelCollapsed(initialSettings.isMicPanelCollapsed ?? false);
+                setHeaderHeight(initialSettings.headerHeight ?? 80);
+                setIsLibraryCollapsed(initialSettings.isLibraryCollapsed ?? false);
+                setIsRightColumnCollapsed(initialSettings.isRightColumnCollapsed ?? false);
+                setIsAutoBackupEnabled(initialSettings.isAutoBackupEnabled || false);
+                setIsAutoBackupOnStartupEnabled(initialSettings.isAutoBackupOnStartupEnabled || false);
+                setAutoBackupInterval(initialSettings.autoBackupInterval ?? 24);
+                setIsAutoModeEnabled(initialSettings.isAutoModeEnabled || false);
+
+                const initialAudioConfig = initialUserData?.audioConfig;
+                if (initialAudioConfig) {
+                    const mergedBuses = initialBuses.map(defaultBus => {
+                        const savedBus = initialAudioConfig.buses?.find((b: AudioBus) => b.id === defaultBus.id);
+                        return { ...defaultBus, ...(savedBus || {}) };
+                    });
+                    setAudioBuses(mergedBuses);
+
+                    const mergedMixerConfig = { ...initialMixerConfig };
+                    (Object.keys(initialMixerConfig) as Array<AudioSourceId>).forEach(sourceId => {
+                        const savedSourceConfig = initialAudioConfig.mixer?.[sourceId];
+                        if (savedSourceConfig) {
+                            mergedMixerConfig[sourceId] = {
+                                ...initialMixerConfig[sourceId],
+                                ...savedSourceConfig,
+                                sends: { ...initialMixerConfig[sourceId].sends, ...(savedSourceConfig.sends || {}), },
+                            };
+                        }
+                    });
+                    setMixerConfig(mergedMixerConfig);
+                }
+                
+                setLastAutoBackupTimestamp(initialUserData?.lastAutoBackupTimestamp || 0);
+            } catch (error) {
+                console.error("Error loading initial data:", error);
+                // Potentially clear corrupted data here if needed
+            } finally {
+                setIsLoadingSession(false);
             }
-            
-            setLastAutoBackupTimestamp(initialUserData?.lastAutoBackupTimestamp || 0);
-            setIsLoadingSession(false);
         };
 
         loadInitialData();
@@ -825,9 +832,9 @@ const AppInternal: React.FC = () => {
 
     // FIX: In HOST mode, set the source for the monitor audio element more reliably.
     useEffect(() => {
-        if (isHostMode && monitorStreamAudioRef.current) {
+        if (isHostMode && monitorStreamAudioRef.current && currentPlayingItemId) {
             const codec = playoutPolicy.streamingConfig.codec || 'mp3';
-            const streamUrl = `/stream/live.${codec}?t=${Date.now()}`; // Cache bust on mount
+            const streamUrl = `/stream/live.${codec}?t=${new Date(timelineRef.current.get(currentPlayingItemId)?.startTime || Date.now()).getTime()}`;
             if (monitorStreamAudioRef.current.src !== streamUrl) {
                 console.log("[Audio] Setting studio monitor stream source to:", streamUrl);
                 monitorStreamAudioRef.current.src = streamUrl;
@@ -835,7 +842,7 @@ const AppInternal: React.FC = () => {
                 monitorStreamAudioRef.current.play().catch(e => console.error("Autoplay failed for monitor stream. User interaction might be required.", e));
             }
         }
-    }, [isHostMode, playoutPolicy.streamingConfig.codec]);
+    }, [isHostMode, currentPlayingItemId, playoutPolicy.streamingConfig.codec]);
 
 
     useEffect(() => {
@@ -1590,11 +1597,7 @@ const AppInternal: React.FC = () => {
         setMediaLibrary(newLibrary);
         sendStudioAction('setLibrary', newLibrary);
     }, [sendStudioAction]);
-
-    const handleAddTracksToLibrary = useCallback((tracks: Track[], destinationFolderId: string) => {
-        updateMediaLibrary(prevLibrary => addMultipleItemsToTree(prevLibrary, destinationFolderId, tracks));
-    }, [updateMediaLibrary]);
-
+    
     const handleAddUrlTrackToLibrary = useCallback((track: Track, destinationFolderId: string) => {
         updateMediaLibrary(prevLibrary => addItemToTree(prevLibrary, destinationFolderId, track));
     }, [updateMediaLibrary]);
@@ -2519,9 +2522,83 @@ const AppInternal: React.FC = () => {
     const monitorStreamUrl = useMemo(() => {
         if (!isHostMode) return null;
         const codec = playoutPolicy.streamingConfig.codec || 'mp3';
-        return `/stream/live.${codec}`;
-    }, [isHostMode, playoutPolicy.streamingConfig.codec]);
+        // Cache-busting parameter
+        const timestamp = currentPlayingItemId ? new Date(timeline.get(currentPlayingItemId)?.startTime || Date.now()).getTime() : Date.now();
+        return `/stream/live.${codec}?t=${timestamp}`;
+    }, [isHostMode, playoutPolicy.streamingConfig.codec, currentPlayingItemId, timeline]);
 
+// FIX: Add file upload handlers
+const handleUploadFiles = useCallback(async (files: File[], destinationFolderId: string) => {
+    const destinationPath = getFolderPath(mediaLibraryRef.current, destinationFolderId);
+    const tracksToAdd: Track[] = [];
+
+    for (const file of files) {
+        const metadata = {
+            title: file.name.replace(/\.[^/.]+$/, ""),
+            artist: 'Unknown Artist',
+            type: TrackType.SONG,
+            duration: 0, // Server will replace this
+            id: `local-${Date.now()}-${Math.random()}`
+        };
+        try {
+            const savedTrack = await dataService.addTrack(metadata, file, undefined, destinationPath);
+            tracksToAdd.push(savedTrack);
+        } catch (error) {
+            console.error("Upload failed for", file.name, error);
+        }
+    }
+    if (tracksToAdd.length > 0) {
+        updateMediaLibrary(prev => addMultipleItemsToTree(prev, destinationFolderId, tracksToAdd));
+    }
+}, [getFolderPath, updateMediaLibrary]);
+
+const handleImportFolder = useCallback(async (files: File[], destinationFolderId: string) => {
+    let updatedLibrary = mediaLibraryRef.current;
+    const rootPath = getFolderPath(updatedLibrary, destinationFolderId);
+
+    const sortedFiles = Array.from(files).sort((a, b) => {
+        const depthA = ((a as any).webkitRelativePath || '').split('/').length;
+        const depthB = ((b as any).webkitRelativePath || '').split('/').length;
+        return depthA - depthB;
+    });
+
+    for (const file of sortedFiles) {
+        const { webkitRelativePath } = file as any;
+        if (!webkitRelativePath) continue;
+
+        const pathParts = webkitRelativePath.split('/');
+        const fileName = pathParts.pop()!;
+        
+        let parentId = destinationFolderId;
+        let currentSubPath: string[] = [];
+
+        for (const part of pathParts) {
+            currentSubPath.push(part);
+            const parentNode = findFolderInTree(updatedLibrary, parentId);
+            let childNode = parentNode?.children.find(c => c.type === 'folder' && c.name === part);
+
+            if (!childNode) {
+                 const newFolder: Folder = { id: `folder-${Date.now()}-${Math.random()}`, name: part, type: 'folder', children: [] };
+                 const serverPath = [rootPath, ...currentSubPath].filter(Boolean).join('/');
+                 await dataService.createFolder(serverPath);
+                 updatedLibrary = addItemToTree(updatedLibrary, parentId, newFolder);
+                 childNode = newFolder;
+            }
+            parentId = childNode.id;
+        }
+
+        const metadata = { title: fileName.replace(/\.[^/.]+$/, ""), artist: 'Unknown Artist', type: TrackType.SONG, duration: 0, id: `local-${Date.now()}-${Math.random()}` };
+        const uploadPath = [rootPath, ...pathParts].filter(Boolean).join('/');
+
+        try {
+            const savedTrack = await dataService.addTrack(metadata, file, undefined, uploadPath);
+            updatedLibrary = addItemToTree(updatedLibrary, parentId, savedTrack);
+        } catch (error) {
+            console.error(`Failed to upload ${file.name}:`, error);
+        }
+    }
+    updateMediaLibrary(() => updatedLibrary);
+}, [getFolderPath, updateMediaLibrary]);
 
     if (isLoadingSession) {
         return (
@@ -2616,7 +2693,6 @@ const AppInternal: React.FC = () => {
                         <MediaLibrary
                             rootFolder={mediaLibrary}
                             onAddToPlaylist={(track) => handleAttemptToAddTrack(track, null)}
-                            onAddTracksToLibrary={handleAddTracksToLibrary}
                             onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
                             onRemoveFromLibrary={handleRemoveFromLibrary}
                             onRemoveMultipleFromLibrary={handleRemoveMultipleFromLibrary}
@@ -2630,6 +2706,8 @@ const AppInternal: React.FC = () => {
                             pflTrackId={pflTrackId}
                             onLibraryUpdate={setMediaLibrary}
                             playoutMode={playoutPolicy.playoutMode}
+                            onUploadFiles={handleUploadFiles}
+                            onImportFolder={handleImportFolder}
                         />
                     </div>
 
@@ -2786,7 +2864,7 @@ const AppInternal: React.FC = () => {
             
             <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
             <audio ref={monitorBusAudioRef} autoPlay></audio>
-            {isHostMode && isStudio && <audio ref={monitorStreamAudioRef} crossOrigin="anonymous" autoPlay muted={false}/>}
+            {isHostMode && (isStudio || playoutPolicy.playoutMode === 'presenter') && <audio ref={monitorStreamAudioRef} crossOrigin="anonymous" autoPlay muted={false}/>}
         </div>
     );
 };

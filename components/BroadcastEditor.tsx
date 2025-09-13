@@ -265,7 +265,6 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                         <MediaLibrary
                             rootFolder={mediaLibrary}
                             onAddToPlaylist={(track) => handleInsertTrack(track, null)}
-                            onAddTracksToLibrary={() => {}}
                             onAddUrlTrackToLibrary={() => {}}
                             onRemoveFromLibrary={() => {}}
                             onRemoveMultipleFromLibrary={() => {}}
@@ -278,6 +277,9 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                             onPflTrack={() => {}}
                             pflTrackId={null}
                             onLibraryUpdate={() => {}}
+                            playoutMode="presenter"
+                            onUploadFiles={async () => {}}
+                            onImportFolder={async () => {}}
                         />
                     </div>
 
@@ -366,7 +368,7 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                                                 {(showAddMarkerButton || showAddVtButton) && <li className="flex justify-center items-center h-4 my-1 group">
                                                     <div className="w-full h-px bg-neutral-300 dark:bg-neutral-700 relative">
                                                         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-2">
-                                                            {showAddMarkerButton && <button onClick={() => setMarkerModalState({ beforeItemId: item.id })} className="p-1 bg-neutral-100 dark:bg-neutral-900 rounded-full text-neutral-500 hover:bg-red-500 hover:text-white" title="Insert Time Marker"><ClockPlusIcon className="w-5 h-5"/></button>}
+                                                            {showAddMarkerButton && <button onClick={() => setMarkerModalState({ beforeItemId: item.id, existingMarker: undefined })} className="p-1 bg-neutral-100 dark:bg-neutral-900 rounded-full text-neutral-500 hover:bg-red-500 hover:text-white" title="Insert Time Marker"><ClockPlusIcon className="w-5 h-5"/></button>}
                                                             {showAddVtButton && <button onClick={() => setVtEditorState({ isOpen: true, prevTrack: (prevItem as Track), nextTrack: item, beforeItemId: item.id })} className="p-1 bg-neutral-100 dark:bg-neutral-900 rounded-full text-neutral-500 hover:bg-red-500 hover:text-white" title="Insert Voice Track"><VoiceTrackIcon className="w-5 h-5"/></button>}
                                                         </div>
                                                     </div>
@@ -375,7 +377,7 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                                                     {'markerType' in item ? (
                                                         <EditorPlaylistItemMarker marker={item} onRemove={() => handleRemoveItem(item.id)} onEdit={() => setMarkerModalState({ beforeItemId: null, existingMarker: item })} />
                                                     ) : (
-                                                        <EditorPlaylistItem item={item} onRemove={() => handleRemoveItem(item.id)} />
+                                                        <EditorPlaylistItem item={item as Track} onRemove={() => handleRemoveItem(item.id)} />
                                                     )}
                                                 </div>
                                            </React.Fragment>

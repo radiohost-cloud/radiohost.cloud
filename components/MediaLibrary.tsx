@@ -10,7 +10,6 @@ import { UploadIcon } from './icons/UploadIcon';
 import { TrashIcon } from './icons/TrashIcon';
 import { FolderIcon } from './icons/FolderIcon';
 import ConfirmationDialog from './ConfirmationDialog';
-import { addTrack } from '../services/dataService';
 import { LinkIcon } from './icons/LinkIcon';
 import AddUrlModal from './AddUrlModal';
 import { EyeSlashIcon } from './icons/EyeSlashIcon';
@@ -18,12 +17,10 @@ import TagEditorModal from './TagEditorModal';
 import { CloseIcon } from './icons/CloseIcon';
 import { HeadphoneIcon } from './icons/HeadphoneIcon';
 import { EditIcon } from './icons/EditIcon';
-import { fetchArtwork } from '../services/artworkService';
 
 interface MediaLibraryProps {
     rootFolder: Folder;
     onAddToPlaylist: (track: Track) => void;
-    onAddTracksToLibrary: (tracks: Track[], destinationFolderId: string) => void;
     onAddUrlTrackToLibrary: (track: Track, destinationFolderId: string) => void;
     onRemoveFromLibrary: (id: string) => void;
     onRemoveMultipleFromLibrary: (ids: string[]) => void;
@@ -37,6 +34,9 @@ interface MediaLibraryProps {
     pflTrackId: string | null;
     onLibraryUpdate: (newRootFolder: Folder) => void;
     playoutMode?: 'studio' | 'presenter';
+    // New props for handling uploads without optimistic updates
+    onUploadFiles: (files: File[], destinationFolderId: string) => Promise<void>;
+    onImportFolder: (files: File[], destinationFolderId: string) => Promise<void>;
 }
 
 interface LibraryItemComponentProps {
@@ -67,22 +67,6 @@ const findFolder = (folder: Folder, folderId: string): Folder | null => {
         }
     }
     return null;
-};
-
-const getAudioDuration = (file: File | Blob, fileName: string): Promise<number> => {
-    return new Promise((resolve, reject) => {
-        const audio = document.createElement('audio');
-        audio.preload = 'metadata';
-        audio.onloadedmetadata = () => {
-            window.URL.revokeObjectURL(audio.src);
-            resolve(audio.duration);
-        };
-        audio.onerror = (e) => {
-            console.error(e);
-            reject(`Error loading audio file: ${fileName}`);
-        };
-        audio.src = window.URL.createObjectURL(file);
-    });
 };
 
 const TypeIcon: React.FC<{ item: LibraryItem }> = React.memo(({ item }) => {
@@ -174,133 +158,7 @@ const LibraryItemComponent = React.memo(({ item, selected, hasSelection, onToggl
     );
 });
 
-
-// --- Reusable Parsing Function ---
-const parseFileName = (fileName: string): { title: string; artist: string } => {
-    const fileNameWithoutExt = fileName.replace(/\.[^/.]+$/, "");
-    let title = fileNameWithoutExt;
-    let artist = '';
-
-    // Find the first occurrence of " - ", " – ", or " — " with flexible spacing
-    const match = fileNameWithoutExt.match(/\s+[-–—]\s+/);
-    
-    if (match && match.index && match.index > 0) {
-        const separatorIndex = match.index;
-        const potentialArtist = fileNameWithoutExt.substring(0, separatorIndex).trim();
-        const potentialTitle = fileNameWithoutExt.substring(separatorIndex + match[0].length).trim();
-        
-        if (potentialArtist && potentialTitle) {
-            artist = potentialArtist;
-            title = potentialTitle;
-        }
-    }
-    
-    // Additional cleanup for things like (Official Video), etc.
-    title = title.replace(/\s*\(.*\)\s*|\s*\[.*\]\s*/g, '').trim();
-
-    return { title, artist };
-};
-
-// --- ID3 Tag Reading and Metadata Extraction ---
-declare global {
-    interface Window {
-        jsmediatags: any;
-    }
-}
-
-const readId3Tags = (file: File): Promise<{ title: string; artist: string; album: string; picture: any | null }> => {
-    return new Promise((resolve, reject) => {
-        if (!window.jsmediatags) {
-            return reject('jsmediatags library not loaded');
-        }
-        window.jsmediatags.read(file, {
-            onSuccess: (tag: any) => {
-                const tags = tag.tags;
-                resolve({
-                    title: tags.title || '',
-                    artist: tags.artist || '',
-                    album: tags.album || '',
-                    picture: tags.picture || null
-                });
-            },
-            onError: (error: any) => {
-                reject(error);
-            }
-        });
-    });
-};
-
-const extractMetadata = async (file: File): Promise<{ title: string, artist: string, artworkBlob?: Blob, remoteArtworkUrl?: string }> => {
-    let title = '';
-    let artist = '';
-    let artworkBlob: Blob | undefined = undefined;
-    let remoteArtworkUrl: string | undefined = undefined;
-
-    try {
-        const tags = await readId3Tags(file);
-        title = tags.title || '';
-        artist = tags.artist || '';
-        if (tags.picture) {
-            artworkBlob = new Blob([new Uint8Array(tags.picture.data)], { type: tags.picture.format });
-        }
-    } catch (id3Error) {
-        console.warn(`Could not read ID3 tags for ${file.name}:`, id3Error);
-    }
-
-    if (!title || !artist) {
-        const fromFilename = parseFileName(file.name);
-        if (!title) title = fromFilename.title;
-        if (!artist) artist = fromFilename.artist;
-    }
-
-    if (!artworkBlob) {
-        remoteArtworkUrl = (await fetchArtwork(artist, title)) ?? undefined;
-    }
-
-    return { title, artist, artworkBlob, remoteArtworkUrl };
-};
-
-// A generic, recursive function to add an item to the tree immutably.
-const addItemToTree = (node: Folder, parentId: string, itemToAdd: LibraryItem): Folder => {
-    if (node.id === parentId) {
-        // Found the target folder, add the new item to its children
-        return { ...node, children: [...node.children, itemToAdd] };
-    }
-    // Not the target folder, recursively search in its children
-    return {
-        ...node,
-        children: node.children.map(child =>
-            child.type === 'folder' ? addItemToTree(child, parentId, itemToAdd) : child
-        ),
-    };
-};
-
-const getFolderPath = (root: Folder, folderId: string): string => {
-    if (folderId === 'root' || folderId === root.id) {
-        return '';
-    }
-
-    // FIX: Ensure child is a folder before accessing `.name` or recursing.
-    const findPathRecursive = (currentFolder: Folder, currentPath: string[]): string[] | null => {
-        for (const child of currentFolder.children) {
-            if (child.type === 'folder') {
-                if (child.id === folderId) {
-                    return [...currentPath, child.name];
-                }
-                const foundPath = findPathRecursive(child, [...currentPath, child.name]);
-                if (foundPath) {
-                    return foundPath;
-                }
-            }
-        }
-        return null;
-    };
-
-    const pathParts = findPathRecursive(root, []);
-    return pathParts ? pathParts.join('/') : '';
-};
-
-const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist, onAddTracksToLibrary, onAddUrlTrackToLibrary, onRemoveFromLibrary, onRemoveMultipleFromLibrary, onCreateFolder, onMoveItem, onOpenMetadataSettings, onOpenTrackMetadataEditor, onUpdateTrackTags, onUpdateFolderTags, onPflTrack, pflTrackId, onLibraryUpdate, playoutMode }) => {
+const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist, onAddUrlTrackToLibrary, onRemoveFromLibrary, onRemoveMultipleFromLibrary, onCreateFolder, onMoveItem, onOpenMetadataSettings, onOpenTrackMetadataEditor, onUpdateTrackTags, onUpdateFolderTags, onPflTrack, pflTrackId, playoutMode, onUploadFiles, onImportFolder }) => {
     const [path, setPath] = useState<{ id: string; name: string }[]>([{ id: rootFolder.id, name: 'Library' }]);
     const [searchQuery, setSearchQuery] = useState('');
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -404,153 +262,6 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
-    const processFiles = async (files: (File | { name: string; blob: Blob })[]) => {
-        setIsImporting(true);
-        setImportProgress({ current: 0, total: files.length });
-        const newTracks: Track[] = [];
-        const destinationPath = getFolderPath(rootFolder, currentFolderId);
-
-        for (const [index, file] of files.entries()) {
-            setImportProgress({ current: index + 1, total: files.length });
-            try {
-                const blob = 'blob' in file ? file.blob : file;
-                const fileNameWithExt = file.name;
-                const duration = await getAudioDuration(blob, fileNameWithExt);
-
-                const fileForService = blob instanceof File ? blob : new File([blob], fileNameWithExt, { type: blob.type });
-                const { title, artist, artworkBlob, remoteArtworkUrl } = await extractMetadata(fileForService);
-
-                const trackForService: Track = {
-                    id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-                    title,
-                    artist,
-                    duration,
-                    type: TrackType.SONG,
-                    src: '',
-                    hasEmbeddedArtwork: !!artworkBlob,
-                    remoteArtworkUrl: remoteArtworkUrl ?? undefined,
-                };
-
-                const finalTrack = await addTrack(trackForService, fileForService, artworkBlob, destinationPath);
-                newTracks.push(finalTrack);
-            } catch (error) {
-                console.error("Failed to process file:", file.name, error);
-                alert(`Failed to process file: ${file.name}. Server responded: ${error instanceof Error ? error.message : 'Unknown error'}`);
-            }
-        }
-
-        if (newTracks.length > 0) {
-            onAddTracksToLibrary(newTracks, currentFolderId);
-        }
-        setIsImporting(false);
-    };
-
-    const processFolderImport = useCallback(async (files: File[]) => {
-        setIsImporting(true);
-        const validFiles = files.filter(file => /\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(file.name));
-        setImportProgress({ current: 0, total: validFiles.length });
-
-        // Use a mutable copy for the duration of the import process.
-        // This is safe because it's a local variable within an async function,
-        // and we only call the state updater once at the very end.
-        const mutableLibrary = JSON.parse(JSON.stringify(rootFolder));
-        const folderIdCache = new Map<string, string>();
-        const baseDestinationPath = getFolderPath(rootFolder, currentFolderId);
-
-        // This is a mutable helper, only for use within this function.
-        const findFolderMutable = (folder: Folder, folderId: string): Folder | null => {
-            if (folder.id === folderId) return folder;
-            for (const child of folder.children) {
-                if (child.type === 'folder') {
-                    const found = findFolderMutable(child, folderId);
-                    if (found) return found;
-                }
-            }
-            return null;
-        };
-
-        for (const [index, file] of validFiles.entries()) {
-            setImportProgress({ current: index + 1, total: validFiles.length });
-
-            const pathParts = file.webkitRelativePath.split('/');
-            const fileName = pathParts.pop();
-            if (!fileName) continue;
-
-            let parentId = currentFolderId;
-            let currentPathKey = '';
-            let skipFile = false;
-
-            for (const folderName of pathParts) {
-                if (!folderName) continue;
-                currentPathKey += folderName + '/';
-
-                if (folderIdCache.has(currentPathKey)) {
-                    parentId = folderIdCache.get(currentPathKey)!;
-                } else {
-                    const parentFolder = findFolderMutable(mutableLibrary, parentId);
-                    if (!parentFolder) {
-                        console.error(`Could not find parent folder '${parentId}' for path '${currentPathKey}'. Skipping file.`, file.webkitRelativePath);
-                        skipFile = true;
-                        break; 
-                    }
-
-                    let childFolder = parentFolder.children.find(
-                        (child): child is Folder => child.type === 'folder' && child.name === folderName
-                    );
-
-                    if (childFolder) {
-                        parentId = childFolder.id;
-                    } else {
-                        const newFolder: Folder = {
-                            id: `folder-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-                            name: folderName,
-                            type: 'folder',
-                            children: [],
-                        };
-                        parentFolder.children.push(newFolder); // MUTATION
-                        parentId = newFolder.id;
-                    }
-                    folderIdCache.set(currentPathKey, parentId);
-                }
-            }
-            
-            if(skipFile) continue;
-
-            try {
-                const fileSubPath = file.webkitRelativePath.substring(0, file.webkitRelativePath.lastIndexOf('/'));
-                const finalDestinationPath = [baseDestinationPath, fileSubPath].filter(Boolean).join('/');
-
-                const duration = await getAudioDuration(file, fileName);
-                const { title, artist, artworkBlob, remoteArtworkUrl } = await extractMetadata(file);
-                
-                const trackForService: Track = {
-                    id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-                    title,
-                    artist,
-                    duration,
-                    type: TrackType.SONG,
-                    src: '',
-                    hasEmbeddedArtwork: !!artworkBlob,
-                    remoteArtworkUrl: remoteArtworkUrl ?? undefined,
-                };
-                
-                const finalTrack = await addTrack(trackForService, file, artworkBlob, finalDestinationPath);
-
-                const finalParent = findFolderMutable(mutableLibrary, parentId);
-                if (finalParent) {
-                    finalParent.children.push(finalTrack); // MUTATION
-                } else {
-                     console.error(`Could not find final parent folder '${parentId}' for file. Skipping.`, file.webkitRelativePath);
-                }
-            } catch (error) {
-                console.error(`Failed to process file: ${file.webkitRelativePath}`, error);
-            }
-        }
-
-        onLibraryUpdate(mutableLibrary); // Single state update at the end
-        setIsImporting(false);
-    }, [rootFolder, currentFolderId, onLibraryUpdate]);
-
     const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setSearchQuery(e.target.value);
         setSelectedItems(new Set());
@@ -607,21 +318,23 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
     const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
         const files = event.target.files;
         if (files && files.length > 0) {
-            await processFiles(Array.from(files));
+            setIsImporting(true);
+            setImportProgress({ current: 0, total: files.length });
+            await onUploadFiles(Array.from(files), currentFolderId);
+            setIsImporting(false);
         }
-        if (event.target) {
-            event.target.value = '';
-        }
+        if (event.target) event.target.value = '';
     };
 
     const handleFolderChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
         const files = event.target.files;
         if (files && files.length > 0) {
-            await processFolderImport(Array.from(files));
+            setIsImporting(true);
+            setImportProgress({ current: 0, total: files.length });
+            await onImportFolder(Array.from(files), currentFolderId);
+            setIsImporting(false);
         }
-        if (event.target) {
-            event.target.value = '';
-        }
+        if (event.target) event.target.value = '';
     };
 
     const handleDeleteRequest = (item: LibraryItem | null) => {
@@ -750,8 +463,8 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
             {isImporting && (
                 <div className="absolute inset-0 bg-black/70 z-20 flex flex-col items-center justify-center text-white">
                     <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mb-4"></div>
-                    <p className="font-semibold">Importing Folder...</p>
-                    <p className="text-sm">{`Processing file ${importProgress.current} of ${importProgress.total}`}</p>
+                    <p className="font-semibold">Importing Files...</p>
+                    <p className="text-sm">{`Processing... please wait.`}</p>
                 </div>
             )}
             <div className="flex-shrink-0 p-4 border-b border-neutral-200 dark:border-neutral-800 space-y-4">

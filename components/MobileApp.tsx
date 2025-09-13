@@ -167,16 +167,24 @@ const MobileApp: React.FC<MobileAppProps> = ({
         disconnected: { color: 'bg-red-500', text: 'Disconnected' }
     };
 
-    // Effect to control the mobile monitor audio player
+    // Effect to control the mobile monitor audio player with cache-busting
     useEffect(() => {
         const audioEl = mobileMonitorAudioRef.current;
         if (audioEl && monitorStreamUrl) {
-            const newSrc = `${monitorStreamUrl}?t=${Date.now()}`;
-            if (audioEl.src !== newSrc) {
-                console.log("[Mobile Monitor] Setting audio source to:", newSrc);
+            const newSrc = monitorStreamUrl; // The URL from props already has the cache-busting param
+            // Only change src if it's different to avoid interrupting playback unnecessarily
+            const currentBaseSrc = audioEl.src.split('?')[0];
+            const newBaseSrc = newSrc.split('?')[0];
+            if (audioEl.src !== newSrc && currentBaseSrc === newBaseSrc) {
+                console.log("[Mobile Monitor] Updating audio source to:", newSrc);
                 audioEl.src = newSrc;
                 audioEl.load();
                 audioEl.play().catch(e => console.error("Mobile monitor autoplay failed", e));
+            } else if (currentBaseSrc !== newBaseSrc) {
+                 console.log("[Mobile Monitor] Setting new audio source:", newSrc);
+                 audioEl.src = newSrc;
+                 audioEl.load();
+                 audioEl.play().catch(e => console.error("Mobile monitor autoplay failed on new source", e));
             }
         }
     }, [monitorStreamUrl]);

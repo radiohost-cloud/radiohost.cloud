@@ -83,7 +83,7 @@ const analyzeLoudness = (filePath) => {
                     return reject(new Error('FFmpeg did not return analysis data.'));
                 }
                 
-                const lines = stderr.split('\n');
+                const lines = stderr.split('\n').reverse(); // Start from the end
                 const jsonLine = lines.find(line => line.trim().startsWith('{') && line.trim().endsWith('}'));
 
                 if (jsonLine) {
@@ -415,8 +415,31 @@ app.get('/api/userdata/:email', async (req, res) => {
     res.json(data);
 });
 
+const isObject = (item) => {
+  return (item && typeof item === 'object' && !Array.isArray(item));
+}
+
+const deepMerge = (target, source) => {
+  let output = { ...target };
+  if (isObject(target) && isObject(source)) {
+    Object.keys(source).forEach(key => {
+      if (isObject(source[key])) {
+        if (!(key in target))
+          Object.assign(output, { [key]: source[key] });
+        else
+          output[key] = deepMerge(target[key], source[key]);
+      } else {
+        Object.assign(output, { [key]: source[key] });
+      }
+    });
+  }
+  return output;
+}
+
 app.post('/api/userdata/:email', async (req, res) => {
-    db.data.userdata[req.params.email] = req.body;
+    const email = req.params.email;
+    const existingData = db.data.userdata[email] || {};
+    db.data.userdata[email] = deepMerge(existingData, req.body);
     await db.write();
     res.json({ success: true });
 });
