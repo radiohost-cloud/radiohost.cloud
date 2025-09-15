@@ -44,11 +44,11 @@ const defaultData = {
 const db = new Low(adapter, defaultData);
 await db.read();
 
-// FIX: Ensure db.data is initialized with default structure if file is empty or partial
+// Ensure db.data is initialized with default structure if file is empty or partial
 db.data ||= { ...defaultData };
 for (const key of Object.keys(defaultData)) {
     if (db.data[key] === undefined) {
-        db.data[key] = defaultData[key];
+        db.data[key] = defaultData[key][key];
     }
 }
 
@@ -1427,6 +1427,24 @@ app.post('/api/track/delete', async (req, res) => {
     }
 });
 
+app.post('/api/folder', async (req, res) => {
+    const { path: folderPath } = req.body;
+    if (!folderPath) {
+        return res.status(400).json({ message: 'Folder path is required.' });
+    }
+    const fullPath = path.join(mediaDir, folderPath);
+    try {
+        if (!fs.existsSync(fullPath)) {
+            await fsPromises.mkdir(fullPath, { recursive: true });
+        }
+        res.status(201).json({ success: true, message: `Folder created at ${folderPath}` });
+    } catch (error) {
+        console.error(`Failed to create folder ${folderPath}:`, error);
+        res.status(500).json({ message: 'Failed to create folder.' });
+    }
+});
+
+
 // --- Public stream routes ---
 app.get('/stream', async (req, res) => {
     const settings = await getStationSettings();
@@ -1455,6 +1473,28 @@ app.get('/stream/live*', (req, res) => {
         directStreamListeners.delete(res);
     });
 });
+
+// --- Serve Frontend ---
+// This must be placed after all API and stream routes to function as a catch-all for the SPA.
+const distPath = path.join(__dirname, 'dist');
+if (fs.existsSync(distPath)) {
+    console.log(`[Server] Production mode: serving static files from '${distPath}'`);
+    // Serve static files from the 'dist' directory
+    app.use(express.static(distPath));
+
+    // For any other GET request that doesn't match a static file or an API route,
+    // send the index.html file. This is for SPA routing.
+    app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+    });
+} else {
+    console.warn(`[Server] WARNING: 'dist' folder not found. The frontend will not be served.`);
+    console.warn(`[Server] Please run 'npm run build' to create the production frontend files.`);
+    app.get('/', (req, res) => {
+        res.status(404).send('Frontend application not found. Please run "npm run build".');
+    });
+}
+
 
 // --- Initial library scan on startup ---
 (async () => {
