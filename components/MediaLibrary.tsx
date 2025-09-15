@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { type Folder, type Track, type LibraryItem, TrackType } from '../types';
 import { FolderIcon } from './icons/FolderIcon';
 import { ChevronRightIcon } from './icons/ChevronRightIcon';

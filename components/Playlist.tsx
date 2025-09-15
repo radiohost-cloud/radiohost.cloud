@@ -34,7 +34,7 @@ interface PlaylistProps {
     timeline: Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>;
     onInsertTimeMarker: (marker: Partial<TimeMarker>, beforeItemId: string | null) => void;
     onUpdateTimeMarker: (markerId: string, updates: Partial<TimeMarker>) => void;
-    onInsertVoiceTrack: (data: { track: Track; blob: Blob; vtMix: VtMixDetails }, beforeItemId: string | null) => void;
+    onInsertVoiceTrack: (track: Track, blob: Blob, vtMix: VtMixDetails, beforeItemId: string | null) => void;
     policy: PlayoutPolicy;
     isContributor: boolean;
 }

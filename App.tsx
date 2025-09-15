@@ -2412,7 +2412,9 @@ const AppInternal: React.FC = () => {
     }, [isStudio, sendStudioCommand, isHostMode]);
 
     const handleVoiceTrackCreate = useCallback(async (voiceTrack: Track, blob: Blob): Promise<Track> => {
-        const savedTrack = await dataService.addTrack(voiceTrack, blob);
+        // FIX: Convert Blob to File. The data service expects a File object to store in IndexedDB.
+        const file = new File([blob], `${voiceTrack.title.replace(/[\/\\?%*:|"<>]/g, '-')}.webm`, { type: 'audio/webm' });
+        const savedTrack = await dataService.addTrack(voiceTrack, file);
         if (isHostMode) {
             // In the new filesystem model, adding a VT is just a file upload.
             // The watcher will handle the library update. We don't need a special command.
@@ -2907,7 +2909,7 @@ const AppInternal: React.FC = () => {
                             timeline={timeline}
                             onInsertTimeMarker={handleInsertTimeMarker}
                             onUpdateTimeMarker={handleUpdateTimeMarker}
-                            onInsertVoiceTrack={handleInsertVoiceTrack}
+                            onInsertVoiceTrack={(data, beforeItemId) => handleInsertVoiceTrack(data.track, data.blob, data.vtMix, beforeItemId)}
                             policy={playoutPolicy}
                             isContributor={playoutPolicy.playoutMode === 'presenter'}
                         />
