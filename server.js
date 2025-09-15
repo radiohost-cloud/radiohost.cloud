@@ -536,6 +536,39 @@ wss.on('connection', async (ws, req) => {
                                 stateChanged = true;
                                 break;
                             }
+                            case 'insertTrack': {
+                                const { track, beforeItemId } = payload;
+                                if (!track || !track.id) break;
+                                const newPlaylist = [...sharedPlaylist];
+                                const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, track);
+                                db.data.sharedPlaylist = newPlaylist;
+                                stateChanged = true;
+                                break;
+                            }
+                            case 'insertTimeMarker': {
+                                const { marker, beforeItemId } = payload;
+                                if (!marker || !marker.id) break;
+                                const newPlaylist = [...sharedPlaylist];
+                                const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, marker);
+                                db.data.sharedPlaylist = newPlaylist;
+                                stateChanged = true;
+                                break;
+                            }
+                            case 'updateTimeMarker': {
+                                const { markerId, updates } = payload;
+                                if (!markerId || !updates) break;
+                                const newPlaylist = sharedPlaylist.map(item => {
+                                    if (item.id === markerId && item.type === 'marker') {
+                                        return { ...item, ...updates };
+                                    }
+                                    return item;
+                                });
+                                db.data.sharedPlaylist = newPlaylist;
+                                stateChanged = true;
+                                break;
+                            }
                              case 'removeFromPlaylist': {
                                 const { itemId } = payload;
                                 const newPlaylist = sharedPlaylist.filter(item => item.id !== itemId);
