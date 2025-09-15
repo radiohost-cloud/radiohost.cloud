@@ -84,6 +84,7 @@ const broadcastState = () => {
   const statePayload = {
     playlist: db.data.sharedPlaylist,
     playerState: db.data.sharedPlayerState,
+    broadcasts: db.data.userdata[studioClientEmail]?.broadcasts || [],
   };
   const message = JSON.stringify({ type: 'state-update', payload: statePayload });
   clients.forEach((ws, email) => {
@@ -121,6 +122,108 @@ const broadcastPresenterList = async () => {
     console.log(`[WebSocket] Sent updated presenter list to studio. Count: ${presenters.length}`);
 };
 
+// --- LOGIC HELPERS (ported from App.tsx) ---
+
+const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
+    const len = playlist.length;
+    if (len === 0) return -1;
+    let nextIndex = startIndex;
+    for (let i = 0; i < len; i++) {
+        nextIndex = (nextIndex + direction + len) % len;
+        const item = playlist[nextIndex];
+        // Note: Server-side logic for skipping based on timeline is complex and will be handled later.
+        // For now, it just finds the next item that isn't a marker.
+        if (item && !item.markerType) {
+            return nextIndex;
+        }
+    }
+    return -1;
+};
+
+// --- Tree Manipulation Helpers ---
+const addItemToTree = (node, parentId, itemToAdd) => {
+    if (node.id === parentId) {
+        return { ...node, children: [...node.children, itemToAdd] };
+    }
+    return {
+        ...node,
+        children: node.children.map(child =>
+            child.type === 'folder' ? addItemToTree(child, parentId, itemToAdd) : child
+        ),
+    };
+};
+const addMultipleItemsToTree = (node, parentId, itemsToAdd) => {
+    if (node.id === parentId) {
+        return { ...node, children: [...node.children, ...itemsToAdd] };
+    }
+    return {
+        ...node,
+        children: node.children.map(child =>
+            child.type === 'folder' ? addMultipleItemsToTree(child, parentId, itemsToAdd) : child
+        ),
+    };
+};
+const findAndRemoveItem = (node, itemId) => {
+    let foundItem = null;
+    const children = node.children.filter(child => {
+        if (child.id === itemId) {
+            foundItem = child;
+            return false;
+        }
+        return true;
+    });
+    if (foundItem) {
+        return { updatedNode: { ...node, children }, foundItem };
+    }
+    for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        if (child.type === 'folder') {
+            const result = findAndRemoveItem(child, itemId);
+            if (result.foundItem) {
+                children[i] = result.updatedNode;
+                return { updatedNode: { ...node, children }, foundItem: result.foundItem };
+            }
+        }
+    }
+    return { updatedNode: node, foundItem: null };
+};
+const removeItemsFromTree = (node, itemIdsToRemove) => {
+    const newChildren = node.children
+        .filter(child => !itemIdsToRemove.has(child.id))
+        .map(child =>
+            child.type === 'folder' ? removeItemsFromTree(child, itemIdsToRemove) : child
+        );
+    return { ...node, children: newChildren };
+};
+const updateFolderInTree = (node, folderId, updateFn) => {
+    let updatedNode = node;
+    if (node.id === folderId) {
+        updatedNode = updateFn(node);
+    }
+    return {
+        ...updatedNode,
+        children: updatedNode.children.map(child =>
+            child.type === 'folder' ? updateFolderInTree(child, folderId, updateFn) : child
+        ),
+    };
+};
+const updateTrackInTree = (node, trackId, updateFn) => {
+    return {
+        ...node,
+        children: node.children.map(child => {
+            if (child.type === 'folder') {
+                return updateTrackInTree(child, trackId, updateFn);
+            }
+            if (child.id === trackId) {
+                return updateFn(child);
+            }
+            return child;
+        }),
+    };
+};
+
+
+// --- Main WebSocket Logic ---
 
 wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -211,7 +314,7 @@ wss.on('connection', async (ws, req) => {
         }));
     }
 
-    ws.on('message', (message) => {
+    ws.on('message', async (message) => {
         try {
              if (message instanceof Buffer && message.length > 1) {
                 const messageType = message.readUInt8(0);
@@ -237,33 +340,195 @@ wss.on('connection', async (ws, req) => {
                     ws.send(JSON.stringify({ type: 'pong' }));
                     break;
                 
-                case 'studio-action':
+                case 'studio-command':
                     if (studioClientEmail && studioClientEmail === email) {
-                        const { action, payload } = data.payload;
-                        console.log(`[WebSocket] Processing studio action: ${action}`);
+                        const { command, payload } = data.payload;
+                        console.log(`[WebSocket] Processing studio command: ${command}`);
+                
+                        await db.read(); // Read latest state
+                
                         let stateChanged = false;
                         let libraryChanged = false;
+                
+                        const { sharedPlaylist, sharedPlayerState, sharedMediaLibrary } = db.data;
+                
+                        switch (command) {
+                            case 'next': {
+                                const nextIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, 1);
+                                if (nextIndex !== -1) {
+                                    sharedPlayerState.currentTrackIndex = nextIndex;
+                                } else {
+                                    sharedPlayerState.isPlaying = false;
+                                }
+                                stateChanged = true;
+                                break;
+                            }
+                             case 'crossfadeNext':
+                             case 'jumpToTrack': {
+                                const newIndex = command === 'jumpToTrack' ? payload.index : findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, 1);
+                                if (newIndex !== -1) {
+                                    const nextItem = sharedPlaylist[newIndex];
+                                    sharedPlayerState.currentTrackIndex = newIndex;
+                                    sharedPlayerState.currentPlayingItemId = nextItem.id;
+                                } else {
+                                    sharedPlayerState.isPlaying = false;
+                                }
+                                stateChanged = true;
+                                break;
+                            }
+                            case 'previous': {
+                                const prevIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, -1);
+                                if (prevIndex !== -1) {
+                                    sharedPlayerState.currentTrackIndex = prevIndex;
+                                }
+                                stateChanged = true;
+                                break;
+                            }
+                            case 'togglePlay': {
+                                if (sharedPlaylist.length > 0) {
+                                    sharedPlayerState.isPlaying = !sharedPlayerState.isPlaying;
+                                    if (sharedPlayerState.isPlaying) {
+                                        const currentItem = sharedPlaylist[sharedPlayerState.currentTrackIndex];
+                                        if (currentItem && !currentItem.markerType) {
+                                            sharedPlayerState.currentPlayingItemId = currentItem.id;
+                                        }
+                                    }
+                                }
+                                stateChanged = true;
+                                break;
+                            }
+                            case 'playTrack': {
+                                const { itemId } = payload;
+                                const targetIndex = sharedPlaylist.findIndex(item => item.id === itemId);
+                                if (targetIndex !== -1) {
+                                    const newTrack = sharedPlaylist[targetIndex];
+                                    if (!newTrack.markerType) {
+                                        sharedPlayerState.currentTrackIndex = targetIndex;
+                                        sharedPlayerState.currentPlayingItemId = newTrack.id;
+                                        sharedPlayerState.isPlaying = true;
+                                    }
+                                }
+                                stateChanged = true;
+                                break;
+                            }
+                             case 'setStopAfterTrackId': {
+                                sharedPlayerState.stopAfterTrackId = payload.id;
+                                stateChanged = true;
+                                break;
+                            }
+                            case 'stopAtId': {
+                                sharedPlayerState.isPlaying = false;
+                                sharedPlayerState.stopAfterTrackId = null;
+                                stateChanged = true;
+                                break;
+                            }
+                             case 'removeFromPlaylist': {
+                                const { itemId } = payload;
+                                const newPlaylist = sharedPlaylist.filter(item => item.id !== itemId);
+                                if (sharedPlayerState.currentPlayingItemId === itemId) {
+                                    sharedPlayerState.isPlaying = false;
+                                    sharedPlayerState.currentPlayingItemId = null;
+                                    const firstPlayable = findNextPlayableIndex(newPlaylist, -1, 1);
+                                    sharedPlayerState.currentTrackIndex = firstPlayable > -1 ? firstPlayable : 0;
+                                } else {
+                                    const newIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
+                                    if(newIndex > -1) sharedPlayerState.currentTrackIndex = newIndex;
+                                }
+                                db.data.sharedPlaylist = newPlaylist;
+                                stateChanged = true;
+                                break;
+                            }
+                            case 'reorderPlaylist': {
+                                const { draggedId, dropTargetId } = payload;
+                                const newPlaylist = [...sharedPlaylist];
+                                const dragIndex = newPlaylist.findIndex(item => item.id === draggedId);
+                                if (dragIndex !== -1) {
+                                    const [draggedItem] = newPlaylist.splice(dragIndex, 1);
+                                    const dropIndex = dropTargetId ? newPlaylist.findIndex(item => item.id === dropTargetId) : newPlaylist.length;
+                                    newPlaylist.splice(dropIndex !== -1 ? dropIndex : newPlaylist.length, 0, draggedItem);
+                                    db.data.sharedPlaylist = newPlaylist;
 
-                        switch (action) {
-                            case 'setPlaylist':
-                                db.data.sharedPlaylist = payload;
+                                    if(sharedPlayerState.currentPlayingItemId) {
+                                        const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
+                                        if (newCurrentIndex !== -1) sharedPlayerState.currentTrackIndex = newCurrentIndex;
+                                    }
+                                    stateChanged = true;
+                                }
+                                break;
+                            }
+                            case 'clearPlaylist': {
+                                db.data.sharedPlaylist = [];
+                                sharedPlayerState.isPlaying = false;
+                                sharedPlayerState.currentPlayingItemId = null;
+                                sharedPlayerState.currentTrackIndex = 0;
+                                sharedPlayerState.trackProgress = 0;
+                                sharedPlayerState.stopAfterTrackId = null;
                                 stateChanged = true;
                                 break;
-                            case 'setPlayerState':
-                                db.data.sharedPlayerState = { ...db.data.sharedPlayerState, ...payload };
-                                stateChanged = true;
-                                break;
-                            case 'setLibrary':
-                                db.data.sharedMediaLibrary = payload;
+                            }
+                             case 'addTracksToLibrary': {
+                                const { tracks, destinationFolderId } = payload;
+                                db.data.sharedMediaLibrary = addMultipleItemsToTree(sharedMediaLibrary, destinationFolderId, tracks);
                                 libraryChanged = true;
                                 break;
+                            }
+                            case 'removeFromLibrary': {
+                                const { id } = payload;
+                                db.data.sharedMediaLibrary = removeItemsFromTree(sharedMediaLibrary, new Set([id]));
+                                libraryChanged = true;
+                                break;
+                            }
+                            case 'removeMultipleFromLibrary': {
+                                const { ids } = payload;
+                                db.data.sharedMediaLibrary = removeItemsFromTree(sharedMediaLibrary, new Set(ids));
+                                libraryChanged = true;
+                                break;
+                            }
+                            case 'createFolder': {
+                                const { parentId, folderName } = payload;
+                                const newFolder = { id: `folder-${Date.now()}`, name: folderName, type: 'folder', children: [] };
+                                db.data.sharedMediaLibrary = addItemToTree(sharedMediaLibrary, parentId, newFolder);
+                                libraryChanged = true;
+                                break;
+                            }
+                             case 'moveItemInLibrary': {
+                                const { itemId, destinationFolderId } = payload;
+                                const { updatedNode, foundItem } = findAndRemoveItem(sharedMediaLibrary, itemId);
+                                if (foundItem) {
+                                    db.data.sharedMediaLibrary = addItemToTree(updatedNode, destinationFolderId, foundItem);
+                                    libraryChanged = true;
+                                }
+                                break;
+                            }
+                             case 'updateFolderMetadata': {
+                                const { folderId, settings } = payload;
+                                db.data.sharedMediaLibrary = updateFolderInTree(sharedMediaLibrary, folderId, folder => ({ ...folder, suppressMetadata: settings }));
+                                libraryChanged = true;
+                                break;
+                            }
+                             case 'updateTrackMetadata': {
+                                const { trackId, newMetadata } = payload;
+                                db.data.sharedMediaLibrary = updateTrackInTree(sharedMediaLibrary, trackId, track => ({ ...track, ...newMetadata }));
+                                libraryChanged = true;
+                                break;
+                            }
+                            case 'updateTrackTags': {
+                                const { trackId, tags } = payload;
+                                db.data.sharedMediaLibrary = updateTrackInTree(sharedMediaLibrary, trackId, track => ({ ...track, tags: tags.length > 0 ? tags.sort() : undefined }));
+                                libraryChanged = true;
+                                break;
+                            }
+                            // Fallback for simple state changes
+                            case 'setPlayerState':
+                                db.data.sharedPlayerState = { ...sharedPlayerState, ...payload };
+                                stateChanged = true;
+                                break;
                         }
-                        
+                
                         if (stateChanged || libraryChanged) {
-                            db.write().then(() => {
-                                if (stateChanged) broadcastState();
-                                if (libraryChanged) broadcastLibrary();
-                            });
+                            await db.write();
+                            if (stateChanged) broadcastState();
+                            if (libraryChanged) broadcastLibrary();
                         }
                     }
                     break;

@@ -161,108 +161,8 @@ const getProminentColorsAndTextColor = (img: HTMLImageElement): { colors: string
     return { colors: prominentColors, textColor };
 };
 
-// --- Recursive Helper Functions for Immutable Tree Updates ---
-
-const addItemToTree = (node: Folder, parentId: string, itemToAdd: LibraryItem): Folder => {
-    if (node.id === parentId) {
-        return { ...node, children: [...node.children, itemToAdd] };
-    }
-    return {
-        ...node,
-        children: node.children.map(child =>
-            child.type === 'folder' ? addItemToTree(child, parentId, itemToAdd) : child
-        ),
-    };
-};
-
-const addMultipleItemsToTree = (node: Folder, parentId: string, itemsToAdd: LibraryItem[]): Folder => {
-    if (node.id === parentId) {
-        return { ...node, children: [...node.children, ...itemsToAdd] };
-    }
-    return {
-        ...node,
-        children: node.children.map(child =>
-            child.type === 'folder' ? addMultipleItemsToTree(child, parentId, itemsToAdd) : child
-        ),
-    };
-};
-
-const removeItemFromTree = (node: Folder, itemIdToRemove: string): Folder => {
-    const newChildren = node.children.filter(child => child.id !== itemIdToRemove);
-    return {
-        ...node,
-        children: newChildren.map(child =>
-            child.type === 'folder' ? removeItemFromTree(child, itemIdToRemove) : child
-        ),
-    };
-};
-
-const removeItemsFromTree = (node: Folder, itemIdsToRemove: Set<string>): Folder => {
-    const newChildren = node.children
-        .filter(child => !itemIdsToRemove.has(child.id))
-        .map(child =>
-            child.type === 'folder' ? removeItemsFromTree(child, itemIdsToRemove) : child
-        );
-    return { ...node, children: newChildren };
-};
-
-const updateFolderInTree = (node: Folder, folderId: string, updateFn: (folder: Folder) => Folder): Folder => {
-    let updatedNode = node;
-    if (node.id === folderId) {
-        updatedNode = updateFn(node);
-    }
-    return {
-        ...updatedNode,
-        children: updatedNode.children.map(child =>
-            child.type === 'folder' ? updateFolderInTree(child, folderId, updateFn) : child
-        ),
-    };
-};
-
-const updateTrackInTree = (node: Folder, trackId: string, updateFn: (track: Track) => Track): Folder => {
-    return {
-        ...node,
-        children: node.children.map(child => {
-            if (child.type === 'folder') {
-                return updateTrackInTree(child, trackId, updateFn);
-            }
-            if (child.id === trackId) {
-                return updateFn(child);
-            }
-            return child;
-        }),
-    };
-};
-
-
-const findAndRemoveItem = (node: Folder, itemId: string): { updatedNode: Folder; foundItem: LibraryItem | null } => {
-    let foundItem: LibraryItem | null = null;
-    
-    const children = node.children.filter(child => {
-        if (child.id === itemId) {
-            foundItem = child;
-            return false;
-        }
-        return true;
-    });
-
-    if (foundItem) {
-        return { updatedNode: { ...node, children }, foundItem };
-    }
-
-    for (let i = 0; i < children.length; i++) {
-        const child = children[i];
-        if (child.type === 'folder') {
-            const result = findAndRemoveItem(child, itemId);
-            if (result.foundItem) {
-                children[i] = result.updatedNode;
-                return { updatedNode: { ...node, children }, foundItem: result.foundItem };
-            }
-        }
-    }
-
-    return { updatedNode: node, foundItem: null };
-};
+// --- Recursive Helper Functions for Immutable Tree Traversal (Find/Get operations) ---
+// Note: All modification logic (add, remove, update) has been moved to the server.
 
 const findTrackInTree = (node: Folder, trackId: string): Track | null => {
     for (const child of node.children) {
@@ -1000,92 +900,30 @@ const AppInternal: React.FC = () => {
         setPflProgress(0);
     }, []);
     
-    const sendStudioAction = useCallback((action: string, payload: any) => {
+    const sendStudioCommand = useCallback((command: string, payload?: any) => {
         if (playoutPolicyRef.current.playoutMode !== 'studio' || wsRef.current?.readyState !== WebSocket.OPEN) return;
         wsRef.current.send(JSON.stringify({
-            type: 'studio-action',
-            payload: { action, payload }
+            type: 'studio-command',
+            payload: { command, payload }
         }));
     }, []);
 
     const handleSetStopAfterTrackId = useCallback((id: string | null) => {
-        setStopAfterTrackId(id);
-        sendStudioAction('setPlayerState', { stopAfterTrackId: id });
-    }, [sendStudioAction]);
-
-    const handleSetCurrentTrack = useCallback((newIndex: number, source: 'manual' | 'auto-next' | 'marker-jump') => {
-        if (playoutPolicyRef.current.playoutMode === 'presenter') return;
-    
-        const currentPlaylist = playlistRef.current;
-        const oldIndex = currentTrackIndexRef.current;
-        const timeline = timelineRef.current;
-        const isForwardMove = newIndex > oldIndex;
-    
-        let finalPlaylist = currentPlaylist;
-        let finalIndex = newIndex;
-    
-        if (playoutPolicyRef.current.removePlayedTracks && isForwardMove) {
-            finalPlaylist = currentPlaylist.slice(newIndex);
-            finalIndex = 0;
-        } else {
-            let shouldCleanup = false;
-            const checkStartIndex = (source === 'auto-next') ? oldIndex + 1 : 0;
-    
-            if ((isForwardMove || source === 'manual') && newIndex > -1) {
-                for (let i = checkStartIndex; i < newIndex; i++) {
-                    const item = currentPlaylist[i];
-                    if (!item) continue;
-                    if ('markerType' in item || timeline.get(item.id)?.isSkipped) {
-                        shouldCleanup = true;
-                        break;
-                    }
-                }
-            }
-    
-            if (shouldCleanup) {
-                finalPlaylist = currentPlaylist.slice(newIndex);
-                finalIndex = 0;
-            }
-        }
-    
-        // Update local state optimistically
-        setPlaylist(finalPlaylist);
-        setCurrentTrackIndex(finalIndex);
-    
-        // Send actions to the server
-        sendStudioAction('setPlaylist', finalPlaylist);
-        sendStudioAction('setPlayerState', { currentTrackIndex: finalIndex });
-    
-    }, [sendStudioAction]);
+        if (playoutPolicy.playoutMode === 'presenter') return;
+        sendStudioCommand('setStopAfterTrackId', { id });
+    }, [playoutPolicy.playoutMode, sendStudioCommand]);
 
     const handleNext = useCallback(() => {
         if (playoutPolicy.playoutMode === 'presenter') return;
-        const nextIndex = findNextPlayableIndex(currentTrackIndexRef.current, 1);
-    
-        if (nextIndex !== -1) {
-            handleSetCurrentTrack(nextIndex, 'auto-next');
-            setActivePlayer(p => p === 'A' ? 'B' : 'A');
-        } else {
-            setIsPlaying(false);
-            setCurrentPlayingItemId(null);
-            sendStudioAction('setPlayerState', { isPlaying: false, currentPlayingItemId: null });
-
-            if (playoutPolicyRef.current.removePlayedTracks) {
-                setPlaylist([]);
-                sendStudioAction('setPlaylist', []);
-            }
-        }
-    }, [findNextPlayableIndex, handleSetCurrentTrack, playoutPolicy.playoutMode, sendStudioAction]);
+        sendStudioCommand('next');
+        setActivePlayer(p => p === 'A' ? 'B' : 'A');
+    }, [playoutPolicy.playoutMode, sendStudioCommand]);
 
     const handlePrevious = useCallback(() => {
         if (playoutPolicy.playoutMode === 'presenter') return;
-        const prevIndex = findNextPlayableIndex(currentTrackIndexRef.current, -1);
-        if (prevIndex !== -1) {
-            setActivePlayer(p => p === 'A' ? 'B' : 'A');
-            setCurrentTrackIndex(prevIndex);
-            sendStudioAction('setPlayerState', { currentTrackIndex: prevIndex });
-        }
-    }, [findNextPlayableIndex, playoutPolicy.playoutMode, sendStudioAction]);
+        sendStudioCommand('previous');
+        setActivePlayer(p => p === 'A' ? 'B' : 'A');
+    }, [playoutPolicy.playoutMode, sendStudioCommand]);
     
     const handleTogglePlay = useCallback(async () => {
         if (playoutPolicy.playoutMode === 'presenter') return;
@@ -1098,20 +936,8 @@ const AppInternal: React.FC = () => {
         if (shouldPlay) {
             stopPfl();
         }
-        setIsPlaying(shouldPlay);
-
-        if (shouldPlay) {
-            const currentItem = playlistRef.current[currentTrackIndexRef.current];
-            if (currentItem?.id !== currentPlayingItemId) {
-                setCurrentPlayingItemId(currentItem?.id || null);
-                sendStudioAction('setPlayerState', { isPlaying: shouldPlay, currentPlayingItemId: currentItem?.id || null });
-            } else {
-                sendStudioAction('setPlayerState', { isPlaying: shouldPlay });
-            }
-        } else {
-            sendStudioAction('setPlayerState', { isPlaying: shouldPlay });
-        }
-    }, [stopPfl, playoutPolicy.playoutMode, sendStudioAction]);
+        sendStudioCommand('togglePlay');
+    }, [stopPfl, playoutPolicy.playoutMode, sendStudioCommand]);
     
     const handlePlayTrack = useCallback(async (itemId: string) => {
         if (playoutPolicy.playoutMode === 'presenter') return;
@@ -1126,18 +952,9 @@ const AppInternal: React.FC = () => {
         if ('markerType' in newTrack) return;
 
         stopPfl();
-        
-        handleSetCurrentTrack(targetIndex, 'manual');
-
+        sendStudioCommand('playTrack', { itemId });
         setActivePlayer(p => p === 'A' ? 'B' : 'A');
-        
-        // Optimistic local updates
-        setCurrentPlayingItemId(newTrack.id);
-        setIsPlaying(true);
-        // Send action to server
-        sendStudioAction('setPlayerState', { currentPlayingItemId: newTrack.id, isPlaying: true });
-
-    }, [stopPfl, handleSetCurrentTrack, playoutPolicy.playoutMode, sendStudioAction]);
+    }, [stopPfl, playoutPolicy.playoutMode, sendStudioCommand]);
     
     const getTrackSrc = useCallback(async (track: Track): Promise<string | null> => {
         const trackWithOriginalId = { ...track, id: track.originalId || track.id };
@@ -1351,16 +1168,8 @@ const AppInternal: React.FC = () => {
                     setPlayoutHistory(prev => [...prev, { trackId: endedItem.originalId || endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
                 }
 
-                // Local optimistic updates
-                setCurrentPlayingItemId(nextItem.id);
                 setActivePlayer(p => p === 'A' ? 'B' : 'A');
-                
-                // This function sends its own actions
-                handleSetCurrentTrack(nextIndex, 'auto-next');
-                
-                // Send current playing item ID update separately
-                sendStudioAction('setPlayerState', { currentPlayingItemId: nextItem.id });
-
+                sendStudioCommand('crossfadeNext');
                 isCrossfadingRef.current = false;
 
             }, Math.max(fadeOutDuration, fadeInDuration) * 1000 + 100);
@@ -1369,7 +1178,7 @@ const AppInternal: React.FC = () => {
             console.error("Crossfade playback failed:", e);
             isCrossfadingRef.current = false;
         }
-    }, [activePlayer, getTrackSrc, stopPfl, handleSetCurrentTrack, sendStudioAction]);
+    }, [activePlayer, getTrackSrc, stopPfl, sendStudioCommand]);
 
     useEffect(() => {
         const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
@@ -1380,10 +1189,8 @@ const AppInternal: React.FC = () => {
              if (isPlaying) stopPfl();
             if (!currentTrack) {
                 if (isPlaying) {
-                    setIsPlaying(false);
-                    if (isStudio) sendStudioAction('setPlayerState', { isPlaying: false, currentPlayingItemId: null });
+                     if (isStudio) sendStudioCommand('togglePlay');
                 }
-                 setCurrentPlayingItemId(null);
                 return;
             }
 
@@ -1419,20 +1226,14 @@ const AppInternal: React.FC = () => {
                             const previousItem = currentIndex > 0 ? playlist[currentIndex - 1] : null;
                             if (!previousItem || 'markerType' in previousItem || (!('markerType' in previousItem) && previousItem.addedBy !== 'broadcast')) {
                                 console.log('[Broadcast] First track starting. Clearing previous playlist items.');
-                                const newPlaylist = currentList => currentList.slice(currentIndex);
-                                setPlaylist(newPlaylist);
-                                setCurrentTrackIndex(0);
-                                sendStudioAction('setPlaylist', newPlaylist(playlistRef.current));
-                                sendStudioAction('setPlayerState', { currentTrackIndex: 0 });
+                                sendStudioCommand('clearPreBroadcast');
                             }
                         }
                     }
 
                 } catch (e) {
                     console.error("Playback failed:", e);
-                    setIsPlaying(false);
-                    setCurrentPlayingItemId(null);
-                    if (isStudio) sendStudioAction('setPlayerState', { isPlaying: false, currentPlayingItemId: null });
+                    if (isStudio) sendStudioCommand('togglePlay');
                 }
             } else if (!isPlaying && !currentPlayer.paused) {
                 currentPlayer.pause();
@@ -1441,7 +1242,7 @@ const AppInternal: React.FC = () => {
 
         loadAndPlay();
         
-    }, [currentTrack, isPlaying, activePlayer, handleNext, getTrackSrc, stopPfl, isStudio, sendStudioAction]);
+    }, [currentTrack, isPlaying, activePlayer, handleNext, getTrackSrc, stopPfl, isStudio, sendStudioCommand]);
 
     const timeline = useMemo(() => {
         const timelineMap = new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>();
@@ -1559,7 +1360,7 @@ const AppInternal: React.FC = () => {
             if (isStudio) {
                 const now = Date.now();
                 if (now - lastProgressUpdateRef.current > 1000) {
-                    sendStudioAction('setPlayerState', { trackProgress: player.currentTime });
+                    sendStudioCommand('setPlayerState', { trackProgress: player.currentTime });
                     lastProgressUpdateRef.current = now;
                 }
             }
@@ -1618,57 +1419,18 @@ const AppInternal: React.FC = () => {
             setPlayoutHistory(prev => [...prev, { trackId: endedItem.originalId || endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
             
             if (stopAfterTrackIdRef.current && stopAfterTrackIdRef.current === endedItem.id) {
-                setIsPlaying(false); 
-                handleSetStopAfterTrackId(null);
+                sendStudioCommand('stopAtId');
                 if (remoteStudioRef.current) remoteStudioRef.current.goOnAir();
                 return;
             }
 
-            const endedIndex = currentTrackIndexRef.current;
-            const currentPlaylist = playlistRef.current;
-            const currentTimeline = timelineRef.current;
-            let nextIndex = -1;
-
-            const now = Date.now();
-            let lastPassedSoftMarkerIndex = -1;
-            currentPlaylist.forEach((item, index) => {
-                if ('markerType' in item && item.markerType === TimeMarkerType.SOFT && item.time < now) {
-                    lastPassedSoftMarkerIndex = index;
-                }
-            });
-
-            for (let i = endedIndex + 1; i < currentPlaylist.length; i++) {
-                const item = currentPlaylist[i];
-                if (!('markerType' in item)) {
-                    const timelineData = currentTimeline.get(item.id);
-                    const isSkippedByHardMarker = timelineData ? timelineData.startTime >= timelineData.endTime : false;
-                    const isSkippedBySoftMarker = lastPassedSoftMarkerIndex > endedIndex && i < lastPassedSoftMarkerIndex;
-                    if (!isSkippedByHardMarker && !isSkippedBySoftMarker) {
-                        nextIndex = i;
-                        break;
-                    }
-                }
-            }
-
-            if (nextIndex !== -1) {
-                handleSetCurrentTrack(nextIndex, 'auto-next');
-                setActivePlayer(p => (p === 'A' ? 'B' : 'A'));
-            } else {
-                setIsPlaying(false);
-                setCurrentPlayingItemId(null);
-                sendStudioAction('setPlayerState', { isPlaying: false, currentPlayingItemId: null });
-
-                if (playoutPolicyRef.current.removePlayedTracks) {
-                    setPlaylist([]);
-                    sendStudioAction('setPlaylist', []);
-                }
-            }
+            handleNext();
         };
         
         const players = [playerA, playerB];
         players.forEach(p => { if (p) { p.addEventListener('timeupdate', handleTimeUpdate); p.addEventListener('ended', handleEnded); } });
         return () => { players.forEach(p => { if (p) { p.removeEventListener('timeupdate', handleTimeUpdate); p.removeEventListener('ended', handleEnded); } }); };
-    }, [activePlayer, findNextPlayableIndex, performCrossfade, handleSetCurrentTrack, isStudio, sendStudioAction, handleSetStopAfterTrackId]);
+    }, [activePlayer, findNextPlayableIndex, performCrossfade, handleNext, isStudio, sendStudioCommand]);
 
     const triggerHardMarkerFadeAndJump = useCallback(async (nextIndex: number) => {
         if (isCrossfadingRef.current) return;
@@ -1697,13 +1459,13 @@ const AppInternal: React.FC = () => {
                 setPlayoutHistory(prev => [...prev, { trackId: endedItem.originalId || endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
             }
             
-            handleSetCurrentTrack(nextIndex, 'marker-jump');
+            sendStudioCommand('jumpToTrack', { index: nextIndex });
             setActivePlayer(p => (p === 'A' ? 'B' : 'A'));
     
             isCrossfadingRef.current = false;
         }, FADE_DURATION * 1000);
     
-    }, [activePlayer, setPlayoutHistory, handleSetCurrentTrack]);
+    }, [activePlayer, setPlayoutHistory, sendStudioCommand]);
 
     useEffect(() => {
         if (!isPlaying || playoutPolicy.playoutMode === 'presenter') return;
@@ -2025,21 +1787,9 @@ const AppInternal: React.FC = () => {
     }, []);
 
     const handleInsertTrackInPlaylist = useCallback((track: Track, beforeItemId: string | null) => {
-        const newPlaylist = [...playlistRef.current];
-        const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
-        
-        const newPlaylistItem = { ...track, originalId: track.id, id: `pl-item-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`, addedBy: 'user' as const };
-
-        if (insertIndex !== -1) newPlaylist.splice(insertIndex, 0, newPlaylistItem);
-        else newPlaylist.push(newPlaylistItem);
-        
-        if (currentPlayingItemIdRef.current) {
-             const newCurrentIndex = newPlaylist.findIndex(item => item.id === currentPlayingItemIdRef.current);
-             if (newCurrentIndex !== -1) setCurrentTrackIndex(newCurrentIndex);
-        }
-        setPlaylist(newPlaylist);
-        sendStudioAction('setPlaylist', newPlaylist);
-    }, [sendStudioAction]);
+        if (playoutPolicy.playoutMode === 'presenter') return;
+        sendStudioCommand('insertTrack', { track, beforeItemId });
+    }, [sendStudioCommand, playoutPolicy.playoutMode]);
 
     const handleConfirmValidationAndAddTrack = useCallback(() => {
         if (validationWarning) {
@@ -2095,39 +1845,6 @@ const AppInternal: React.FC = () => {
         else setValidationWarning({ track, beforeItemId, message: validation.message });
     }, [validateTrackPlacement, handleInsertTrackInPlaylist]);
 
-    const addVoiceTrackToState = useCallback(async (track: Track, blob: Blob, vtMix: VtMixDetails, beforeItemId: string | null) => {
-        const savedTrack = await dataService.addTrack(track, blob);
-
-        const newLibrary = (prevLibrary: Folder) => {
-            const voicetracksFolderName = "Voicetracks";
-            let voicetracksFolder = prevLibrary.children.find(child => child.type === 'folder' && child.name === voicetracksFolderName) as Folder | undefined;
-            let updatedLibrary = prevLibrary;
-            if (!voicetracksFolder) {
-                const newFolder: Folder = { id: `folder-voicetracks-${Date.now()}`, name: voicetracksFolderName, type: 'folder', children: [] };
-                updatedLibrary = addItemToTree(updatedLibrary, 'root', newFolder);
-                voicetracksFolder = newFolder;
-            }
-            return addItemToTree(updatedLibrary, voicetracksFolder.id, savedTrack);
-        };
-        setMediaLibrary(newLibrary);
-        sendStudioAction('setLibrary', newLibrary(mediaLibraryRef.current));
-
-        const newPlaylist = (prev: SequenceItem[]) => {
-            const updated = [...prev];
-            const insertIndex = beforeItemId ? updated.findIndex(item => item.id === beforeItemId) : updated.length;
-            const trackWithMix = { ...savedTrack, vtMix, originalId: savedTrack.id, id: `pl-item-vt-${Date.now()}-${Math.random().toString(36).substring(2, 9)}` };
-            if (insertIndex !== -1) updated.splice(insertIndex, 0, trackWithMix);
-            else updated.push(trackWithMix);
-            if (currentPlayingItemIdRef.current) {
-                 const newCurrentIndex = updated.findIndex(item => item.id === currentPlayingItemIdRef.current);
-                 if (newCurrentIndex !== -1) setCurrentTrackIndex(newCurrentIndex);
-            }
-            return updated;
-        };
-        setPlaylist(newPlaylist);
-        sendStudioAction('setPlaylist', newPlaylist(playlistRef.current));
-    }, [sendStudioAction]);
-
     const handleInsertVoiceTrack = useCallback(async (voiceTrack: Track, blob: Blob, vtMix: VtMixDetails, beforeItemId: string | null) => {
         if (playoutPolicyRef.current.playoutMode === 'presenter') {
             if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -2142,100 +1859,53 @@ const AppInternal: React.FC = () => {
                 console.error("WebSocket not connected. Cannot send VT to studio.");
             }
         } else {
-            addVoiceTrackToState(voiceTrack, blob, vtMix, beforeItemId);
+            sendStudioCommand('insertVoiceTrack', { voiceTrack, vtMix, beforeItemId, blob });
         }
-    }, [addVoiceTrackToState]);
+    }, [sendStudioCommand]);
 
     const handleRemoveFromPlaylist = useCallback((itemIdToRemove: string) => {
+        if (playoutPolicy.playoutMode === 'presenter') return;
         const itemToRemove = playlistRef.current.find(item => item.id === itemIdToRemove);
-        if (itemToRemove && !('markerType' in itemToRemove) && itemToRemove.src && itemToRemove.src.startsWith('blob:')) URL.revokeObjectURL(itemToRemove.src);
-        const newPlaylist = playlistRef.current.filter(item => item.id !== itemIdToRemove);
-        setPlaylist(newPlaylist);
-        sendStudioAction('setPlaylist', newPlaylist);
-
-        if (currentPlayingItemId) {
-            if (currentPlayingItemId === itemIdToRemove) {
-                setIsPlaying(false);
-                setCurrentPlayingItemId(null);
-                const firstPlayable = findNextPlayableIndex(-1, 1);
-                setCurrentTrackIndex(firstPlayable > -1 ? firstPlayable : 0);
-                sendStudioAction('setPlayerState', { isPlaying: false, currentPlayingItemId: null, currentTrackIndex: firstPlayable > -1 ? firstPlayable : 0 });
-            } else {
-                const newIndex = newPlaylist.findIndex(item => item.id === currentPlayingItemId);
-                if (newIndex !== -1) {
-                    setCurrentTrackIndex(newIndex);
-                    sendStudioAction('setPlayerState', { currentTrackIndex: newIndex });
-                }
-            }
+        if (itemToRemove && !('markerType' in itemToRemove) && itemToRemove.src && itemToRemove.src.startsWith('blob:')) {
+            URL.revokeObjectURL(itemToRemove.src);
         }
-    }, [currentPlayingItemId, findNextPlayableIndex, sendStudioAction]);
+        sendStudioCommand('removeFromPlaylist', { itemId: itemIdToRemove });
+    }, [playoutPolicy.playoutMode, sendStudioCommand]);
 
     const handleReorderPlaylist = useCallback((draggedId: string, dropTargetId: string | null) => {
-        const newPlaylist = [...playlistRef.current];
-        const dragIndex = newPlaylist.findIndex(item => item.id === draggedId);
-        if (dragIndex === -1) return;
-        const [draggedItem] = newPlaylist.splice(dragIndex, 1);
-        const dropIndex = dropTargetId ? newPlaylist.findIndex(item => item.id === dropTargetId) : newPlaylist.length;
-        if (dropIndex === -1) newPlaylist.push(draggedItem);
-        else newPlaylist.splice(dropIndex, 0, draggedItem);
-        setPlaylist(newPlaylist);
-        sendStudioAction('setPlaylist', newPlaylist);
-
-        if (currentPlayingItemId) {
-            const newCurrentIndex = newPlaylist.findIndex(item => item.id === currentPlayingItemId);
-            if (newCurrentIndex !== -1) {
-                setCurrentTrackIndex(newCurrentIndex);
-                sendStudioAction('setPlayerState', { currentTrackIndex: newCurrentIndex });
-            }
-        }
-    }, [currentPlayingItemId, sendStudioAction]);
+        if (playoutPolicy.playoutMode === 'presenter') return;
+        sendStudioCommand('reorderPlaylist', { draggedId, dropTargetId });
+    }, [playoutPolicy.playoutMode, sendStudioCommand]);
 
 
     const handleClearPlaylist = useCallback(() => {
+        if (playoutPolicy.playoutMode === 'presenter') return;
         playlistRef.current.forEach(item => {
             if (!('markerType' in item) && item.src && item.src.startsWith('blob:')) URL.revokeObjectURL(item.src);
         });
-        const newPlaylist = currentTrack ? [currentTrack] : [];
-        setPlaylist(newPlaylist);
-        setCurrentTrackIndex(0);
-        sendStudioAction('setPlaylist', newPlaylist);
-        sendStudioAction('setPlayerState', { currentTrackIndex: 0 });
-        if (!currentTrack) {
-            setCurrentPlayingItemId(null);
-            setIsPlaying(false);
-            setTrackProgress(0);
-            handleSetStopAfterTrackId(null);
-            sendStudioAction('setPlayerState', { currentPlayingItemId: null, isPlaying: false, trackProgress: 0 });
-        }
-    }, [currentTrack, handleSetStopAfterTrackId, sendStudioAction]);
+        sendStudioCommand('clearPlaylist');
+    }, [playoutPolicy.playoutMode, sendStudioCommand]);
 
     const updateMediaLibrary = useCallback((updateFn: (prev: Folder) => Folder) => {
         const newLibrary = updateFn(mediaLibraryRef.current);
-        setMediaLibrary(newLibrary);
-        sendStudioAction('setLibrary', newLibrary);
-    }, [sendStudioAction]);
+        sendStudioCommand('setLibrary', { library: newLibrary });
+    }, [sendStudioCommand]);
 
     const handleAddTracksToLibrary = useCallback((tracks: Track[], destinationFolderId: string) => {
-        updateMediaLibrary(prevLibrary => addMultipleItemsToTree(prevLibrary, destinationFolderId, tracks));
-    }, [updateMediaLibrary]);
+        sendStudioCommand('addTracksToLibrary', { tracks, destinationFolderId });
+    }, [sendStudioCommand]);
 
     const handleAddUrlTrackToLibrary = useCallback((track: Track, destinationFolderId: string) => {
-        updateMediaLibrary(prevLibrary => addItemToTree(prevLibrary, destinationFolderId, track));
-    }, [updateMediaLibrary]);
+        sendStudioCommand('addUrlTrackToLibrary', { track, destinationFolderId });
+    }, [sendStudioCommand]);
     
     const handleRemoveFromLibrary = useCallback(async (id: string) => {
-        const trackToDelete = findTrackInTree(mediaLibraryRef.current, id);
-        if (trackToDelete) await dataService.deleteTrack(trackToDelete);
-        updateMediaLibrary(prev => removeItemFromTree(prev, id));
-    }, [updateMediaLibrary]);
+        sendStudioCommand('removeFromLibrary', { id });
+    }, [sendStudioCommand]);
 
     const handleRemoveMultipleFromLibrary = useCallback(async (ids: string[]) => {
-        for(const id of ids){
-             const trackToDelete = findTrackInTree(mediaLibraryRef.current, id);
-             if (trackToDelete) await dataService.deleteTrack(trackToDelete);
-        }
-        updateMediaLibrary(prev => removeItemsFromTree(prev, new Set(ids)));
-    }, [updateMediaLibrary]);
+        sendStudioCommand('removeMultipleFromLibrary', { ids });
+    }, [sendStudioCommand]);
 
     const getFolderPath = useCallback((root: Folder, folderId: string): string => {
         if (folderId === 'root' || folderId === root.id) return '';
@@ -2254,75 +1924,28 @@ const AppInternal: React.FC = () => {
     }, []);
 
     const handleCreateFolder = useCallback(async (parentId: string, folderName: string) => {
-        const newFolder: Folder = { id: `folder-${Date.now()}`, name: folderName, type: 'folder', children: [] };
-        const parentPath = getFolderPath(mediaLibraryRef.current, parentId);
-        const newFolderPath = [parentPath, folderName].filter(Boolean).join('/');
-
-        try {
-            await dataService.createFolder(newFolderPath);
-            updateMediaLibrary(prev => addItemToTree(prev, parentId, newFolder));
-        } catch (error) {
-            console.error("Failed to create folder on server:", error);
-            alert("Could not create the folder on the server. Please check the connection and server logs.");
-        }
-    }, [getFolderPath, updateMediaLibrary]);
+        sendStudioCommand('createFolder', { parentId, folderName });
+    }, [sendStudioCommand]);
 
     const handleMoveItemInLibrary = useCallback((itemId: string, destinationFolderId: string) => {
-        updateMediaLibrary(prev => {
-            const { updatedNode, foundItem } = findAndRemoveItem(prev, itemId);
-            if (foundItem) return addItemToTree(updatedNode, destinationFolderId, foundItem);
-            return prev;
-        });
-    }, [updateMediaLibrary]);
+        sendStudioCommand('moveItemInLibrary', { itemId, destinationFolderId });
+    }, [sendStudioCommand]);
 
     const handleUpdateFolderMetadataSettings = useCallback((folderId: string, settings: { enabled: boolean; customText?: string; suppressDuplicateWarning?: boolean }) => {
-        updateMediaLibrary(prevLibrary => updateFolderInTree(prevLibrary, folderId, folder => ({ ...folder, suppressMetadata: settings })));
-    }, [updateMediaLibrary]);
+        sendStudioCommand('updateFolderMetadata', { folderId, settings });
+    }, [sendStudioCommand]);
 
     const handleUpdateTrackMetadata = useCallback((trackId: string, newMetadata: { title: string; artist: string; type: TrackType; remoteArtworkUrl?: string; }) => {
-        updateMediaLibrary(prevLibrary => updateTrackInTree(prevLibrary, trackId, track => ({ ...track, ...newMetadata })));
-    }, [updateMediaLibrary]);
+        sendStudioCommand('updateTrackMetadata', { trackId, newMetadata });
+    }, [sendStudioCommand]);
 
     const handleUpdateTrackTags = useCallback((trackId: string, tags: string[]) => {
-        updateMediaLibrary(prevLibrary => updateTrackInTree(prevLibrary, trackId, track => ({ ...track, tags: tags.length > 0 ? tags.sort() : undefined })));
-    }, [updateMediaLibrary]);
+        sendStudioCommand('updateTrackTags', { trackId, tags });
+    }, [sendStudioCommand]);
     
-    const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
-        if (node.id === folderId) return node;
-        for (const child of node.children) {
-            if (child.type === 'folder') {
-                const found = findFolderInTree(child as Folder, folderId);
-                if (found) return found;
-            }
-        }
-        return null;
-    };
     const handleUpdateFolderTags = useCallback((folderId: string, newTags: string[]) => {
-        let oldTags: string[] = [];
-        const targetFolder = findFolderInTree(mediaLibraryRef.current, folderId);
-        if (targetFolder) oldTags = targetFolder.tags || [];
-        const oldTagsSet = new Set(oldTags);
-        const newTagsSet = new Set(newTags);
-        const tagsToAdd = newTags.filter(tag => !oldTagsSet.has(tag));
-        const tagsToRemove = oldTags.filter(tag => !newTagsSet.has(tag));
-        
-        const applyTagChangesRecursively = (item: LibraryItem): LibraryItem => {
-            const currentTags = new Set(item.tags || []);
-            tagsToRemove.forEach(tag => currentTags.delete(tag));
-            tagsToAdd.forEach(tag => currentTags.add(tag));
-            const sortedTags = Array.from(currentTags).sort();
-            const newItem: LibraryItem = { ...item, tags: sortedTags.length > 0 ? sortedTags : undefined };
-            if (newItem.type === 'folder') newItem.children = newItem.children.map(applyTagChangesRecursively);
-            return newItem;
-        };
-        updateMediaLibrary(prevLibrary => 
-            updateFolderInTree(prevLibrary, folderId, folder => {
-                const updatedFolder = { ...folder, tags: newTags.length > 0 ? newTags.sort() : undefined };
-                updatedFolder.children = updatedFolder.children.map(applyTagChangesRecursively);
-                return updatedFolder;
-            })
-        );
-    }, [updateMediaLibrary]);
+        sendStudioCommand('updateFolderTags', { folderId, newTags });
+    }, [sendStudioCommand]);
 
     const handleLogin = useCallback((user: User) => {
         setCurrentUser(user);
@@ -2594,12 +2217,10 @@ const AppInternal: React.FC = () => {
     const handleImportData = useCallback((data: any) => {
         try {
             if (data.library) {
-                setMediaLibrary(data.library);
-                sendStudioAction('setLibrary', data.library);
+                sendStudioCommand('setLibrary', { library: data.library });
             }
             if (data.playlist) {
-                setPlaylist(data.playlist);
-                sendStudioAction('setPlaylist', data.playlist);
+                sendStudioCommand('setPlaylist', { playlist: data.playlist });
             }
             if (data.cartwall) {
                 let loadedPages: CartwallPage[] | null = null;
@@ -2635,7 +2256,7 @@ const AppInternal: React.FC = () => {
             console.error("Failed to import data", e);
             alert('There was an error importing the data. Check the console for details.');
         }
-    }, [sendStudioAction]);
+    }, [sendStudioCommand]);
 
 
     const handleSetAutoBackupFolder = useCallback(async () => {
@@ -2707,143 +2328,13 @@ const AppInternal: React.FC = () => {
     const allFolders = useMemo(() => getAllFolders(mediaLibrary), [mediaLibrary]);
     const allTags = useMemo(() => getAllTags(mediaLibrary), [mediaLibrary]);
 
-    const isAutoFillingRef = useRef(false);
-
-    const generateAutoFillTracks = useCallback((): Track[] => {
-        const { autoFillSourceType, autoFillSourceId, autoFillTargetDuration, artistSeparation, titleSeparation } = playoutPolicyRef.current;
-        if (!autoFillSourceId) return [];
-
-        let sourceTracks: Track[] = [];
-        const seenArtists: Record<string, number> = {};
-        const seenTitles: Set<string> = new Set();
-        
-        const now = Date.now();
-        playoutHistoryRef.current.forEach(entry => {
-            if (entry.artist) seenArtists[entry.artist] = entry.playedAt;
-            seenTitles.add(entry.title);
-        });
-        playlistRef.current.forEach(item => {
-            if (!('markerType' in item) && item.addedBy !== 'auto-fill') {
-                if (item.artist) seenArtists[item.artist] = now;
-                seenTitles.add(item.title);
-            }
-        });
-
-        const collectTracks = (item: LibraryItem) => {
-            if (item.type === 'folder') {
-                if (autoFillSourceType === 'folder') {
-                    if (item.id === autoFillSourceId) item.children.forEach(collectTracks);
-                    else item.children.forEach(collectTracks);
-                } else {
-                    if (item.tags?.includes(autoFillSourceId)) item.children.forEach(collectTracks);
-                    else item.children.forEach(collectTracks);
-                }
-            } else {
-                if (item.type === TrackType.SONG) {
-                     if (autoFillSourceType === 'folder') sourceTracks.push(item);
-                    else if (item.tags?.includes(autoFillSourceId)) sourceTracks.push(item);
-                }
-            }
-        };
-        
-         if (autoFillSourceType === 'folder') {
-            const sourceFolder = findFolderInTree(mediaLibraryRef.current, autoFillSourceId);
-            if (sourceFolder) collectTracks(sourceFolder);
-        } else {
-            collectTracks(mediaLibraryRef.current);
-        }
-
-        if (sourceTracks.length === 0) return [];
-
-        const generatedPlaylist: Track[] = [];
-        let currentDuration = 0;
-        const targetDurationSeconds = autoFillTargetDuration * 60;
-
-        for (let i = sourceTracks.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [sourceTracks[i], sourceTracks[j]] = [sourceTracks[j], sourceTracks[i]];
-        }
-        
-        while (currentDuration < targetDurationSeconds && sourceTracks.length > 0) {
-            let foundTrack = false;
-            for (let i = 0; i < sourceTracks.length; i++) {
-                const track = sourceTracks[i];
-                const artistOK = !track.artist || !seenArtists[track.artist] || (now - seenArtists[track.artist] > artistSeparation * 60 * 1000);
-                const titleOK = !seenTitles.has(track.title);
-
-                if (artistOK && titleOK) {
-                    const trackWithMeta: Track = { ...track, addedBy: 'auto-fill' };
-                    generatedPlaylist.push(trackWithMeta);
-                    currentDuration += track.duration;
-                    if(track.artist) seenArtists[track.artist] = now + (currentDuration * 1000);
-                    seenTitles.add(track.title);
-                    sourceTracks.splice(i, 1);
-                    foundTrack = true;
-                    break;
-                }
-            }
-            if (!foundTrack) {
-                const track = sourceTracks.shift();
-                if (track) {
-                    generatedPlaylist.push({ ...track, addedBy: 'auto-fill' });
-                    currentDuration += track.duration;
-                }
-            }
-        }
-        return generatedPlaylist;
-    }, [playlistRef, playoutHistoryRef, mediaLibraryRef]);
-
-    useEffect(() => {
-        const autoFillCheckInterval = setInterval(() => {
-            if (isStudio) { // Only studio should auto-fill
-                const { isAutoFillEnabled, autoFillLeadTime } = playoutPolicyRef.current;
-                if (!isAutoFillEnabled || isAutoFillingRef.current || mixerConfig.mic.sends.main.enabled) return;
-                const currentPlaylist = playlistRef.current;
-                const currentPlayingIdx = currentPlaylist.findIndex(t => t.id === currentPlayingItemIdRef.current);
-                const currentProgress = trackProgressRef.current;
-                let remainingDuration = 0;
-                if (currentPlayingIdx !== -1) {
-                    const currentItem = currentPlaylist[currentPlayingIdx];
-                    if (!('markerType' in currentItem)) remainingDuration += (currentItem.duration - currentProgress);
-                    for (let i = currentPlayingIdx + 1; i < currentPlaylist.length; i++) {
-                        const item = currentPlaylist[i];
-                        if (!('markerType' in item)) remainingDuration += item.duration;
-                    }
-                } else if (currentPlaylist.length > 0 && !isPlayingRef.current) {
-                    remainingDuration = currentPlaylist.reduce((acc, item) => acc + (!('markerType' in item) ? item.duration : 0), 0);
-                }
-                const leadTimeSeconds = autoFillLeadTime * 60;
-                if (remainingDuration < leadTimeSeconds) {
-                    isAutoFillingRef.current = true;
-                    console.log(`[Auto-Fill] Triggered. Remaining time: ${Math.round(remainingDuration)}s. Lead time: ${leadTimeSeconds}s.`);
-                    const newTracks = generateAutoFillTracks();
-                    if (newTracks.length > 0) {
-                        const newPlaylist = [...playlistRef.current, ...newTracks];
-                        setPlaylist(newPlaylist);
-                        sendStudioAction('setPlaylist', newPlaylist);
-                    }
-                    setTimeout(() => { isAutoFillingRef.current = false; }, 5000);
-                }
-            }
-        }, 15000);
-        return () => clearInterval(autoFillCheckInterval);
-    }, [generateAutoFillTracks, mixerConfig.mic.sends.main.enabled, isStudio, sendStudioAction]);
-
     const handleInsertTimeMarker = useCallback((marker: TimeMarker, beforeItemId: string | null) => {
-        const newPlaylist = [...playlistRef.current];
-        const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
-        if (insertIndex !== -1) newPlaylist.splice(insertIndex, 0, marker);
-        else newPlaylist.push(marker);
-        
-        setPlaylist(newPlaylist);
-        sendStudioAction('setPlaylist', newPlaylist);
-    }, [sendStudioAction]);
+        if (isStudio) sendStudioCommand('insertTimeMarker', { marker, beforeItemId });
+    }, [sendStudioCommand, isStudio]);
 
     const handleUpdateTimeMarker = useCallback((markerId: string, updates: Partial<TimeMarker>) => {
-        const newPlaylist = playlistRef.current.map(item => item.id === markerId && 'markerType' in item ? { ...item, ...updates } : item);
-        setPlaylist(newPlaylist);
-        sendStudioAction('setPlaylist', newPlaylist);
-    }, [sendStudioAction]);
+        if (isStudio) sendStudioCommand('updateTimeMarker', { markerId, updates });
+    }, [sendStudioCommand, isStudio]);
     
     const handleClosePwaModal = useCallback(async (dontShowAgain: boolean) => {
         if (dontShowAgain) await dataService.putAppState('hidePwaInstallModal', true);
@@ -2885,85 +2376,23 @@ const AppInternal: React.FC = () => {
     }, []);
 
     const handleSaveBroadcast = useCallback((broadcast: Broadcast) => {
-        setBroadcasts(prev => {
-            const existingIndex = prev.findIndex(b => b.id === broadcast.id);
-            if (existingIndex > -1) {
-                const newBroadcasts = [...prev];
-                newBroadcasts[existingIndex] = broadcast;
-                return newBroadcasts;
-            }
-            return [...prev, broadcast];
-        });
+        if(isStudio) sendStudioCommand('saveBroadcast', { broadcast });
         handleCloseBroadcastEditor();
-    }, [handleCloseBroadcastEditor]);
+    }, [handleCloseBroadcastEditor, sendStudioCommand, isStudio]);
 
     const handleDeleteBroadcast = useCallback((broadcastId: string) => {
-        setBroadcasts(prev => prev.filter(b => b.id !== broadcastId));
-    }, []);
-
-    const loadBroadcastsToPlaylist = useCallback((broadcastsToLoad: Broadcast[]) => {
-        if (isStudio && broadcastsToLoad.length > 0) {
-            broadcastsToLoad.sort((a, b) => a.startTime - b.startTime);
-            const allItemsToInsert = broadcastsToLoad.flatMap(b => b.playlist.map(item => {
-                 if ('markerType' in item) return item;
-                 return { ...item, originalId: item.id, id: `pl-item-bc-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`, addedBy: 'broadcast' as const };
-            }));
-            
-            const newPlaylist = [ ...playlistRef.current.slice(0, 1), ...allItemsToInsert, ...playlistRef.current.slice(1) ];
-            setPlaylist(newPlaylist);
-            sendStudioAction('setPlaylist', newPlaylist);
-
-            const firstItem = allItemsToInsert.length > 0 ? allItemsToInsert[0] : null;
-            if ( isPlayingRef.current && firstItem && 'markerType' in firstItem && firstItem.markerType === TimeMarkerType.HARD ) {
-                console.log('[Broadcast] Initial hard marker detected. Triggering immediate jump.');
-                const firstPlayableIndexInBlock = allItemsToInsert.findIndex((item, index) => index > 0 && !('markerType' in item));
-                if (firstPlayableIndexInBlock !== -1) {
-                    const targetPlaylistIndex = 1 + firstPlayableIndexInBlock;
-                    triggerHardMarkerFadeAndJump(targetPlaylistIndex);
-                }
-            }
-    
-            const now = Date.now();
-            const loadedIds = new Set(broadcastsToLoad.map(b => b.id));
-            setBroadcasts(currentBroadcasts => currentBroadcasts.map(b => loadedIds.has(b.id) ? { ...b, lastLoaded: now } : b));
-        }
-    }, [isStudio, sendStudioAction, triggerHardMarkerFadeAndJump]);
+        if(isStudio) sendStudioCommand('deleteBroadcast', { broadcastId });
+    }, [sendStudioCommand, isStudio]);
 
     const handleManualLoadBroadcast = useCallback((broadcastId: string) => {
-        const broadcastToLoad = broadcastsRef.current.find(b => b.id === broadcastId);
-        if (broadcastToLoad) loadBroadcastsToPlaylist([broadcastToLoad]);
-    }, [loadBroadcastsToPlaylist]);
-    
-    useEffect(() => {
-        if (isStudio) {
-            const checkInterval = setInterval(() => {
-                const now = Date.now();
-                const broadcastsToLoad = broadcastsRef.current.filter(b => b.startTime <= now && !b.lastLoaded);
-                if (broadcastsToLoad.length > 0) loadBroadcastsToPlaylist(broadcastsToLoad);
-            }, 5000);
-            return () => clearInterval(checkInterval);
-        }
-    }, [isStudio, loadBroadcastsToPlaylist]);
+        if (isStudio) sendStudioCommand('loadBroadcast', { broadcastId });
+    }, [isStudio, sendStudioCommand]);
 
     const handleVoiceTrackCreate = useCallback(async (voiceTrack: Track, blob: Blob): Promise<Track> => {
         const savedTrack = await dataService.addTrack(voiceTrack, blob);
-        updateMediaLibrary(prevLibrary => {
-            const voicetracksFolderName = "Voicetracks";
-            let voicetracksFolder = prevLibrary.children.find(child => child.type === 'folder' && child.name === voicetracksFolderName) as Folder | undefined;
-            let updatedLibrary = prevLibrary;
-            if (!voicetracksFolder) {
-                const newFolder: Folder = { id: `folder-voicetracks-${Date.now()}`, name: voicetracksFolderName, type: 'folder', children: [] };
-                updatedLibrary = addItemToTree(updatedLibrary, 'root', newFolder);
-                voicetracksFolder = newFolder;
-            }
-            const folderToUpdate = findFolderInTree(updatedLibrary, voicetracksFolder.id);
-            if (folderToUpdate && !folderToUpdate.children.some(t => t.id === savedTrack.id)) {
-                return addItemToTree(updatedLibrary, voicetracksFolder.id, savedTrack);
-            }
-            return updatedLibrary;
-        });
+        sendStudioCommand('addVoiceTrackToLibrary', { track: savedTrack });
         return savedTrack;
-    }, [updateMediaLibrary]);
+    }, [sendStudioCommand]);
 
     // --- NEW: WebSocket Logic for HOST mode ---
     useEffect(() => {
@@ -2999,11 +2428,12 @@ const AppInternal: React.FC = () => {
             if (data.type === 'pong') return; // Ignore pong messages from server
 
             if (data.type === 'state-update') {
-                const { playlist: serverPlaylist, playerState } = data.payload;
-                if (serverPlaylist) {
-                    if (JSON.stringify(serverPlaylist) !== JSON.stringify(playlistRef.current)) {
-                        setPlaylist(serverPlaylist);
-                    }
+                const { playlist: serverPlaylist, playerState, broadcasts: serverBroadcasts } = data.payload;
+                if (serverPlaylist && JSON.stringify(serverPlaylist) !== JSON.stringify(playlistRef.current)) {
+                    setPlaylist(serverPlaylist);
+                }
+                if (serverBroadcasts && JSON.stringify(serverBroadcasts) !== JSON.stringify(broadcastsRef.current)) {
+                    setBroadcasts(serverBroadcasts);
                 }
                 if (playerState) {
                     if (playerState.currentTrackIndex !== undefined && playerState.currentTrackIndex !== currentTrackIndexRef.current) setCurrentTrackIndex(playerState.currentTrackIndex);
@@ -3028,8 +2458,8 @@ const AppInternal: React.FC = () => {
                 fetch(audioDataUrl)
                     .then(res => res.blob())
                     .then(blob => {
-                        addVoiceTrackToState(voiceTrack, blob, vtMix, beforeItemId);
-                        console.log('[Studio] Received and added new VT from presenter.');
+                        console.log('[Studio] Received and adding new VT from presenter.');
+                        sendStudioCommand('insertVoiceTrack', { voiceTrack, vtMix, beforeItemId, blob });
                     })
                     .catch(err => console.error("Failed to process incoming VT blob:", err));
             } else if (data.type === 'presenter-on-air-request') {
@@ -3069,7 +2499,7 @@ const AppInternal: React.FC = () => {
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
             ws.close();
         };
-    }, [currentUser, addVoiceTrackToState, isMobile]);
+    }, [currentUser, sendStudioCommand, isMobile]);
     
     // Effect to clean up resources for departed presenters
     useEffect(() => {
@@ -3378,7 +2808,7 @@ const AppInternal: React.FC = () => {
                             onUpdateFolderTags={handleUpdateFolderTags}
                             onPflTrack={handlePflTrack}
                             pflTrackId={pflTrackId}
-                            onLibraryUpdate={setMediaLibrary}
+                            onLibraryUpdate={() => {}}
                             playoutMode={playoutPolicy.playoutMode}
                         />
                     </div>
