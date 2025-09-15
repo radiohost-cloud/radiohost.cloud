@@ -1,4 +1,3 @@
-
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
 // To run: `npm install express cors multer lowdb ws node-id3` then `node server.js`
@@ -1328,4 +1327,147 @@ app.get('/api/users', (req, res) => {
     const usersWithoutPasswords = db.data.users.map(({ password, ...user }) => user);
     res.json(usersWithoutPasswords);
 });
-app.get('/api/user/:email', (req,
+
+app.get('/api/user/:email', (req, res) => {
+    const { email } = req.params;
+    const user = db.data.users.find(u => u.email === email);
+    if (user) {
+        const { password, ...userToReturn } = user;
+        res.json(userToReturn);
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+});
+
+app.put('/api/user/:email/role', async (req, res) => {
+    const { email } = req.params;
+    const { role } = req.body;
+    if (!['studio', 'presenter'].includes(role)) {
+        return res.status(400).json({ message: 'Invalid role specified.' });
+    }
+    const user = db.data.users.find(u => u.email === email);
+    if (user) {
+        user.role = role;
+        await db.write();
+        const { password, ...userToReturn } = user;
+        res.json(userToReturn);
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+});
+
+app.get('/api/userdata/:email', (req, res) => {
+    const { email } = req.params;
+    const userData = db.data.userdata[email] || {};
+    res.json(userData);
+});
+
+app.post('/api/userdata/:email', async (req, res) => {
+    const { email } = req.params;
+    db.data.userdata[email] = req.body;
+    await db.write();
+    res.json({ success: true });
+});
+
+// Multer setup for file uploads
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const relativePath = req.body.webkitRelativePath || file.originalname;
+        const finalDir = path.dirname(path.join(mediaDir, relativePath));
+        fs.mkdir(finalDir, { recursive: true }, (err) => cb(err, finalDir));
+    },
+    filename: (req, file, cb) => {
+        const relativePath = req.body.webkitRelativePath || file.originalname;
+        const filename = path.basename(relativePath);
+        cb(null, filename);
+    }
+});
+const upload = multer({ storage });
+
+app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ message: 'No file uploaded.' });
+    }
+
+    try {
+        const durationFromClient = req.body.duration ? parseFloat(req.body.duration) : null;
+        const relativePath = req.body.webkitRelativePath || req.file.originalname;
+        const trackObject = await createTrackObject(req.file.path, relativePath.replace(/\\/g, '/'), req.file.originalname, durationFromClient);
+        res.status(201).json(trackObject);
+    } catch (error) {
+        console.error('Error processing uploaded file:', error);
+        res.status(500).json({ message: 'Error processing file.' });
+    }
+});
+
+app.post('/api/track/delete', async (req, res) => {
+    const { id } = req.body; // id is the relative path
+    if (!id) {
+        return res.status(400).json({ message: 'Track ID is required.' });
+    }
+
+    try {
+        const fullPath = path.join(mediaDir, id);
+        if (fs.existsSync(fullPath)) {
+            await fsPromises.rm(fullPath, { recursive: true, force: true });
+
+            // Also delete associated artwork
+            const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
+            if (fs.existsSync(artworkPath)) {
+                await fsPromises.unlink(artworkPath);
+            }
+            
+            res.json({ success: true, message: `Deleted ${id}` });
+        } else {
+            res.status(404).json({ message: 'Track not found.' });
+        }
+    } catch (error) {
+        console.error(`Failed to delete track ${id}:`, error);
+        res.status(500).json({ message: 'Failed to delete track.' });
+    }
+});
+
+// --- Public stream routes ---
+app.get('/stream', async (req, res) => {
+    const settings = await getStationSettings();
+    res.send(getPlayerPageHTML(settings.stationName));
+});
+
+app.get('/stream/live*', (req, res) => {
+    if (!studioClientEmail) {
+        return res.status(503).send('Stream is currently offline.');
+    }
+
+    console.log('[Audio Stream] New listener connected.');
+    res.writeHead(200, {
+        'Content-Type': currentMimeType,
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
+    });
+
+    if (streamHeader) {
+        res.write(streamHeader);
+    }
+    directStreamListeners.add(res);
+
+    req.on('close', () => {
+        console.log('[Audio Stream] Listener disconnected.');
+        directStreamListeners.delete(res);
+    });
+});
+
+// --- Initial library scan on startup ---
+(async () => {
+    console.log('[Startup] Performing initial media library scan...');
+    libraryState.children = await scanMediaToTree(mediaDir);
+    console.log(`[Startup] Scan complete. Found ${libraryState.children.length} items in root.`);
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    if (studioUser && db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
+        startPlaybackLoop();
+    }
+})();
+
+// --- Start Server ---
+server.listen(PORT, () => {
+    console.log(`RadioHost.cloud server running on http://localhost:${PORT}`);
+});
