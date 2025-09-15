@@ -1,85 +1,51 @@
-import { type Track, type User } from '../types';
-
-// This service simulates a backend API for HOST mode.
-// In a real application, these fetch calls would hit a running server.
-// The provided server.js is an example implementation of this backend.
+import { type User, type Track } from '../types';
 
 const handleResponse = async (response: Response) => {
     if (!response.ok) {
         const errorData = await response.json().catch(() => ({ message: response.statusText }));
-        throw new Error(errorData.message || 'An error occurred');
+        throw new Error(errorData.message || 'An API error occurred');
     }
     return response.json();
 };
 
-export const login = (email: string, pass: string): Promise<User> => {
-    return fetch('/api/login', {
+export const login = async (email: string, password: string): Promise<User | null> => {
+    const response = await fetch('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password: pass }),
-    }).then(handleResponse);
-};
-
-export const signup = (user: User): Promise<User> => {
-    return fetch('/api/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(user),
-    }).then(handleResponse);
-};
-
-export const getUser = (email: string) => {
-    return fetch(`/api/user/${email}`).then(handleResponse);
-};
-
-export const getAllUsers = (): Promise<User[]> => {
-    return fetch('/api/users').then(handleResponse);
-};
-
-export const updateUserRole = (email: string, role: 'studio' | 'presenter'): Promise<User> => {
-    return fetch(`/api/user/${email}/role`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role }),
-    }).then(handleResponse);
-};
-
-export const getUserData = <T>(email: string): Promise<T | null> => {
-    return fetch(`/api/userdata/${email}`).then(handleResponse);
-};
-
-export const putUserData = (email: string, data: any) => {
-    return fetch(`/api/userdata/${email}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-    }).then(handleResponse);
-};
-
-export const uploadTrack = async (trackMetadata: Track, file: File, artworkBlob?: Blob, webkitRelativePath?: string): Promise<Track> => {
-    const formData = new FormData();
-    formData.append('webkitRelativePath', webkitRelativePath || file.name);
-    formData.append('audioFile', file);
-
-    const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
+        body: JSON.stringify({ email, password }),
     });
     return handleResponse(response);
 };
 
-export const deleteTrack = (track: Track) => {
-    return fetch(`/api/track/delete`, {
+export const signup = async (user: User): Promise<User | null> => {
+    const response = await fetch('/api/signup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: track.id }), // id is now the relative path
-    }).then(handleResponse);
+        body: JSON.stringify(user),
+    });
+    return handleResponse(response);
 };
 
-export const createFolder = (folderPath: string) => {
-    return fetch('/api/folder', {
-        method: 'POST',
+export const getAllUsers = async (): Promise<User[]> => {
+    const response = await fetch('/api/users');
+    return handleResponse(response);
+};
+
+export const updateUserRole = async (email: string, role: 'studio' | 'presenter'): Promise<User> => {
+    const response = await fetch(`/api/users/${email}/role`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: folderPath }),
-    }).then(handleResponse);
+        body: JSON.stringify({ role }),
+    });
+    return handleResponse(response);
+};
+
+// Media functions are placeholders as the server handles this via filesystem watching.
+export const addTrack = async (track: Track, file?: File): Promise<Track> => {
+    console.warn("apiService.addTrack is a placeholder. File management should be done on the server's filesystem.");
+    return track;
+};
+
+export const deleteTrack = async (track: Track): Promise<void> => {
+    console.warn("apiService.deleteTrack is a placeholder. File management should be done on the server's filesystem.");
 };
