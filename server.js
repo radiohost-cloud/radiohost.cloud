@@ -140,6 +140,101 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
     return -1;
 };
 
+// --- Autonomous Playback Engine ---
+let playbackInterval = null;
+const PLAYBACK_INTERVAL_MS = 1000;
+
+const advanceTrack = async (fromCommand = false) => {
+    console.log(`[Playback] Advancing track. Called from command: ${fromCommand}`);
+    const { sharedPlaylist: playlist, sharedPlayerState: playerState } = db.data;
+    
+    if (playlist.length === 0) {
+        playerState.isPlaying = false;
+        return;
+    }
+
+    const endedItem = playlist[playerState.currentTrackIndex];
+
+    if (endedItem && !endedItem.markerType) {
+        // Add to history only if a track actually ended (not a manual skip)
+        if (!fromCommand) {
+            const studioUser = db.data.users.find(u => u.role === 'studio');
+            if (studioUser && db.data.userdata[studioUser.email]) {
+                if (!db.data.userdata[studioUser.email].playoutHistory) {
+                    db.data.userdata[studioUser.email].playoutHistory = [];
+                }
+                db.data.userdata[studioUser.email].playoutHistory.push({
+                    trackId: endedItem.originalId || endedItem.id,
+                    title: endedItem.title,
+                    artist: endedItem.artist,
+                    playedAt: Date.now()
+                });
+                db.data.userdata[studioUser.email].playoutHistory = db.data.userdata[studioUser.email].playoutHistory.slice(-100);
+            }
+        }
+        
+        // Check for stopAfterTrackId
+        if (playerState.stopAfterTrackId && playerState.stopAfterTrackId === endedItem.id) {
+            playerState.isPlaying = false;
+            playerState.stopAfterTrackId = null;
+            console.log(`[Playback] stopAfterTrackId reached. Stopping playback.`);
+            return;
+        }
+    }
+
+    const nextIndex = findNextPlayableIndex(playlist, playerState.currentTrackIndex, 1);
+    if (nextIndex !== -1) {
+        playerState.currentTrackIndex = nextIndex;
+        playerState.trackProgress = 0;
+        const nextItem = playlist[nextIndex];
+        playerState.currentPlayingItemId = nextItem.id;
+        console.log(`[Playback] Next track is index ${nextIndex}: "${nextItem.title}"`);
+    } else {
+        playerState.isPlaying = false;
+        console.log('[Playback] End of playlist reached. Stopping playback.');
+    }
+};
+
+const playbackLoop = async () => {
+    await db.read();
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    if (!studioUser || !db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
+        return stopPlaybackLoop();
+    }
+
+    const { sharedPlayerState: playerState, sharedPlaylist: playlist } = db.data;
+    if (!playerState.isPlaying) return;
+
+    const currentTrack = playlist[playerState.currentTrackIndex];
+    if (!currentTrack || currentTrack.markerType) {
+        console.log('[Playback Loop] Current item is not playable, advancing.');
+        await advanceTrack();
+    } else {
+        playerState.trackProgress += 1; // Increment by 1 second
+        if (playerState.trackProgress >= currentTrack.duration) {
+            console.log(`[Playback Loop] Track "${currentTrack.title}" finished. Advancing.`);
+            await advanceTrack();
+        }
+    }
+    
+    await db.write();
+    broadcastState();
+};
+
+const startPlaybackLoop = () => {
+    if (playbackInterval) return;
+    console.log('[Playback] Starting autonomous playback loop.');
+    playbackInterval = setInterval(playbackLoop, PLAYBACK_INTERVAL_MS);
+};
+
+const stopPlaybackLoop = () => {
+    if (!playbackInterval) return;
+    console.log('[Playback] Stopping autonomous playback loop.');
+    clearInterval(playbackInterval);
+    playbackInterval = null;
+};
+
+
 // --- Tree Manipulation Helpers ---
 const addItemToTree = (node, parentId, itemToAdd) => {
     if (node.id === parentId) {
@@ -354,12 +449,7 @@ wss.on('connection', async (ws, req) => {
                 
                         switch (command) {
                             case 'next': {
-                                const nextIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, 1);
-                                if (nextIndex !== -1) {
-                                    sharedPlayerState.currentTrackIndex = nextIndex;
-                                } else {
-                                    sharedPlayerState.isPlaying = false;
-                                }
+                                await advanceTrack(true);
                                 stateChanged = true;
                                 break;
                             }
@@ -380,6 +470,9 @@ wss.on('connection', async (ws, req) => {
                                 const prevIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, -1);
                                 if (prevIndex !== -1) {
                                     sharedPlayerState.currentTrackIndex = prevIndex;
+                                    sharedPlayerState.trackProgress = 0;
+                                    const prevItem = sharedPlaylist[prevIndex];
+                                    sharedPlayerState.currentPlayingItemId = prevItem.id;
                                 }
                                 stateChanged = true;
                                 break;
@@ -397,6 +490,26 @@ wss.on('connection', async (ws, req) => {
                                 stateChanged = true;
                                 break;
                             }
+                            case 'toggleAutoMode': {
+                                const studioData = db.data.userdata[studioClientEmail];
+                                if (studioData) {
+                                    if (!studioData.settings) studioData.settings = {};
+                                    studioData.settings.isAutoModeEnabled = payload.enabled;
+                                    
+                                    if (payload.enabled) {
+                                        startPlaybackLoop();
+                                        // If not playing, start it
+                                        if (!sharedPlayerState.isPlaying && sharedPlaylist.length > 0) {
+                                            sharedPlayerState.isPlaying = true;
+                                        }
+                                    } else {
+                                        stopPlaybackLoop();
+                                        sharedPlayerState.isPlaying = false;
+                                    }
+                                    stateChanged = true;
+                                }
+                                break;
+                            }
                             case 'playTrack': {
                                 const { itemId } = payload;
                                 const targetIndex = sharedPlaylist.findIndex(item => item.id === itemId);
@@ -405,6 +518,7 @@ wss.on('connection', async (ws, req) => {
                                     if (!newTrack.markerType) {
                                         sharedPlayerState.currentTrackIndex = targetIndex;
                                         sharedPlayerState.currentPlayingItemId = newTrack.id;
+                                        sharedPlayerState.trackProgress = 0;
                                         sharedPlayerState.isPlaying = true;
                                     }
                                 }
@@ -1320,6 +1434,12 @@ if (isDirectRun) {
 
     server.listen(PORT, '0.0.0.0', () => {
         console.log(`RadioHost.cloud HOST server running on http://0.0.0.0:${PORT}`);
+        // Startup Logic: Check if auto mode should be running
+        const studioUser = db.data.users.find(u => u.role === 'studio');
+        if (studioUser && db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
+            console.log('[Startup] Auto Mode is enabled. Starting playback loop.');
+            startPlaybackLoop();
+        }
     });
 }
 

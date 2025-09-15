@@ -759,19 +759,6 @@ const AppInternal: React.FC = () => {
         };
     }, [mixerConfig.mic.sends.main.enabled]);
     
-    useEffect(() => {
-        const autoStart = async () => {
-            if (isAutoModeEnabledRef.current) {
-                console.log("[Auto Mode] Enabled on startup. Initializing...");
-                if (!audioGraphRef.current.isInitialized) await initializeAudioGraph();
-                setPlayoutPolicy(p => ({ ...p, isAutoFillEnabled: true }));
-                setTimeout(() => { if (!isPlayingRef.current && playlistRef.current.length > 0) handleTogglePlay(); }, 500);
-            }
-        };
-        const startupTimer = setTimeout(autoStart, 1500);
-        return () => clearTimeout(startupTimer);
-    }, []);
-
     const useDebouncedEffect = (effect: () => void, deps: React.DependencyList, delay: number) => {
         useEffect(() => {
             const handler = setTimeout(() => effect(), delay);
@@ -1105,81 +1092,6 @@ const AppInternal: React.FC = () => {
         return () => cancelAnimationFrame(animationFrameId);
     }, []);
 
-    const performCrossfade = useCallback(async (nextIndex: number, customFadeOut?: number, customFadeIn?: number) => {
-        const graph = audioGraphRef.current;
-        const playerMixerNode = graph.playerMixerNode;
-        if (!graph.isInitialized || !graph.context || !playerMixerNode || isCrossfadingRef.current) return;
-    
-        isCrossfadingRef.current = true;
-        stopPfl();
-    
-        const policy = playoutPolicyRef.current;
-        const fadeOutDuration = customFadeOut ?? policy.crossfadeDuration;
-        const fadeInDuration = customFadeIn ?? policy.crossfadeDuration;
-        const { context } = graph;
-        const now = context.currentTime;
-    
-        const inactivePlayerRef = activePlayer === 'A' ? playerBRef : playerARef;
-        const inactiveUrlRef = activePlayer === 'A' ? playerBUrlRef : playerAUrlRef;
-        const inactiveLoadedIdRef = activePlayer === 'A' ? playerBLoadedIdRef : playerALoadedIdRef;
-    
-        const nextItem = playlistRef.current[nextIndex];
-        if (!nextItem || 'markerType' in nextItem) {
-            isCrossfadingRef.current = false;
-            return;
-        }
-    
-        const src = await getTrackSrc(nextItem);
-        const inactivePlayer = inactivePlayerRef.current;
-    
-        if (!src || !inactivePlayer) {
-            isCrossfadingRef.current = false;
-            return;
-        }
-    
-        if (inactiveUrlRef.current && inactiveUrlRef.current.startsWith('blob:')) {
-            URL.revokeObjectURL(inactiveUrlRef.current);
-        }
-        inactivePlayer.src = src;
-        inactiveUrlRef.current = src;
-        inactiveLoadedIdRef.current = nextItem.id;
-        inactivePlayer.load();
-    
-        try {
-            const gainAParam = playerMixerNode.parameters.get('gainA')!;
-            const gainBParam = playerMixerNode.parameters.get('gainB')!;
-            const activeParam = activePlayer === 'A' ? gainAParam : gainBParam;
-            const inactiveParam = activePlayer === 'A' ? gainBParam : gainAParam;
-            
-            await inactivePlayer.play();
-    
-            activeParam.cancelScheduledValues(now);
-            activeParam.linearRampToValueAtTime(0, now + fadeOutDuration);
-    
-            inactiveParam.cancelScheduledValues(now);
-            inactiveParam.linearRampToValueAtTime(1.0, now + fadeInDuration);
-    
-            setTimeout(() => {
-                const oldIndex = currentTrackIndexRef.current;
-                const oldPlaylist = playlistRef.current;
-                const endedItem = oldPlaylist[oldIndex];
-                
-                if (endedItem && !('markerType' in endedItem)) {
-                    setPlayoutHistory(prev => [...prev, { trackId: endedItem.originalId || endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
-                }
-
-                setActivePlayer(p => p === 'A' ? 'B' : 'A');
-                sendStudioCommand('crossfadeNext');
-                isCrossfadingRef.current = false;
-
-            }, Math.max(fadeOutDuration, fadeInDuration) * 1000 + 100);
-    
-        } catch (e) {
-            console.error("Crossfade playback failed:", e);
-            isCrossfadingRef.current = false;
-        }
-    }, [activePlayer, getTrackSrc, stopPfl, sendStudioCommand]);
-
     useEffect(() => {
         const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
         const activeLoadedIdRef = activePlayer === 'A' ? playerALoadedIdRef : playerBLoadedIdRef;
@@ -1208,7 +1120,7 @@ const AppInternal: React.FC = () => {
                     currentPlayer.load();
                 } else {
                     console.error(`Could not load track: ${currentTrack.title}`);
-                    if (isStudio) handleNext();
+                    if (isStudio && !isAutoModeEnabledRef.current) handleNext(); // Only auto-skip in manual mode
                     return;
                 }
             }
@@ -1216,21 +1128,6 @@ const AppInternal: React.FC = () => {
             if (isPlaying && currentPlayer.paused) {
                 try {
                     await currentPlayer.play();
-                    
-                    if (isStudio) {
-                        const playlist = playlistRef.current;
-                        const currentIndex = currentTrackIndexRef.current;
-                        const track = playlist[currentIndex];
-                        
-                        if (track && !('markerType' in track) && track.addedBy === 'broadcast') {
-                            const previousItem = currentIndex > 0 ? playlist[currentIndex - 1] : null;
-                            if (!previousItem || 'markerType' in previousItem || (!('markerType' in previousItem) && previousItem.addedBy !== 'broadcast')) {
-                                console.log('[Broadcast] First track starting. Clearing previous playlist items.');
-                                sendStudioCommand('clearPreBroadcast');
-                            }
-                        }
-                    }
-
                 } catch (e) {
                     console.error("Playback failed:", e);
                     if (isStudio) sendStudioCommand('togglePlay');
@@ -1345,7 +1242,6 @@ const AppInternal: React.FC = () => {
     }, [playlist, currentPlayingItemId, trackProgress, isPlaying, currentTrackIndex]);
     timelineRef.current = timeline;
 
-    const lastProgressUpdateRef = useRef(0);
     useEffect(() => {
         const playerA = playerARef.current;
         const playerB = playerBRef.current;
@@ -1355,82 +1251,27 @@ const AppInternal: React.FC = () => {
             const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
             if (player !== activePlayerRef.current) return;
             setTrackProgress(player.currentTime);
-
-            // Send throttled progress updates if studio
-            if (isStudio) {
-                const now = Date.now();
-                if (now - lastProgressUpdateRef.current > 1000) {
-                    sendStudioCommand('setPlayerState', { trackProgress: player.currentTime });
-                    lastProgressUpdateRef.current = now;
-                }
-            }
-
-            if (playoutPolicyRef.current.playoutMode === 'presenter') return;
-
-            if (isCrossfadingRef.current || player.duration <= 0) return;
-            const policy = playoutPolicyRef.current;
-            const currentItem = playlistRef.current[currentTrackIndexRef.current];
-            if (currentItem && 'markerType' in currentItem) return;
-        
-            if (currentItem?.type === TrackType.VOICETRACK && currentItem.vtMix) {
-                const nextTrackIndex = findNextPlayableIndex(currentTrackIndexRef.current, 1);
-                if (nextTrackIndex !== -1) {
-                    const triggerTime = currentItem.vtMix.nextStartOffsetFromVtStart;
-                    if (player.currentTime >= triggerTime) {
-                        performCrossfade(nextTrackIndex, currentItem.vtMix.vtFadeOut, currentItem.vtMix.nextFadeIn);
-                    }
-                }
-                return;
-            }
-        
-            const nextIndex = findNextPlayableIndex(currentTrackIndexRef.current, 1);
-            if (nextIndex === -1) return;
-            const nextItem = playlistRef.current[nextIndex];
-            
-            if (nextItem && !('markerType' in nextItem) && nextItem?.type === TrackType.VOICETRACK && nextItem.vtMix) {
-                const triggerTime = player.duration + nextItem.vtMix.startOffsetFromPrevEnd;
-                if (player.currentTime >= triggerTime) {
-                    performCrossfade(nextIndex, nextItem.vtMix.prevFadeOut, nextItem.vtMix.vtFadeIn);
-                }
-            } 
-            else if (policy.crossfadeEnabled && (player.duration - player.currentTime < policy.crossfadeDuration)) {
-                if (nextItem && !('markerType' in nextItem) && nextItem?.type !== TrackType.VOICETRACK) {
-                    performCrossfade(nextIndex);
-                }
-            }
         };
 
         const handleEnded = (e: Event) => {
             const player = e.target as HTMLAudioElement;
-            if (playoutPolicyRef.current.playoutMode === 'presenter') return;
-
+            const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
+            if (player !== activePlayerRef.current) return;
+            if (playoutPolicyRef.current.playoutMode === 'presenter' || isAutoModeEnabledRef.current) {
+                return;
+            }
             if (!isNaN(player.duration) && player.duration > 2 && player.currentTime < player.duration - 2) {
                 console.warn(`Ignored premature 'ended' event. CurrentTime: ${player.currentTime.toFixed(2)}, Duration: ${player.duration.toFixed(2)}`);
                 if (player.paused) player.play().catch(err => console.error("Could not resume stalled player:", err));
                 return;
             }
-
-            const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
-            if (player !== activePlayerRef.current || isCrossfadingRef.current) return;
-            
-            const endedItem = playlistRef.current[currentTrackIndexRef.current];
-            if (!endedItem || 'markerType' in endedItem) return;
-            
-            setPlayoutHistory(prev => [...prev, { trackId: endedItem.originalId || endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
-            
-            if (stopAfterTrackIdRef.current && stopAfterTrackIdRef.current === endedItem.id) {
-                sendStudioCommand('stopAtId');
-                if (remoteStudioRef.current) remoteStudioRef.current.goOnAir();
-                return;
-            }
-
             handleNext();
         };
         
         const players = [playerA, playerB];
         players.forEach(p => { if (p) { p.addEventListener('timeupdate', handleTimeUpdate); p.addEventListener('ended', handleEnded); } });
         return () => { players.forEach(p => { if (p) { p.removeEventListener('timeupdate', handleTimeUpdate); p.removeEventListener('ended', handleEnded); } }); };
-    }, [activePlayer, findNextPlayableIndex, performCrossfade, handleNext, isStudio, sendStudioCommand]);
+    }, [activePlayer, handleNext]);
 
     const triggerHardMarkerFadeAndJump = useCallback(async (nextIndex: number) => {
         if (isCrossfadingRef.current) return;
@@ -2318,7 +2159,7 @@ const AppInternal: React.FC = () => {
             const intervalHours = autoBackupIntervalRef.current;
             if (intervalHours <= 0) return;
             const intervalMillis = intervalHours * 60 * 60 * 1000;
-            if (now - lastBackupTimestamp > intervalMillis) performBackupAction('interval');
+            if (now - lastAutoBackupTimestamp > intervalMillis) performBackupAction('interval');
         }, 1000 * 60 * 5);
 
         return () => clearInterval(intervalId);
@@ -2352,11 +2193,16 @@ const AppInternal: React.FC = () => {
     
     const handleToggleAutoMode = useCallback((enabled: boolean) => {
         setIsAutoModeEnabled(enabled);
-        if (enabled) {
-            setPlayoutPolicy(p => ({ ...p, isAutoFillEnabled: true }));
-            if (!isPlayingRef.current && playlistRef.current.length > 0) handleTogglePlay();
+        if (isStudio) {
+            sendStudioCommand('toggleAutoMode', { enabled });
+        } else {
+            // Local fallback for DEMO mode
+            if (enabled) {
+                setPlayoutPolicy(p => ({ ...p, isAutoFillEnabled: true }));
+                if (!isPlayingRef.current && playlistRef.current.length > 0) handleTogglePlay();
+            }
         }
-    }, [handleTogglePlay]);
+    }, [isStudio, sendStudioCommand, handleTogglePlay]);
 
     const handleOpenArtworkModal = useCallback((url: string) => {
         setArtworkModalUrl(url);
