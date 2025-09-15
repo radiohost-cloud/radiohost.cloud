@@ -56,22 +56,10 @@ export const putUserData = (email: string, data: any) => {
     }).then(handleResponse);
 };
 
-// NEW: Functions for the shared media library
-export const getSharedLibrary = <T>(): Promise<T | null> => {
-    return fetch(`/api/library`).then(handleResponse);
-};
-
 export const uploadTrack = async (trackMetadata: Track, file: File, artworkBlob?: Blob, webkitRelativePath?: string): Promise<Track> => {
     const formData = new FormData();
-    formData.append('metadata', JSON.stringify(trackMetadata));
-    if (webkitRelativePath) {
-        formData.append('webkitRelativePath', webkitRelativePath);
-    }
-    
+    formData.append('webkitRelativePath', webkitRelativePath || file.name);
     formData.append('audioFile', file);
-    if (artworkBlob) {
-        formData.append('artworkFile', artworkBlob, 'artwork.jpg');
-    }
 
     const response = await fetch('/api/upload', {
         method: 'POST',
@@ -84,7 +72,7 @@ export const deleteTrack = (track: Track) => {
     return fetch(`/api/track/delete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: track.id, src: track.src }),
+        body: JSON.stringify({ id: track.id }), // id is now the relative path
     }).then(handleResponse);
 };
 

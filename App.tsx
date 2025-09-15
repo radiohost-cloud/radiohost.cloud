@@ -1840,14 +1840,6 @@ const AppInternal: React.FC = () => {
         }
     }, [isHostMode, playoutPolicy.playoutMode, sendStudioCommand]);
 
-    const handleAddTracksToLibrary = useCallback((tracks: Track[], destinationFolderId: string) => {
-        if (isHostMode) {
-            sendStudioCommand('addTracksToLibrary', { tracks, destinationFolderId });
-        } else {
-            setMediaLibrary(prev => addMultipleItemsToTree(prev, destinationFolderId, tracks));
-        }
-    }, [isHostMode, sendStudioCommand]);
-
     const handleAddUrlTrackToLibrary = useCallback((track: Track, destinationFolderId: string) => {
         if (isHostMode) {
             sendStudioCommand('addUrlTrackToLibrary', { track, destinationFolderId });
@@ -1866,43 +1858,11 @@ const AppInternal: React.FC = () => {
         }
     }, [isHostMode, sendStudioCommand, mediaLibrary]);
 
-    const handleRemoveMultipleFromLibrary = useCallback(async (ids: string[]) => {
-        if (isHostMode) {
-            sendStudioCommand('removeMultipleFromLibrary', { ids });
-        } else {
-            const idsSet = new Set(ids);
-            const removeItemsFromTree = (node: Folder, itemIdsToRemove: Set<string>): Folder => {
-                const newChildren = node.children
-                    .filter(child => !itemIdsToRemove.has(child.id))
-                    .map(child =>
-                        child.type === 'folder' ? removeItemsFromTree(child, itemIdsToRemove) : child
-                    );
-                return { ...node, children: newChildren };
-            };
-            setMediaLibrary(prev => removeItemsFromTree(prev, idsSet));
-        }
-    }, [isHostMode, sendStudioCommand]);
-
-    const getFolderPath = useCallback((root: Folder, folderId: string): string => {
-        if (folderId === 'root' || folderId === root.id) return '';
-        const findPathRecursive = (currentFolder: Folder, path: string[]): string[] | null => {
-            for (const child of currentFolder.children) {
-                if (child.type === 'folder') {
-                    if (child.id === folderId) return [...path, child.name];
-                    const foundPath = findPathRecursive(child, [...path, child.name]);
-                    if (foundPath) return foundPath;
-                }
-            }
-            return null;
-        };
-        const pathParts = findPathRecursive(root, []);
-        return pathParts ? pathParts.join('/') : '';
-    }, []);
-
     const handleCreateFolder = useCallback(async (parentId: string, folderName: string) => {
         if (isHostMode) {
             sendStudioCommand('createFolder', { parentId, folderName });
         } else {
+            // DEMO mode logic is now client-only
             const newFolder: Folder = { id: `folder-${Date.now()}`, name: folderName, type: 'folder', children: [] };
             setMediaLibrary(prev => addItemToTree(prev, parentId, newFolder));
         }
@@ -2238,7 +2198,7 @@ const AppInternal: React.FC = () => {
     const handleImportData = useCallback((data: any) => {
         try {
             if (data.library) {
-                 if (isHostMode) sendStudioCommand('setLibrary', { library: data.library });
+                 if (isHostMode) console.warn("Library import is ignored in HOST mode. Manage files on the server.");
                  else setMediaLibrary(data.library);
             }
             if (data.playlist) {
@@ -2454,12 +2414,13 @@ const AppInternal: React.FC = () => {
     const handleVoiceTrackCreate = useCallback(async (voiceTrack: Track, blob: Blob): Promise<Track> => {
         const savedTrack = await dataService.addTrack(voiceTrack, blob);
         if (isHostMode) {
-            sendStudioCommand('addVoiceTrackToLibrary', { track: savedTrack });
+            // In the new filesystem model, adding a VT is just a file upload.
+            // The watcher will handle the library update. We don't need a special command.
         } else {
             setMediaLibrary(prev => addItemToTree(prev, 'root', savedTrack));
         }
         return savedTrack;
-    }, [sendStudioCommand, isHostMode]);
+    }, [isHostMode]);
 
     // --- NEW: WebSocket Logic for HOST mode ---
     useEffect(() => {
@@ -2908,10 +2869,8 @@ const AppInternal: React.FC = () => {
                         <MediaLibrary
                             rootFolder={mediaLibrary}
                             onAddToPlaylist={(track) => handleInsertTrackInPlaylist(track, null)}
-                            onAddTracksToLibrary={handleAddTracksToLibrary}
                             onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
                             onRemoveFromLibrary={handleRemoveFromLibrary}
-                            onRemoveMultipleFromLibrary={handleRemoveMultipleFromLibrary}
                             onCreateFolder={handleCreateFolder}
                             onMoveItem={handleMoveItemInLibrary}
                             onOpenMetadataSettings={(folder) => setEditingMetadataFolder(folder)}
@@ -2920,7 +2879,6 @@ const AppInternal: React.FC = () => {
                             onUpdateFolderTags={handleUpdateFolderTags}
                             onPflTrack={handlePflTrack}
                             pflTrackId={pflTrackId}
-                            onLibraryUpdate={setMediaLibrary}
                             playoutMode={playoutPolicy.playoutMode}
                         />
                     </div>

@@ -22,10 +22,8 @@ import { fetchArtwork } from '../services/artworkService';
 interface MediaLibraryProps {
     rootFolder: Folder;
     onAddToPlaylist: (track: Track) => void;
-    onAddTracksToLibrary: (tracks: Track[], destinationFolderId: string) => void;
     onAddUrlTrackToLibrary: (track: Track, destinationFolderId: string) => void;
     onRemoveFromLibrary: (id: string) => void;
-    onRemoveMultipleFromLibrary: (ids: string[]) => void;
     onCreateFolder: (parentId: string, folderName: string) => void;
     onMoveItem: (itemId: string, destinationFolderId: string) => void;
     onOpenMetadataSettings: (folder: Folder) => void;
@@ -34,7 +32,6 @@ interface MediaLibraryProps {
     onUpdateFolderTags: (folderId: string, tags: string[]) => void;
     onPflTrack: (trackId: string) => void;
     pflTrackId: string | null;
-    onLibraryUpdate: (newRootFolder: Folder) => void;
     playoutMode?: 'studio' | 'presenter';
 }
 
@@ -177,108 +174,7 @@ const LibraryItemComponent = React.memo(({ item, selected, hasSelection, onToggl
     );
 });
 
-
-// --- Reusable Parsing Function ---
-const parseFileName = (fileName: string): { title: string; artist: string } => {
-    const fileNameWithoutExt = fileName.replace(/\.[^/.]+$/, "");
-    let title = fileNameWithoutExt;
-    let artist = '';
-
-    // Find the first occurrence of " - ", " – ", or " — " with flexible spacing
-    const match = fileNameWithoutExt.match(/\s+[-–—]\s+/);
-    
-    if (match && match.index && match.index > 0) {
-        const separatorIndex = match.index;
-        const potentialArtist = fileNameWithoutExt.substring(0, separatorIndex).trim();
-        const potentialTitle = fileNameWithoutExt.substring(separatorIndex + match[0].length).trim();
-        
-        if (potentialArtist && potentialTitle) {
-            artist = potentialArtist;
-            title = potentialTitle;
-        }
-    }
-    
-    // Additional cleanup for things like (Official Video), etc.
-    title = title.replace(/\s*\(.*\)\s*|\s*\[.*\]\s*/g, '').trim();
-
-    return { title, artist };
-};
-
-// --- ID3 Tag Reading and Metadata Extraction ---
-declare global {
-    interface Window {
-        jsmediatags: any;
-    }
-}
-
-const readId3Tags = (file: File): Promise<{ title: string; artist: string; album: string; picture: any | null }> => {
-    return new Promise((resolve, reject) => {
-        if (!window.jsmediatags) {
-            return reject('jsmediatags library not loaded');
-        }
-        window.jsmediatags.read(file, {
-            onSuccess: (tag: any) => {
-                const tags = tag.tags;
-                resolve({
-                    title: tags.title || '',
-                    artist: tags.artist || '',
-                    album: tags.album || '',
-                    picture: tags.picture || null
-                });
-            },
-            onError: (error: any) => {
-                reject(error);
-            }
-        });
-    });
-};
-
-const extractMetadata = async (file: File): Promise<{ title: string, artist: string, artworkBlob?: Blob, remoteArtworkUrl?: string }> => {
-    let title = '';
-    let artist = '';
-    let artworkBlob: Blob | undefined = undefined;
-    let remoteArtworkUrl: string | undefined = undefined;
-
-    try {
-        const tags = await readId3Tags(file);
-        title = tags.title || '';
-        artist = tags.artist || '';
-        if (tags.picture) {
-            artworkBlob = new Blob([new Uint8Array(tags.picture.data)], { type: tags.picture.format });
-        }
-    } catch (id3Error) {
-        console.warn(`Could not read ID3 tags for ${file.name}:`, id3Error);
-    }
-
-    if (!title || !artist) {
-        const fromFilename = parseFileName(file.name);
-        if (!title) title = fromFilename.title;
-        if (!artist) artist = fromFilename.artist;
-    }
-
-    if (!artworkBlob) {
-        remoteArtworkUrl = (await fetchArtwork(artist, title)) ?? undefined;
-    }
-
-    return { title, artist, artworkBlob, remoteArtworkUrl };
-};
-
-// A generic, recursive function to add an item to the tree immutably.
-const addItemToTree = (node: Folder, parentId: string, itemToAdd: LibraryItem): Folder => {
-    if (node.id === parentId) {
-        // Found the target folder, add the new item to its children
-        return { ...node, children: [...node.children, itemToAdd] };
-    }
-    // Not the target folder, recursively search in its children
-    return {
-        ...node,
-        children: node.children.map(child =>
-            child.type === 'folder' ? addItemToTree(child, parentId, itemToAdd) : child
-        ),
-    };
-};
-
-const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist, onAddTracksToLibrary, onAddUrlTrackToLibrary, onRemoveFromLibrary, onRemoveMultipleFromLibrary, onCreateFolder, onMoveItem, onOpenMetadataSettings, onOpenTrackMetadataEditor, onUpdateTrackTags, onUpdateFolderTags, onPflTrack, pflTrackId, onLibraryUpdate, playoutMode }) => {
+const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist, onAddUrlTrackToLibrary, onRemoveFromLibrary, onCreateFolder, onMoveItem, onOpenMetadataSettings, onOpenTrackMetadataEditor, onUpdateTrackTags, onUpdateFolderTags, onPflTrack, pflTrackId, playoutMode }) => {
     const [path, setPath] = useState<{ id: string; name: string }[]>([{ id: rootFolder.id, name: 'Library' }]);
     const [searchQuery, setSearchQuery] = useState('');
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -299,8 +195,21 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
 
     const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
     const canModifyLibrary = playoutMode !== 'presenter';
-    const currentFolderId = path[path.length - 1].id;
-    const currentFolder = useMemo(() => findFolder(rootFolder, currentFolderId) || rootFolder, [rootFolder, currentFolderId]);
+    const currentFolderPath = path.map(p => p.id !== 'root' ? p.name : '').join('/');
+    const currentFolder = useMemo(() => {
+        let node = rootFolder;
+        for (let i = 1; i < path.length; i++) {
+            const nextNode = node.children.find(c => c.type === 'folder' && c.id === path[i].id) as Folder;
+            if (nextNode) {
+                node = nextNode;
+            } else {
+                // Path is invalid, reset to root
+                setPath([{ id: rootFolder.id, name: 'Library' }]);
+                return rootFolder;
+            }
+        }
+        return node;
+    }, [rootFolder, path]);
     
     
     // --- Search Logic ---
@@ -390,24 +299,14 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
         for (const [index, file] of files.entries()) {
             setImportProgress({ current: index + 1, total: files.length });
             try {
-                const duration = await getAudioDuration(file, file.name);
-                const { title, artist, artworkBlob, remoteArtworkUrl } = await extractMetadata(file);
-
-                const trackForService: Track = {
-                    id: '', // Server will generate this
-                    title, artist, duration, type: TrackType.SONG, src: '',
-                    hasEmbeddedArtwork: !!artworkBlob, remoteArtworkUrl: remoteArtworkUrl ?? undefined,
-                };
+                // In HOST mode, we just send the file. The server handles everything else.
+                // The library will update via WebSocket when the file is processed.
+                const webkitRelativePath = (file as any).webkitRelativePath || file.name;
+                // FIX: Replaced Node.js `path.join` with browser-compatible string concatenation.
+                // The state variable `path` was shadowing the intended module, causing a runtime error.
+                const finalRelativePath = (currentFolderPath ? `${currentFolderPath}/` : '') + webkitRelativePath;
                 
-                const webkitRelativePath = (file as any).webkitRelativePath || '';
-                
-                if (isHostMode) {
-                    await dataService.addTrack(trackForService, file, artworkBlob, webkitRelativePath);
-                } else {
-                    // DEMO mode logic (simplified, does not handle folders)
-                    const finalTrack = await dataService.addTrack(trackForService, file, artworkBlob);
-                    onAddTracksToLibrary([finalTrack], currentFolderId);
-                }
+                await dataService.addTrack({} as Track, file, undefined, finalRelativePath);
 
             } catch (error) {
                 console.error("Failed to process file:", file.name, error);
@@ -415,7 +314,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
             }
         }
         setIsImporting(false);
-    }, [isHostMode, onAddTracksToLibrary, currentFolderId]);
+    }, [isHostMode, currentFolderPath]);
     
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files) {
@@ -475,7 +374,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
 
     const handleDeleteSelected = () => {
         if (selectedItems.size > 0) {
-            onRemoveMultipleFromLibrary(Array.from(selectedItems));
+            Array.from(selectedItems).forEach(id => onRemoveFromLibrary(id));
             handleClearSelection();
         }
     };
@@ -494,7 +393,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
         if (e.key === 'Enter') {
             const folderName = newFolderInputRef.current?.value.trim();
             if (folderName) {
-                onCreateFolder(currentFolderId, folderName);
+                onCreateFolder(currentFolder.id, folderName);
             }
             setIsCreatingFolder(false);
         } else if (e.key === 'Escape') {
@@ -639,7 +538,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
             <AddUrlModal
                 isOpen={isAddUrlModalOpen}
                 onClose={() => setIsAddUrlModalOpen(false)}
-                onAddTrack={(track) => onAddUrlTrackToLibrary(track, currentFolderId)}
+                onAddTrack={(track) => onAddUrlTrackToLibrary(track, currentFolder.id)}
             />
             {contextMenu && (
                 <div ref={contextMenuRef} className="fixed z-30 bg-white dark:bg-neutral-800 rounded-md shadow-lg border border-neutral-200 dark:border-neutral-700 py-1" style={{ top: contextMenu.y, left: contextMenu.x }}>

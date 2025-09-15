@@ -27,10 +27,11 @@ const PORT = process.env.PORT || 3000;
 // --- Database Setup (using lowdb for simplicity) ---
 const file = path.join(__dirname, 'db.json');
 const adapter = new JSONFile(file);
+// `sharedMediaLibrary` is no longer stored in the DB. The filesystem is the source of truth.
 const defaultData = {
     users: [],
     userdata: {},
-    sharedMediaLibrary: { id: 'root', name: 'Media Library', type: 'folder', children: [] },
+    // sharedMediaLibrary is now generated on the fly from the filesystem
     sharedPlaylist: [],
     sharedPlayerState: {
         currentPlayingItemId: null,
@@ -42,6 +43,88 @@ const defaultData = {
 };
 const db = new Low(adapter, defaultData);
 await db.read();
+
+
+// --- Media File Storage Setup ---
+const mediaDir = path.join(__dirname, 'Media');
+if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
+const artworkDir = path.join(__dirname, 'Artwork');
+if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir, { recursive: true });
+
+
+// --- NEW: Filesystem-based Media Library Logic ---
+
+// Scans the /Media directory and builds a JSON tree representing the library.
+const scanMediaToTree = async (dirPath, relativePath = '') => {
+    const fullPath = path.join(mediaDir, relativePath);
+    const children = [];
+    try {
+        const entries = await fsPromises.readdir(fullPath, { withFileTypes: true });
+
+        for (const entry of entries) {
+            const entryRelativePath = path.join(relativePath, entry.name).replace(/\\/g, '/');
+            if (entry.isDirectory()) {
+                children.push({
+                    id: entryRelativePath,
+                    name: entry.name,
+                    type: 'folder',
+                    children: await scanMediaToTree(entry.name, entryRelativePath),
+                });
+            } else if (/\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(entry.name)) {
+                // In a production app, you'd read metadata here (duration, etc.)
+                // For simplicity, we parse from filename.
+                const title = entry.name.replace(/\.[^/.]+$/, "");
+                const artist = 'Unknown';
+                children.push({
+                    id: entryRelativePath,
+                    title,
+                    artist,
+                    duration: 180, // Placeholder duration
+                    type: 'Song',
+                    src: `/media/${entryRelativePath}`,
+                    originalFilename: entry.name,
+                });
+            }
+        }
+    } catch (error) {
+        console.error(`Error scanning directory ${fullPath}:`, error);
+    }
+    return children;
+};
+
+let libraryState = { id: 'root', name: 'Media Library', type: 'folder', children: [] };
+let watchTimeout = null;
+
+// Re-scans the entire library and broadcasts the new state to all clients.
+// Debounced to prevent rapid firing during large file operations.
+const refreshAndBroadcastLibrary = () => {
+    clearTimeout(watchTimeout);
+    watchTimeout = setTimeout(async () => {
+        console.log('[File Watcher] Change detected. Re-scanning media library...');
+        try {
+            const newChildren = await scanMediaToTree(mediaDir);
+            libraryState.children = newChildren;
+            
+            const message = JSON.stringify({ type: 'library-update', payload: libraryState });
+            clients.forEach((ws, email) => {
+                if (ws.readyState === ws.OPEN) {
+                    ws.send(message);
+                }
+            });
+            console.log('[File Watcher] Library update broadcasted to all clients.');
+        } catch (error) {
+            console.error('[File Watcher] Failed to refresh and broadcast library:', error);
+        }
+    }, 500); // 500ms debounce window
+};
+
+// Initialize and start the file watcher.
+fs.watch(mediaDir, { recursive: true }, (eventType, filename) => {
+    if (filename) {
+        console.log(`[File Watcher] Event '${eventType}' on: ${filename}`);
+        refreshAndBroadcastLibrary();
+    }
+});
 
 
 // --- Helper to get station settings ---
@@ -93,16 +176,6 @@ const broadcastState = () => {
       ws.send(message);
     }
   });
-};
-
-const broadcastLibrary = () => {
-    const message = JSON.stringify({ type: 'library-update', payload: db.data.sharedMediaLibrary });
-    clients.forEach((ws, email) => {
-        const user = db.data.users.find(u => u.email === email);
-        if (user && ws.readyState === ws.OPEN) {
-            ws.send(message);
-        }
-    });
 };
 
 const broadcastPresenterList = async () => {
@@ -234,127 +307,6 @@ const stopPlaybackLoop = () => {
     playbackInterval = null;
 };
 
-
-// --- Tree Manipulation Helpers ---
-const findFolderById = (node, folderId) => {
-    if (node.id === folderId) {
-        return node;
-    }
-    for (const child of node.children) {
-        if (child.type === 'folder') {
-            const found = findFolderById(child, folderId);
-            if (found) return found;
-        }
-    }
-    return null;
-};
-
-const findOrCreateFolderPath = (root, folderPath) => {
-    if (!folderPath) {
-        return root.id;
-    }
-    const pathParts = folderPath.split(/[/\\]/).filter(p => p);
-    let currentNode = root;
-
-    for (const part of pathParts) {
-        let childNode = currentNode.children.find(c => c.type === 'folder' && c.name === part);
-        if (!childNode) {
-            console.log(`[Upload] Creating new folder in library state: '${part}' inside '${currentNode.name}'`);
-            childNode = {
-                id: `folder-${Date.now()}-${Math.random().toString(36).substring(7)}`,
-                name: part,
-                type: 'folder',
-                children: []
-            };
-            currentNode.children.push(childNode);
-        }
-        currentNode = childNode;
-    }
-    return currentNode.id;
-};
-
-const addItemToTree = (node, parentId, itemToAdd) => {
-    if (node.id === parentId) {
-        return { ...node, children: [...node.children, itemToAdd] };
-    }
-    return {
-        ...node,
-        children: node.children.map(child =>
-            child.type === 'folder' ? addItemToTree(child, parentId, itemToAdd) : child
-        ),
-    };
-};
-const addMultipleItemsToTree = (node, parentId, itemsToAdd) => {
-    if (node.id === parentId) {
-        return { ...node, children: [...node.children, ...itemsToAdd] };
-    }
-    return {
-        ...node,
-        children: node.children.map(child =>
-            child.type === 'folder' ? addMultipleItemsToTree(child, parentId, itemsToAdd) : child
-        ),
-    };
-};
-const findAndRemoveItem = (node, itemId) => {
-    let foundItem = null;
-    const children = node.children.filter(child => {
-        if (child.id === itemId) {
-            foundItem = child;
-            return false;
-        }
-        return true;
-    });
-    if (foundItem) {
-        return { updatedNode: { ...node, children }, foundItem };
-    }
-    for (let i = 0; i < children.length; i++) {
-        const child = children[i];
-        if (child.type === 'folder') {
-            const result = findAndRemoveItem(child, itemId);
-            if (result.foundItem) {
-                children[i] = result.updatedNode;
-                return { updatedNode: { ...node, children }, foundItem: result.foundItem };
-            }
-        }
-    }
-    return { updatedNode: node, foundItem: null };
-};
-const removeItemsFromTree = (node, itemIdsToRemove) => {
-    const newChildren = node.children
-        .filter(child => !itemIdsToRemove.has(child.id))
-        .map(child =>
-            child.type === 'folder' ? removeItemsFromTree(child, itemIdsToRemove) : child
-        );
-    return { ...node, children: newChildren };
-};
-const updateFolderInTree = (node, folderId, updateFn) => {
-    let updatedNode = node;
-    if (node.id === folderId) {
-        updatedNode = updateFn(node);
-    }
-    return {
-        ...updatedNode,
-        children: updatedNode.children.map(child =>
-            child.type === 'folder' ? updateFolderInTree(child, folderId, updateFn) : child
-        ),
-    };
-};
-const updateTrackInTree = (node, trackId, updateFn) => {
-    return {
-        ...node,
-        children: node.children.map(child => {
-            if (child.type === 'folder') {
-                return updateTrackInTree(child, trackId, updateFn);
-            }
-            if (child.id === trackId) {
-                return updateFn(child);
-            }
-            return child;
-        }),
-    };
-};
-
-
 // --- Main WebSocket Logic ---
 
 wss.on('connection', async (ws, req) => {
@@ -436,7 +388,8 @@ wss.on('connection', async (ws, req) => {
     broadcastPresenterList();
 
     if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify({ type: 'library-update', payload: db.data.sharedMediaLibrary }));
+        // Send the current library state on connection
+        ws.send(JSON.stringify({ type: 'library-update', payload: libraryState }));
         ws.send(JSON.stringify({
             type: 'state-update',
             payload: {
@@ -480,11 +433,59 @@ wss.on('connection', async (ws, req) => {
                         await db.read(); // Read latest state
                 
                         let stateChanged = false;
-                        let libraryChanged = false;
-                
-                        const { sharedPlaylist, sharedPlayerState, sharedMediaLibrary } = db.data;
+                        const { sharedPlaylist, sharedPlayerState } = db.data;
                 
                         switch (command) {
+                            // --- Filesystem modifying commands ---
+                            case 'removeFromLibrary': {
+                                const { id } = payload; // id is the relative path
+                                if (!id) break;
+                                const fullPath = path.join(mediaDir, id);
+                                try {
+                                    const stats = await fsPromises.stat(fullPath);
+                                    if (stats.isDirectory()) {
+                                        await fsPromises.rm(fullPath, { recursive: true, force: true });
+                                        console.log(`[FS] Deleted folder: ${fullPath}`);
+                                    } else {
+                                        await fsPromises.unlink(fullPath);
+                                        console.log(`[FS] Deleted file: ${fullPath}`);
+                                    }
+                                    // Watcher will trigger broadcast
+                                } catch (e) {
+                                    console.error(`[FS] Failed to delete item at ${fullPath}:`, e);
+                                }
+                                break;
+                            }
+                            case 'createFolder': {
+                                const { parentId, folderName } = payload;
+                                if (!folderName) break;
+                                const fullPath = path.join(mediaDir, parentId, folderName);
+                                try {
+                                    if (!fs.existsSync(fullPath)) {
+                                        await fsPromises.mkdir(fullPath, { recursive: true });
+                                        console.log(`[FS] Created folder: ${fullPath}`);
+                                    }
+                                    // Watcher will trigger broadcast
+                                } catch (e) {
+                                    console.error(`[FS] Failed to create folder at ${fullPath}:`, e);
+                                }
+                                break;
+                            }
+                             case 'moveItemInLibrary': {
+                                const { itemId, destinationFolderId } = payload;
+                                if (!itemId || !destinationFolderId) break;
+                                const sourcePath = path.join(mediaDir, itemId);
+                                const destPath = path.join(mediaDir, destinationFolderId, path.basename(itemId));
+                                try {
+                                    await fsPromises.rename(sourcePath, destPath);
+                                    console.log(`[FS] Moved item from ${sourcePath} to ${destPath}`);
+                                    // Watcher will trigger broadcast
+                                } catch (e) {
+                                    console.error(`[FS] Failed to move item:`, e);
+                                }
+                                break;
+                            }
+                            // --- Non-filesystem commands ---
                             case 'next': {
                                 await advanceTrack(true);
                                 stateChanged = true;
@@ -650,106 +651,6 @@ wss.on('connection', async (ws, req) => {
                                 stateChanged = true;
                                 break;
                             }
-                             case 'addTracksToLibrary': {
-                                const { tracks, destinationFolderId } = payload;
-                                db.data.sharedMediaLibrary = addMultipleItemsToTree(sharedMediaLibrary, destinationFolderId, tracks);
-                                libraryChanged = true;
-                                break;
-                            }
-                            case 'removeFromLibrary': {
-                                const { id } = payload;
-                                const { updatedNode, foundItem } = findAndRemoveItem(sharedMediaLibrary, id);
-                                if (foundItem && foundItem.type !== 'folder' && foundItem.src) {
-                                    try {
-                                        const relativePath = foundItem.src.replace(/^\/media\//, '');
-                                        const filePath = path.join(mediaDir, relativePath);
-                                        console.log(`[Delete] Attempting to delete audio file: ${filePath}`);
-                                        if (fs.existsSync(filePath)) {
-                                            await fsPromises.unlink(filePath);
-                                            console.log(`[Delete] Successfully deleted audio file: ${filePath}`);
-                                        } else {
-                                            console.warn(`[Delete] Audio file not found at: ${filePath}`);
-                                        }
-
-                                        if (foundItem.hasEmbeddedArtwork) {
-                                            const trackBaseName = path.basename(foundItem.id, path.extname(foundItem.id));
-                                            const relativeDir = path.dirname(relativePath);
-                                            const artworkDirForTrack = path.join(artworkDir, relativeDir);
-
-                                            if (fs.existsSync(artworkDirForTrack)) {
-                                                const files = await fsPromises.readdir(artworkDirForTrack);
-                                                const artworkFile = files.find(f => f.startsWith(trackBaseName + '.'));
-                                                if (artworkFile) {
-                                                    const artworkPath = path.join(artworkDirForTrack, artworkFile);
-                                                    console.log(`[Delete] Attempting to delete artwork file: ${artworkPath}`);
-                                                    await fsPromises.unlink(artworkPath);
-                                                    console.log(`[Delete] Successfully deleted artwork file: ${artworkPath}`);
-                                                } else {
-                                                    console.warn(`[Delete] Artwork file for base name '${trackBaseName}' not found in ${artworkDirForTrack}`);
-                                                }
-                                            }
-                                        }
-                                    } catch (e) {
-                                        console.error(`[Delete] Failed to delete physical files for track ${id}:`, e);
-                                    }
-                                } else if (foundItem && foundItem.type === 'folder') {
-                                    console.log(`[Delete] Deleting folder '${foundItem.name}' from library.`);
-                                }
-
-                                if (foundItem) {
-                                    db.data.sharedMediaLibrary = updatedNode;
-                                    libraryChanged = true;
-                                }
-                                break;
-                            }
-                            case 'removeMultipleFromLibrary': {
-                                const { ids } = payload;
-                                // In a real app, this would be more complex, finding each item to delete its file.
-                                // For simplicity here, we assume client sends full item details or this command is used cautiously.
-                                db.data.sharedMediaLibrary = removeItemsFromTree(sharedMediaLibrary, new Set(ids));
-                                libraryChanged = true;
-                                break;
-                            }
-                            case 'createFolder': {
-                                const { parentId, folderName } = payload;
-                                const newFolder = { id: `folder-${Date.now()}`, name: folderName, type: 'folder', children: [] };
-                                db.data.sharedMediaLibrary = addItemToTree(sharedMediaLibrary, parentId, newFolder);
-                                libraryChanged = true;
-                                break;
-                            }
-                             case 'moveItemInLibrary': {
-                                const { itemId, destinationFolderId } = payload;
-                                const { updatedNode, foundItem } = findAndRemoveItem(sharedMediaLibrary, itemId);
-                                if (foundItem) {
-                                    db.data.sharedMediaLibrary = addItemToTree(updatedNode, destinationFolderId, foundItem);
-                                    libraryChanged = true;
-                                }
-                                break;
-                            }
-                             case 'updateFolderMetadata': {
-                                const { folderId, settings } = payload;
-                                db.data.sharedMediaLibrary = updateFolderInTree(sharedMediaLibrary, folderId, folder => ({ ...folder, suppressMetadata: settings }));
-                                libraryChanged = true;
-                                break;
-                            }
-                             case 'updateTrackMetadata': {
-                                const { trackId, newMetadata } = payload;
-                                db.data.sharedMediaLibrary = updateTrackInTree(sharedMediaLibrary, trackId, track => ({ ...track, ...newMetadata }));
-                                libraryChanged = true;
-                                break;
-                            }
-                            case 'updateTrackTags': {
-                                const { trackId, tags } = payload;
-                                db.data.sharedMediaLibrary = updateTrackInTree(sharedMediaLibrary, trackId, track => ({ ...track, tags: tags.length > 0 ? tags.sort() : undefined }));
-                                libraryChanged = true;
-                                break;
-                            }
-                            case 'updateFolderTags': {
-                                const { folderId, newTags } = payload;
-                                db.data.sharedMediaLibrary = updateFolderInTree(sharedMediaLibrary, folderId, folder => ({ ...folder, tags: newTags.length > 0 ? newTags.sort() : undefined }));
-                                libraryChanged = true;
-                                break;
-                            }
                             // Fallback for simple state changes
                             case 'setPlayerState':
                                 db.data.sharedPlayerState = { ...sharedPlayerState, ...payload };
@@ -757,10 +658,9 @@ wss.on('connection', async (ws, req) => {
                                 break;
                         }
                 
-                        if (stateChanged || libraryChanged) {
+                        if (stateChanged) {
                             await db.write();
-                            if (stateChanged) broadcastState();
-                            if (libraryChanged) broadcastLibrary();
+                            broadcastState();
                         }
                     }
                     break;
@@ -908,16 +808,6 @@ app.use(cors());
 app.use(express.json());
 app.set('trust proxy', 1);
 
-// --- Media File Storage Setup ---
-const mediaDir = path.join(__dirname, 'Media');
-if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
-const artworkDir = path.join(__dirname, 'Artwork');
-if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir, { recursive: true });
-const tmpDir = path.join(__dirname, 'tmp');
-if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-
-const storage = multer.memoryStorage();
-const upload = multer({ storage });
 app.use('/media', express.static(mediaDir));
 
 const getPlayerPageHTML = (stationName) => `
@@ -1308,8 +1198,6 @@ app.post('/api/userdata/:email', async (req, res) => {
     res.json({ success: true });
 });
 
-app.get('/api/library', (req, res) => res.json(db.data.sharedMediaLibrary));
-
 app.post('/api/folder', async (req, res) => {
     const { path: folderPath } = req.body;
     if (!folderPath) {
@@ -1318,6 +1206,7 @@ app.post('/api/folder', async (req, res) => {
     try {
         const fullPath = path.join(mediaDir, folderPath);
         await fsPromises.mkdir(fullPath, { recursive: true });
+        // The watcher will handle the library update
         res.status(201).json({ success: true, message: `Folder created at ${folderPath}` });
     } catch (error) {
         console.error('Error creating folder:', error);
@@ -1325,110 +1214,60 @@ app.post('/api/folder', async (req, res) => {
     }
 });
 
-app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { name: 'artworkFile', maxCount: 1 }]), async (req, res) => {
-    if (!req.files || !req.files.audioFile) {
+app.post('/api/upload', multer({ storage: multer.memoryStorage() }).single('audioFile'), async (req, res) => {
+    if (!req.file) {
         return res.status(400).json({ message: 'No audio file uploaded.' });
     }
-
-    const audioFile = req.files.audioFile[0];
-    const artworkFile = req.files.artworkFile ? req.files.artworkFile[0] : null;
-
+    
     try {
-        const metadata = JSON.parse(req.body.metadata);
         const webkitRelativePath = req.body.webkitRelativePath || '';
-        const destinationPath = webkitRelativePath ? path.dirname(webkitRelativePath).replace(/\\/g, '/') : '';
+        const destinationDir = path.dirname(webkitRelativePath);
+        const finalDir = path.join(mediaDir, destinationDir);
+        
+        await fsPromises.mkdir(finalDir, { recursive: true });
 
-        // --- File Saving with Conflict Resolution ---
-        const finalAudioDir = path.join(mediaDir, destinationPath);
-        await fsPromises.mkdir(finalAudioDir, { recursive: true });
-
-        let finalAudioFilename = audioFile.originalname;
+        let finalFilename = req.file.originalname;
+        let finalPath = path.join(finalDir, finalFilename);
         let counter = 1;
-        const originalNameWithoutExt = path.basename(audioFile.originalname, path.extname(audioFile.originalname));
-        const ext = path.extname(audioFile.originalname);
-        let finalAudioPath = path.join(finalAudioDir, finalAudioFilename);
-
-        while (fs.existsSync(finalAudioPath)) {
-            finalAudioFilename = `${originalNameWithoutExt} (${counter})${ext}`;
-            finalAudioPath = path.join(finalAudioDir, finalAudioFilename);
+        const ext = path.extname(finalFilename);
+        const basename = path.basename(finalFilename, ext);
+        
+        while (fs.existsSync(finalPath)) {
+            finalFilename = `${basename} (${counter})${ext}`;
+            finalPath = path.join(finalDir, finalFilename);
             counter++;
         }
-        await fsPromises.writeFile(finalAudioPath, audioFile.buffer);
-        console.log(`[Upload] Saved audio file to: ${finalAudioPath}`);
 
-        // --- Handle Artwork File ---
-        if (artworkFile) {
-            const finalArtworkDir = path.join(artworkDir, destinationPath);
-            await fsPromises.mkdir(finalArtworkDir, { recursive: true });
-            
-            const audioFileBaseName = path.basename(finalAudioFilename, path.extname(finalAudioFilename));
-            const newArtworkFileName = audioFileBaseName + path.extname(artworkFile.originalname);
-            const finalArtworkPath = path.join(finalArtworkDir, newArtworkFileName);
-            
-            await fsPromises.writeFile(finalArtworkPath, artworkFile.buffer);
-            console.log(`[Upload] Saved artwork file to: ${finalArtworkPath}`);
-        }
-
-        // --- Update Database ---
-        const finalDestinationFolderId = findOrCreateFolderPath(db.data.sharedMediaLibrary, destinationPath);
-        
-        const relativePathForSrc = path.join(destinationPath, finalAudioFilename).replace(/\\/g, '/');
-        const newTrack = {
-            ...metadata,
-            id: finalAudioFilename,
-            src: `/media/${relativePathForSrc}`,
-            hasEmbeddedArtwork: !!artworkFile,
-            originalFilename: audioFile.originalname,
-        };
-
-        const parentFolder = findFolderById(db.data.sharedMediaLibrary, finalDestinationFolderId);
-        if (parentFolder) {
-            parentFolder.children.push(newTrack);
-        } else {
-            console.error(`[Upload] Could not find parent folder with ID: ${finalDestinationFolderId}. Adding to root.`);
-            db.data.sharedMediaLibrary.children.push(newTrack);
-        }
-        await db.write();
-
-        broadcastLibrary();
-
-        res.status(201).json({ success: true, message: `File ${finalAudioFilename} uploaded.` });
+        await fsPromises.writeFile(finalPath, req.file.buffer);
+        console.log(`[Upload] Saved file to: ${finalPath}`);
+        // Watcher will handle broadcasting the library update.
+        res.status(201).json({ success: true, message: `File ${finalFilename} uploaded.` });
     } catch (e) {
         console.error('Error processing upload:', e);
         res.status(500).json({ message: 'Error processing upload. Check server logs and permissions.' });
     }
 });
 
+
 app.post('/api/track/delete', async (req, res) => {
-    const { id, src } = req.body;
-    if (!id || !src) {
-        return res.status(400).json({ message: 'Track ID and src are required.' });
+    // Note: The 'id' of a library item is its relative path.
+    const { id } = req.body;
+    if (!id) {
+        return res.status(400).json({ message: 'Track ID (relative path) is required.' });
     }
 
     try {
-        const relativePath = src.replace(/^\/media\//, '');
-        const filePath = path.join(mediaDir, relativePath);
-
-        if (fs.existsSync(filePath)) {
-            await fsPromises.unlink(filePath);
+        const fullPath = path.join(mediaDir, id);
+        if (fs.existsSync(fullPath)) {
+             await fsPromises.rm(fullPath, { recursive: true, force: true });
+             res.json({ success: true, message: 'Item deleted.' });
+        } else {
+             res.status(404).json({ message: 'Item not found on disk.' });
         }
-
-        const trackBaseName = path.basename(id, path.extname(id));
-        const relativeDir = path.dirname(relativePath);
-        const artworkDirForTrack = path.join(artworkDir, relativeDir);
-        
-        if (fs.existsSync(artworkDirForTrack)) {
-             const files = await fsPromises.readdir(artworkDirForTrack);
-             const artworkFile = files.find(f => f.startsWith(trackBaseName));
-             if (artworkFile) {
-                 await fsPromises.unlink(path.join(artworkDirForTrack, artworkFile));
-             }
-        }
-        
-        res.json({ success: true, message: 'Track and artwork deleted.' });
+        // Watcher will handle broadcasting the library update.
     } catch (error) {
-        console.error("Error deleting track:", error);
-        res.status(500).json({ message: 'Error deleting files. Check server logs and permissions.' });
+        console.error("Error deleting item:", error);
+        res.status(500).json({ message: 'Error deleting item. Check server logs and permissions.' });
     }
 });
 
@@ -1557,74 +1396,25 @@ if (isDirectRun) {
         });
     });
 
-    // SPA Fallback: This should be the last route. It serves the main index.html file
-    // for any GET request that is not an API call or a direct file request, allowing
-    // client-side routing to handle the path.
+    // SPA Fallback: This should be the last route.
     app.get('*', (req, res, next) => {
-        // Check if the request is for an API endpoint or a file with an extension.
         if (req.path.startsWith('/api/') ||
             req.path.startsWith('/stream') ||
             req.path.startsWith('/media/') ||
             req.path.startsWith('/socket') ||
             path.extname(req.path)) {
-            // If it is, pass it to the next handler. This will result in a 404 if
-            // no other route handles it.
             return next();
         }
-
-        // Otherwise, it's a request for a client-side route. Serve the SPA's entry point.
         res.sendFile(path.join(distPath, 'index.html'));
     });
     
     // Server startup logic
     const startup = async () => {
-        // --- RESILIENCE: Scan Media directory on startup ---
-        console.log('[Startup] Scanning Media directory to sync database...');
-        const allDbFiles = new Set();
-        const traverseDb = (node) => {
-            if (!node || !node.children) return;
-            node.children.forEach(child => {
-                if (child.type === 'folder') {
-                    traverseDb(child);
-                } else {
-                    allDbFiles.add(child.src);
-                }
-            });
-        };
-        traverseDb(db.data.sharedMediaLibrary);
-
-        const scanDirectory = async (currentDir, relativePath) => {
-            const entries = await fsPromises.readdir(path.join(mediaDir, currentDir), { withFileTypes: true });
-            for (const entry of entries) {
-                const entryPath = path.join(currentDir, entry.name);
-                const entryRelativePath = path.join(relativePath, entry.name);
-                if (entry.isDirectory()) {
-                    await scanDirectory(entryPath, entryRelativePath);
-                } else if (/\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(entry.name)) {
-                    const fileSrc = `/media/${entryRelativePath.replace(/\\/g, '/')}`;
-                    if (!allDbFiles.has(fileSrc)) {
-                        console.log(`[Startup] Found orphaned file, adding to library: ${entry.name}`);
-                        const title = entry.name.replace(/\.[^/.]+$/, "");
-                        const newTrack = {
-                            id: entry.name,
-                            title: title,
-                            artist: 'Unknown',
-                            duration: 0, // Duration would require a full metadata scan, skipping for now
-                            type: 'Song',
-                            src: fileSrc,
-                            originalFilename: entry.name
-                        };
-                        // Add to the root of the library for simplicity
-                        db.data.sharedMediaLibrary = addItemToTree(db.data.sharedMediaLibrary, 'root', newTrack);
-                    }
-                }
-            }
-        };
-
-        await scanDirectory('', '');
-        await db.write();
-        console.log('[Startup] Media sync complete.');
-
+        console.log('[Startup] Initial scan of Media directory...');
+        const initialChildren = await scanMediaToTree(mediaDir);
+        libraryState.children = initialChildren;
+        console.log('[Startup] Initial library state generated.');
+        
         server.listen(PORT, '0.0.0.0', () => {
             console.log(`RadioHost.cloud HOST server running on http://0.0.0.0:${PORT}`);
             // Startup Logic: Check if auto mode should be running

@@ -1,6 +1,6 @@
 import * as dbService from './dbService';
 import * as apiService from './apiService';
-import { type Track, type User } from '../types';
+import { type Track, type User, TrackType } from '../types';
 
 const getMode = () => sessionStorage.getItem('appMode') as 'HOST' | 'DEMO' | null;
 
@@ -34,7 +34,7 @@ export const getAllUsers = (): Promise<User[]> => {
     if (mode === 'HOST') {
         return apiService.getAllUsers();
     }
-    return Promise.resolve([]);
+    return dbService.getAllUsers();
 };
 
 export const updateUserRole = (email: string, role: 'studio' | 'presenter'): Promise<User> => {
@@ -52,6 +52,7 @@ export const putUserData = (key: 'guest' | string, data: any) => {
     if (mode === 'HOST') {
         // In HOST mode, we only save user-specific data.
         // The server manages the shared state (library, playlist, player state).
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { mediaLibrary, playlist, playbackState, ...userSpecificData } = data;
         return apiService.putUserData(key, userSpecificData);
     }
@@ -71,8 +72,8 @@ export const getUserData = async <T>(key: 'guest' | string): Promise<T | null> =
 };
 
 
-// --- App State & Config (partially local even in HOST mode) ---
-export const putAppState = (key: string, value: any) => {
+// --- App State & Config (local browser only) ---
+export const putAppState = (key: string, value: any): Promise<void> => {
     return dbService.putAppState(key, value);
 };
 
@@ -80,7 +81,7 @@ export const getAppState = <T>(key: string): Promise<T | null> => {
     return dbService.getAppState(key);
 };
 
-export const setConfig = (key: string, value: any) => {
+export const setConfig = (key: string, value: any): Promise<void> => {
     return dbService.setConfig(key, value);
 };
 
@@ -88,107 +89,103 @@ export const getConfig = <T>(key: string): Promise<T | null> => {
     return dbService.getConfig(key);
 };
 
+// --- Media & Artwork ---
 
-// --- Media / Tracks ---
-export const getTrackBlob = async (track: Track): Promise<Blob | null> => {
+export const getArtworkUrl = async (track: Track): Promise<string | null> => {
     const mode = getMode();
-    if (mode === 'HOST') {
-        if (!track.src) return null;
-        try {
-            const response = await fetch(track.src);
-            if (!response.ok) {
-                console.error(`Failed to fetch track blob from ${track.src}`);
-                return null;
+    if (track.remoteArtworkUrl) {
+        return track.remoteArtworkUrl;
+    }
+    if (track.hasEmbeddedArtwork) {
+        const trackId = track.originalId || track.id;
+        if (mode === 'HOST') {
+            return `/api/artwork/${trackId}`;
+        } else { // DEMO mode
+            const blob = await dbService.getArtwork(trackId);
+            if (blob) {
+                return URL.createObjectURL(blob);
             }
-            return await response.blob();
-        } catch (error) {
-            console.error(`Error fetching track blob:`, error);
-            return null;
         }
     }
-    return dbService.getTrack(track.id);
+    return null;
 };
 
-export const addTrack = async (track: Track, file: Blob, artworkBlob?: Blob, webkitRelativePath?: string) => {
+export const addTrack = async (track: Track, file: File | Blob, artworkBlob?: Blob, webkitRelativePath?: string): Promise<Track> => {
     const mode = getMode();
     if (mode === 'HOST') {
-        return apiService.uploadTrack(track, file as File, artworkBlob, webkitRelativePath);
+        if (!(file instanceof File)) {
+            throw new Error("HOST mode requires a File object for uploads.");
+        }
+        return apiService.uploadTrack(track, file, artworkBlob, webkitRelativePath);
     }
-    const newTrack = { ...track, id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}` };
-    await dbService.addTrack(newTrack.id, file as File);
+    
+    // DEMO mode
+    const fileObject = file instanceof File ? file : new File([file], track.title || 'voicetrack.webm', { type: file.type });
+
+    const trackId = `local-${Date.now()}-${fileObject.name}`;
+    await dbService.addTrack(trackId, fileObject);
+    
+    const newTrack: Track = {
+        ...track,
+        id: trackId,
+        src: '', // In DEMO mode, src is generated on-demand
+        type: track.type || TrackType.LOCAL_FILE,
+        originalFilename: fileObject.name,
+    };
+
     if (artworkBlob) {
-        await dbService.addArtwork(newTrack.id, artworkBlob);
+        await dbService.addArtwork(trackId, artworkBlob);
+        newTrack.hasEmbeddedArtwork = true;
     }
+
     return newTrack;
+};
+
+export const deleteTrack = async (track: Track): Promise<void> => {
+    const mode = getMode();
+    const trackId = track.originalId || track.id;
+    if (mode === 'HOST') {
+        await apiService.deleteTrack(track);
+    } else { // DEMO mode
+        await dbService.deleteTrack(trackId);
+        if (track.hasEmbeddedArtwork) {
+            await dbService.deleteArtwork(trackId);
+        }
+    }
 };
 
 export const getTrackSrc = async (track: Track): Promise<string | null> => {
     const mode = getMode();
     if (mode === 'HOST') {
-        return track.src || null;
-    }
-    const file = await dbService.getTrack(track.id);
-    return file ? URL.createObjectURL(file) : null;
-};
-
-export const deleteTrack = async (track: Track) => {
-    const mode = getMode();
-    if (mode === 'HOST') {
-        return apiService.deleteTrack(track);
-    }
-    await dbService.deleteTrack(track.id);
-    await dbService.deleteArtwork(track.id);
-};
-
-export const createFolder = async (folderPath: string) => {
-    const mode = getMode();
-    if (mode === 'HOST') {
-        return apiService.createFolder(folderPath);
-    }
-    return Promise.resolve();
-};
-
-// --- Artwork ---
-export const addArtwork = async (id: string, artworkBlob: Blob) => {
-    const mode = getMode();
-    if (mode === 'HOST') {
-        return; 
-    }
-    return dbService.addArtwork(id, artworkBlob);
-};
-
-export const getArtwork = (id: string) => {
-    const mode = getMode();
-    if (mode === 'HOST') {
-        return Promise.resolve(null);
-    }
-    return dbService.getArtwork(id);
-};
-
-export const getArtworkUrl = async (track: Track): Promise<string | null> => {
-    const mode = getMode();
-    const artworkId = track.originalId || track.id; // Use originalId if it's a playlist item
-
-    if (mode === 'HOST') {
-        // The server needs the original track ID to find the artwork.
-        return track.hasEmbeddedArtwork ? `/api/artwork/${artworkId}` : track.remoteArtworkUrl || null;
+        return track.src; // src is already a URL from the server
     }
     
-    // DEMO Mode
-    if (track.remoteArtworkUrl) {
-        return track.remoteArtworkUrl;
+    // DEMO mode
+    if (track.type === TrackType.URL) {
+        return track.src;
     }
-    if (track.hasEmbeddedArtwork) {
-        const blob = await dbService.getArtwork(artworkId);
-        return blob ? URL.createObjectURL(blob) : null;
+    const trackId = track.originalId || track.id;
+    const file = await dbService.getTrack(trackId);
+    if (file) {
+        return URL.createObjectURL(file);
     }
     return null;
-}
+};
 
-export const deleteArtwork = async (id: string) => {
+export const getTrackBlob = async (track: Track): Promise<File | Blob | null> => {
     const mode = getMode();
     if (mode === 'HOST') {
-        return;
+        if (!track.src) return null;
+        try {
+            const response = await fetch(track.src);
+            if (!response.ok) return null;
+            return await response.blob();
+        } catch (e) {
+            console.error('Failed to fetch track blob from server:', e);
+            return null;
+        }
     }
-    return dbService.deleteArtwork(id);
+    // DEMO mode
+    const trackId = track.originalId || track.id;
+    return dbService.getTrack(trackId);
 };
