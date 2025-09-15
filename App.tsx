@@ -1,4 +1,3 @@
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -290,13 +289,6 @@ const updateItemInTree = (node: Folder, itemId: string, updateFn: (item: Library
 
 type StreamStatus = 'inactive' | 'starting' | 'broadcasting' | 'error' | 'stopping';
 // --- App Component ---
-
-// Allow TypeScript to recognize jsmediatags from the global scope (loaded via script in index.html)
-declare global {
-  interface Window {
-    jsmediatags: any;
-  }
-}
 
 const AppInternal: React.FC = () => {
     const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
@@ -611,32 +603,13 @@ const AppInternal: React.FC = () => {
             let loggedInUser: User | null = null;
 
             if (savedUserEmail) {
-                let user: User | null = null;
-                if (savedAppMode === 'HOST') {
-                    try {
-                        const serverUsers = await dataService.getAllUsers();
-                        const serverUser = serverUsers.find(u => u.email === savedUserEmail);
-                        if (serverUser) {
-                            user = { ...serverUser }; // Create a copy
-                            if (savedPlayoutMode) {
-                                user.role = savedPlayoutMode;
-                            }
-                        }
-                    } catch (e) {
-                        console.error("Failed to verify user session with server. Forcing logout.", e);
-                        user = null;
-                    }
-                } else {
-                    user = await dataService.getUser(savedUserEmail);
-                }
-
+                const user = await dataService.getUser(savedUserEmail);
                 if (user) {
                     loggedInUser = { email: user.email, nickname: user.nickname || user.email.split('@')[0], role: user.role };
                     initialUserData = await dataService.getUserData(savedUserEmail);
                 } else {
-                    // User in session but not in DB (local or remote)? Clear session.
+                    // User in session but not in DB? Clear session.
                     await dataService.putAppState('currentUserEmail', null);
-                    sessionStorage.removeItem('playoutMode');
                 }
             }
             
@@ -1080,7 +1053,6 @@ const AppInternal: React.FC = () => {
                     analysers[bus.id]!.connect(compressor);
                     compressor.connect(eqBass);
                     eqBass.connect(eqMid);
-                    // FIX: `treble` was not defined. The correct variable name is `eqTreble`.
                     eqMid.connect(eqTreble);
                     eqTreble.connect(busGains[bus.id]!);
 
@@ -1876,86 +1848,6 @@ const AppInternal: React.FC = () => {
         }
     }, [isHostMode, sendStudioCommand]);
     
-    const handleUploadFiles = useCallback(async (files: FileList, destinationFolderId: string) => {
-        if (isHostMode) {
-            const formData = new FormData();
-            formData.append('destinationFolderId', destinationFolderId);
-            Array.from(files).forEach(file => {
-                formData.append('files', file, file.name);
-            });
-
-            try {
-                const response = await fetch('/api/upload', {
-                    method: 'POST',
-                    body: formData,
-                });
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.message || 'Upload failed');
-                }
-                console.log('Files uploaded successfully. Library will refresh.');
-            } catch (error) {
-                console.error("Upload error:", error);
-                alert(`Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-            }
-            return;
-        }
-        
-        // DEMO Mode
-        const newTracks: Track[] = [];
-        for (const file of Array.from(files)) {
-            const trackId = `local-${file.name}-${Date.now()}`;
-            const track: Track = {
-                id: trackId,
-                title: file.name.replace(/\.[^/.]+$/, ""),
-                artist: 'Unknown Artist',
-                duration: 0,
-                type: TrackType.LOCAL_FILE,
-                src: '',
-                originalFilename: file.name
-            };
-
-            try {
-                const duration = await new Promise<number>((resolve, reject) => {
-                    const audio = document.createElement('audio');
-                    audio.preload = 'metadata';
-                    audio.onloadedmetadata = () => {
-                        resolve(audio.duration);
-                        URL.revokeObjectURL(audio.src);
-                    };
-                    audio.onerror = reject;
-                    audio.src = URL.createObjectURL(file);
-                });
-                track.duration = duration;
-
-                if (window.jsmediatags) {
-                    await new Promise<void>((resolve) => {
-                        window.jsmediatags.read(file, {
-                            onSuccess: (tag: any) => {
-                                if (tag.tags.title) track.title = tag.tags.title;
-                                if (tag.tags.artist) track.artist = tag.tags.artist;
-                                resolve();
-                            },
-                            onError: (error: any) => {
-                                console.warn('Could not read ID3 tags for', file.name, error);
-                                resolve();
-                            }
-                        });
-                    });
-                }
-                
-                await dataService.addTrack(track, file);
-                newTracks.push(track);
-            } catch (error) {
-                console.error("Error processing file:", file.name, error);
-            }
-        }
-        if (newTracks.length > 0) {
-            setMediaLibrary(prev => addMultipleItemsToTree(prev, destinationFolderId, newTracks));
-        }
-    }, [isHostMode]);
-
-
     const handleRemoveFromLibrary = useCallback(async (id: string) => {
         if (isHostMode) {
             sendStudioCommand('removeFromLibrary', { id });
@@ -2520,9 +2412,7 @@ const AppInternal: React.FC = () => {
     }, [isStudio, sendStudioCommand, isHostMode]);
 
     const handleVoiceTrackCreate = useCallback(async (voiceTrack: Track, blob: Blob): Promise<Track> => {
-        // FIX: Convert Blob to File. The data service expects a File object to store in IndexedDB.
-        const file = new File([blob], `${voiceTrack.title.replace(/[\/\\?%*:|"<>]/g, '-')}.webm`, { type: 'audio/webm' });
-        const savedTrack = await dataService.addTrack(voiceTrack, file);
+        const savedTrack = await dataService.addTrack(voiceTrack, blob);
         if (isHostMode) {
             // In the new filesystem model, adding a VT is just a file upload.
             // The watcher will handle the library update. We don't need a special command.
@@ -2534,12 +2424,8 @@ const AppInternal: React.FC = () => {
 
     // --- NEW: WebSocket Logic for HOST mode ---
     useEffect(() => {
-        if (!isHostMode || !currentUser || !currentUser.email) {
+        if (!isHostMode || !currentUser) {
             setWsStatus('disconnected');
-            if (wsRef.current) {
-                wsRef.current.close();
-                wsRef.current = null;
-            }
             return;
         }
 
@@ -2984,7 +2870,6 @@ const AppInternal: React.FC = () => {
                             rootFolder={mediaLibrary}
                             onAddToPlaylist={(track) => handleInsertTrackInPlaylist(track, null)}
                             onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
-                            onUploadFiles={handleUploadFiles}
                             onRemoveFromLibrary={handleRemoveFromLibrary}
                             onCreateFolder={handleCreateFolder}
                             onMoveItem={handleMoveItemInLibrary}
@@ -3022,9 +2907,6 @@ const AppInternal: React.FC = () => {
                             timeline={timeline}
                             onInsertTimeMarker={handleInsertTimeMarker}
                             onUpdateTimeMarker={handleUpdateTimeMarker}
-                            // FIX: The onInsertVoiceTrack prop was being passed an incorrect lambda.
-                            // The signature of the lambda did not match the expected prop type in PlaylistProps.
-                            // Changed to pass `handleInsertVoiceTrack` directly, which has the correct signature.
                             onInsertVoiceTrack={handleInsertVoiceTrack}
                             policy={playoutPolicy}
                             isContributor={playoutPolicy.playoutMode === 'presenter'}

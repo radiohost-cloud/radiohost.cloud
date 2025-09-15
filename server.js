@@ -1,629 +1,1432 @@
+// A simple example backend for RadioHost.cloud's HOST mode.
+// This server handles user authentication, data storage, and media file uploads.
+// To run: `npm install express cors multer lowdb ws` then `node server.js`
+
 import express from 'express';
-import http from 'http';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import fs from 'fs/promises';
-import fsc from 'fs';
 import cors from 'cors';
 import multer from 'multer';
-import { WebSocketServer } from 'ws';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
-import * as mm from 'music-metadata';
-import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
+import { promises as fsPromises } from 'fs';
+import http from 'http';
+import { WebSocketServer } from 'ws';
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PORT = process.env.PORT || 3000;
 
 const app = express();
 const server = http.createServer(app);
+const wss = new WebSocketServer({ noServer: true });
 
-// --- Database Setup ---
-const dbPath = path.join(__dirname, 'db.json');
-const adapter = new JSONFile(dbPath);
+const PORT = process.env.PORT || 3000;
+
+// --- Database Setup (using lowdb for simplicity) ---
+const file = path.join(__dirname, 'db.json');
+const adapter = new JSONFile(file);
+// `sharedMediaLibrary` is no longer stored in the DB. The filesystem is the source of truth.
 const defaultData = {
-  users: [],
-  mediaLibrary: { id: 'root', name: 'Media Library', type: 'folder', children: [] },
-  playlist: [],
-  broadcasts: [],
-  cartwallPages: [],
-  playerState: {
-    isPlaying: false,
-    currentTrackIndex: 0,
-    currentPlayingItemId: null,
-    trackProgress: 0,
-    stopAfterTrackId: null,
-  },
-  settings: {},
+    users: [],
+    userdata: {},
+    // sharedMediaLibrary is now generated on the fly from the filesystem
+    sharedPlaylist: [],
+    sharedPlayerState: {
+        currentPlayingItemId: null,
+        currentTrackIndex: 0,
+        isPlaying: false,
+        trackProgress: 0,
+        stopAfterTrackId: null,
+    },
 };
 const db = new Low(adapter, defaultData);
 await db.read();
-db.data ||= defaultData;
-await db.write();
 
-// --- Directory Setup ---
-const MEDIA_DIR = path.join(__dirname, 'Media');
-const ARTWORK_DIR = path.join(__dirname, 'Artwork');
-const DIST_DIR = path.join(__dirname, 'dist');
 
-const ensureDirExists = async (dir) => {
-  try {
-    await fs.access(dir);
-  } catch (error) {
-    await fs.mkdir(dir, { recursive: true });
-  }
+// --- Media File Storage Setup ---
+const mediaDir = path.join(__dirname, 'Media');
+if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
+const artworkDir = path.join(__dirname, 'Artwork');
+if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir, { recursive: true });
+
+
+// --- NEW: Filesystem-based Media Library Logic ---
+
+// Scans the /Media directory and builds a JSON tree representing the library.
+const scanMediaToTree = async (dirPath, relativePath = '') => {
+    const fullPath = path.join(mediaDir, relativePath);
+    const children = [];
+    try {
+        const entries = await fsPromises.readdir(fullPath, { withFileTypes: true });
+
+        for (const entry of entries) {
+            const entryRelativePath = path.join(relativePath, entry.name).replace(/\\/g, '/');
+            if (entry.isDirectory()) {
+                children.push({
+                    id: entryRelativePath,
+                    name: entry.name,
+                    type: 'folder',
+                    children: await scanMediaToTree(entry.name, entryRelativePath),
+                });
+            } else if (/\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(entry.name)) {
+                // In a production app, you'd read metadata here (duration, etc.)
+                // For simplicity, we parse from filename.
+                const title = entry.name.replace(/\.[^/.]+$/, "");
+                const artist = 'Unknown';
+                children.push({
+                    id: entryRelativePath,
+                    title,
+                    artist,
+                    duration: 180, // Placeholder duration
+                    type: 'Song',
+                    src: `/media/${entryRelativePath}`,
+                    originalFilename: entry.name,
+                });
+            }
+        }
+    } catch (error) {
+        console.error(`Error scanning directory ${fullPath}:`, error);
+    }
+    return children;
 };
 
-await ensureDirExists(MEDIA_DIR);
-await ensureDirExists(ARTWORK_DIR);
+let libraryState = { id: 'root', name: 'Media Library', type: 'folder', children: [] };
+let watchTimeout = null;
 
-// --- Express Middleware ---
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use('/media', express.static(MEDIA_DIR));
-app.use('/artwork', express.static(ARTWORK_DIR));
-
-// --- Multer Setup for File Uploads ---
-const storage = multer.diskStorage({
-    destination: async function (req, file, cb) {
-        const { destinationFolderId } = req.body;
-        let relativePath = '';
-        if (destinationFolderId && destinationFolderId !== 'root') {
-            // Sanitize by removing the 'folder-' prefix and ensuring no traversal
-            relativePath = destinationFolderId.replace(/^folder-/, '');
+// Re-scans the entire library and broadcasts the new state to all clients.
+// Debounced to prevent rapid firing during large file operations.
+const refreshAndBroadcastLibrary = () => {
+    clearTimeout(watchTimeout);
+    watchTimeout = setTimeout(async () => {
+        console.log('[File Watcher] Change detected. Re-scanning media library...');
+        try {
+            const newChildren = await scanMediaToTree(mediaDir);
+            libraryState.children = newChildren;
+            
+            const message = JSON.stringify({ type: 'library-update', payload: libraryState });
+            clients.forEach((ws, email) => {
+                if (ws.readyState === ws.OPEN) {
+                    ws.send(message);
+                }
+            });
+            console.log('[File Watcher] Library update broadcasted to all clients.');
+        } catch (error) {
+            console.error('[File Watcher] Failed to refresh and broadcast library:', error);
         }
+    }, 500); // 500ms debounce window
+};
 
-        const finalPath = path.resolve(path.join(MEDIA_DIR, relativePath));
+// Initialize and start the file watcher.
+fs.watch(mediaDir, { recursive: true }, (eventType, filename) => {
+    if (filename) {
+        console.log(`[File Watcher] Event '${eventType}' on: ${filename}`);
+        refreshAndBroadcastLibrary();
+    }
+});
 
-        // Security check to prevent directory traversal
-        if (!finalPath.startsWith(path.resolve(MEDIA_DIR))) {
-            return cb(new Error('Invalid path specified for upload.'), '');
+
+// --- Helper to get station settings ---
+const getStationSettings = async () => {
+    await db.read();
+    // Find the first user with 'studio' role, they are considered the admin
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    const userData = studioUser ? db.data.userdata[studioUser.email] : null;
+    const settings = userData?.settings;
+
+    return {
+        stationName: settings?.playoutPolicy?.streamingConfig?.stationName || 'RadioHost.cloud Stream',
+        description: settings?.playoutPolicy?.streamingConfig?.stationDescription || 'Live internet radio stream.',
+        logoSrc: settings?.logoSrc || null,
+    };
+};
+
+
+// --- WebSocket Connection Management ---
+const clients = new Map(); // email -> ws
+let studioClientEmail = null;
+const presenterEmails = new Set();
+let currentLogoSrc = null;
+
+const browserPlayerClients = new Set();
+const directStreamListeners = new Set();
+let streamHeader = null;
+
+let currentMimeType = 'audio/webm; codecs=opus';
+let currentMetadata = {
+    title: "Silence",
+    artist: "RadioHost.cloud",
+    artworkUrl: null,
+    nextTrackTitle: null
+};
+const MSG_TYPE_PUBLIC_STREAM_CHUNK = 1;
+
+
+const broadcastState = () => {
+  const statePayload = {
+    playlist: db.data.sharedPlaylist,
+    playerState: db.data.sharedPlayerState,
+    broadcasts: db.data.userdata[studioClientEmail]?.broadcasts || [],
+  };
+  const message = JSON.stringify({ type: 'state-update', payload: statePayload });
+  clients.forEach((ws, email) => {
+    const user = db.data.users.find(u => u.email === email);
+    if (user && ws.readyState === ws.OPEN) {
+      ws.send(message);
+    }
+  });
+};
+
+const broadcastPresenterList = async () => {
+    if (!studioClientEmail) return;
+    const studioWs = clients.get(studioClientEmail);
+    if (!studioWs || studioWs.readyState !== WebSocket.OPEN) return;
+
+    await db.read(); // Ensure we have the latest user data
+    const presenters = db.data.users
+        .filter(u => presenterEmails.has(u.email))
+        .map(({ password, ...user }) => user);
+
+    studioWs.send(JSON.stringify({
+        type: 'presenters-update',
+        payload: { presenters }
+    }));
+    console.log(`[WebSocket] Sent updated presenter list to studio. Count: ${presenters.length}`);
+};
+
+// --- LOGIC HELPERS (ported from App.tsx) ---
+
+const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
+    const len = playlist.length;
+    if (len === 0) return -1;
+    let nextIndex = startIndex;
+    for (let i = 0; i < len; i++) {
+        nextIndex = (nextIndex + direction + len) % len;
+        const item = playlist[nextIndex];
+        // Note: Server-side logic for skipping based on timeline is complex and will be handled later.
+        // For now, it just finds the next item that isn't a marker.
+        if (item && !item.markerType) {
+            return nextIndex;
+        }
+    }
+    return -1;
+};
+
+// --- Autonomous Playback Engine ---
+let playbackInterval = null;
+const PLAYBACK_INTERVAL_MS = 1000;
+
+const advanceTrack = async (fromCommand = false) => {
+    console.log(`[Playback] Advancing track. Called from command: ${fromCommand}`);
+    const { sharedPlaylist: playlist, sharedPlayerState: playerState } = db.data;
+    
+    if (playlist.length === 0) {
+        playerState.isPlaying = false;
+        return;
+    }
+
+    const endedItem = playlist[playerState.currentTrackIndex];
+
+    if (endedItem && !endedItem.markerType) {
+        // Add to history only if a track actually ended (not a manual skip)
+        if (!fromCommand) {
+            const studioUser = db.data.users.find(u => u.role === 'studio');
+            if (studioUser && db.data.userdata[studioUser.email]) {
+                if (!db.data.userdata[studioUser.email].playoutHistory) {
+                    db.data.userdata[studioUser.email].playoutHistory = [];
+                }
+                db.data.userdata[studioUser.email].playoutHistory.push({
+                    trackId: endedItem.originalId || endedItem.id,
+                    title: endedItem.title,
+                    artist: endedItem.artist,
+                    playedAt: Date.now()
+                });
+                db.data.userdata[studioUser.email].playoutHistory = db.data.userdata[studioUser.email].playoutHistory.slice(-100);
+            }
         }
         
-        try {
-            await fs.mkdir(finalPath, { recursive: true });
-            cb(null, finalPath);
-        } catch (error) {
-            cb(error, '');
+        // Check for stopAfterTrackId
+        if (playerState.stopAfterTrackId && playerState.stopAfterTrackId === endedItem.id) {
+            playerState.isPlaying = false;
+            playerState.stopAfterTrackId = null;
+            console.log(`[Playback] stopAfterTrackId reached. Stopping playback.`);
+            return;
         }
-    },
-    filename: function (req, file, cb) {
-        // Use original filename, multer sanitizes it to some extent
-        cb(null, file.originalname);
     }
-});
-const upload = multer({ storage: storage });
 
-
-// --- Media Library Scanner ---
-let isScanning = false;
-let rescanQueued = false;
-const SUPPORTED_EXTENSIONS = ['.mp3', '.m4a', '.aac', '.ogg', '.wav', '.flac', '.opus'];
-
-const scanMediaLibrary = async () => {
-  if (isScanning) {
-    rescanQueued = true;
-    return;
-  }
-  isScanning = true;
-  console.log('[Scanner] Starting media library scan...');
-
-  const scanDir = async (dirPath, relativePath) => {
-    const entries = await fs.readdir(dirPath, { withFileTypes: true });
-    const children = [];
-    for (const entry of entries) {
-      const fullPath = path.join(dirPath, entry.name);
-      const relPath = path.join(relativePath, entry.name);
-      if (entry.isDirectory()) {
-        children.push({
-          id: `folder-${relPath.replace(/\\/g, '/')}`,
-          name: entry.name,
-          type: 'folder',
-          children: await scanDir(fullPath, relPath),
-        });
-      } else if (SUPPORTED_EXTENSIONS.includes(path.extname(entry.name).toLowerCase())) {
-        try {
-          const metadata = await mm.parseFile(fullPath);
-          const trackId = `track-${relPath.replace(/\\/g, '/')}`;
-          const track = {
-            id: trackId,
-            title: metadata.common.title || path.basename(entry.name, path.extname(entry.name)),
-            artist: metadata.common.artist || 'Unknown Artist',
-            duration: metadata.format.duration || 0,
-            type: 'Song', // Default type
-            src: `/media${relPath.replace(/\\/g, '/')}`,
-            originalFilename: entry.name,
-          };
-          if (metadata.common.picture && metadata.common.picture.length > 0) {
-            const artworkPath = path.join(ARTWORK_DIR, `${trackId}.jpg`);
-            await fs.writeFile(artworkPath, metadata.common.picture[0].data);
-            track.remoteArtworkUrl = `/artwork/${trackId}.jpg`;
-          }
-          children.push(track);
-        } catch (error) {
-          console.error(`[Scanner] Error parsing metadata for ${fullPath}:`, error.message);
-        }
-      }
+    const nextIndex = findNextPlayableIndex(playlist, playerState.currentTrackIndex, 1);
+    if (nextIndex !== -1) {
+        playerState.currentTrackIndex = nextIndex;
+        playerState.trackProgress = 0;
+        const nextItem = playlist[nextIndex];
+        playerState.currentPlayingItemId = nextItem.id;
+        console.log(`[Playback] Next track is index ${nextIndex}: "${nextItem.title}"`);
+    } else {
+        playerState.isPlaying = false;
+        console.log('[Playback] End of playlist reached. Stopping playback.');
     }
-    return children.sort((a, b) => a.name.localeCompare(b.name));
-  };
-
-  try {
-    const newLibrary = {
-      id: 'root',
-      name: 'Media Library',
-      type: 'folder',
-      children: await scanDir(MEDIA_DIR, ''),
-    };
-    db.data.mediaLibrary = newLibrary;
-    await db.write();
-    console.log('[Scanner] Media library scan finished.');
-    broadcastMessage({ type: 'library-update', payload: newLibrary });
-  } catch (error) {
-    console.error('[Scanner] A fatal error occurred during scanning:', error);
-  } finally {
-    isScanning = false;
-    if (rescanQueued) {
-      rescanQueued = false;
-      setTimeout(scanMediaLibrary, 1000); // Wait a second before starting the next scan
-    }
-  }
 };
 
-// Debounce file system watcher
-let watchTimeout;
-fsc.watch(MEDIA_DIR, { recursive: true }, (eventType, filename) => {
-    if (!filename || isScanning) return;
-    console.log(`[Watcher] Detected ${eventType} in ${filename}`);
-    clearTimeout(watchTimeout);
-    watchTimeout = setTimeout(() => {
-        scanMediaLibrary();
-    }, 5000); // Wait 5 seconds after the last change to start scanning
-});
-
-// --- API Endpoints ---
-app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body;
-  const user = db.data.users.find(u => u.email === email && u.password === password);
-  if (user) {
-    const { password: _, ...userWithoutPassword } = user;
-    res.json(userWithoutPassword);
-  } else {
-    res.status(401).json({ message: 'Invalid credentials' });
-  }
-});
-
-app.post('/api/signup', async (req, res) => {
-    const { email, password, nickname } = req.body;
-    const existingUser = db.data.users.find(u => u.email === email);
-    if (existingUser) {
-        return res.status(409).json({ message: 'User with this email already exists.' });
+const playbackLoop = async () => {
+    await db.read();
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    if (!studioUser || !db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
+        return stopPlaybackLoop();
     }
-    const isFirstUser = db.data.users.length === 0;
-    const newUser = {
-        email,
-        password,
-        nickname,
-        role: isFirstUser ? 'studio' : 'presenter'
-    };
-    db.data.users.push(newUser);
-    await db.write();
-    const { password: _, ...userWithoutPassword } = newUser;
-    res.status(201).json(userWithoutPassword);
-});
 
-app.get('/api/users', (req, res) => {
-    const users = db.data.users.map(({ password, ...rest }) => rest);
-    res.json(users);
-});
+    const { sharedPlayerState: playerState, sharedPlaylist: playlist } = db.data;
+    if (!playerState.isPlaying) return;
 
-app.put('/api/users/:email/role', async (req, res) => {
-    const { email } = req.params;
-    const { role } = req.body;
-    const user = db.data.users.find(u => u.email === email);
-    if (!user) {
-        return res.status(404).json({ message: 'User not found' });
+    const currentTrack = playlist[playerState.currentTrackIndex];
+    if (!currentTrack || currentTrack.markerType) {
+        console.log('[Playback Loop] Current item is not playable, advancing.');
+        await advanceTrack();
+    } else {
+        playerState.trackProgress += 1; // Increment by 1 second
+        if (playerState.trackProgress >= currentTrack.duration) {
+            console.log(`[Playback Loop] Track "${currentTrack.title}" finished. Advancing.`);
+            await advanceTrack();
+        }
     }
-    if (role !== 'studio' && role !== 'presenter') {
-        return res.status(400).json({ message: 'Invalid role' });
-    }
-    user.role = role;
-    await db.write();
-    const { password, ...userWithoutPassword } = user;
-    res.json(userWithoutPassword);
-});
-
-// New endpoint for handling file uploads
-app.post('/api/upload', upload.array('files'), (req, res) => {
-    // By the time we get here, multer has already saved the files.
-    // The filesystem watcher will automatically trigger a library rescan.
-    res.status(200).json({ message: 'Files uploaded successfully. Library will refresh shortly.' });
-});
-
-
-// --- Public Stream ---
-const streamClients = new Set();
-const listenerInfo = new Map();
-let streamMimeType = 'audio/webm; codecs=opus';
-let streamMetadata = { title: 'Silence', artist: 'RadioHost.cloud', artworkUrl: null, nextTrackTitle: null };
-
-app.get('/api/stream-metadata', (req, res) => {
-    res.json(streamMetadata);
-});
-
-app.get('/stream/live', (req, res) => {
-    res.setHeader('Content-Type', streamMimeType);
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders();
-
-    streamClients.add(res);
     
-    // Rudimentary geo-ip, requires trust proxy if behind one
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    listenerInfo.set(res, { ip, country: 'N/A', city: 'N/A' });
-
-    req.on('close', () => {
-        streamClients.delete(res);
-        listenerInfo.delete(res);
-    });
-});
-
-app.get('/api/stream-listeners', (req, res) => {
-    res.json(Array.from(listenerInfo.values()));
-});
-
-
-// --- WebSocket Server ---
-const wss = new WebSocketServer({ server });
-const clients = new Map(); // Map<email, { ws: WebSocket, role: string, onAir: boolean }>
-
-const broadcastMessage = (message, senderEmail = null) => {
-  const stringifiedMessage = JSON.stringify(message);
-  for (const [email, client] of clients.entries()) {
-    if (client.ws.readyState === 1 && email !== senderEmail) {
-      client.ws.send(stringifiedMessage);
-    }
-  }
+    await db.write();
+    broadcastState();
 };
 
-const broadcastToStudio = (message) => {
-    const stringifiedMessage = JSON.stringify(message);
-    for (const client of clients.values()) {
-        if (client.role === 'studio' && client.ws.readyState === 1) {
-            client.ws.send(stringifiedMessage);
-        }
-    }
+const startPlaybackLoop = () => {
+    if (playbackInterval) return;
+    console.log('[Playback] Starting autonomous playback loop.');
+    playbackInterval = setInterval(playbackLoop, PLAYBACK_INTERVAL_MS);
 };
 
-const sendFullStateToClient = (ws) => {
-    const fullState = {
-        type: 'state-update',
-        payload: {
-            playlist: db.data.playlist,
-            playerState: db.data.playerState,
-            broadcasts: db.data.broadcasts
-        }
-    };
-    const libraryState = { type: 'library-update', payload: db.data.mediaLibrary };
-    ws.send(JSON.stringify(fullState));
-    ws.send(JSON.stringify(libraryState));
+const stopPlaybackLoop = () => {
+    if (!playbackInterval) return;
+    console.log('[Playback] Stopping autonomous playback loop.');
+    clearInterval(playbackInterval);
+    playbackInterval = null;
 };
 
-const getOnlinePresenters = () => {
-    return Array.from(clients.values())
-        .map(c => db.data.users.find(u => u.email === c.email))
-        .filter(Boolean)
-        .map(({ password, ...user }) => user);
-};
-
-// --- Library Tree Helpers ---
-const findAndRemoveItemInTree = (node, itemId) => {
-    if (!node.children) return null;
-    let foundItem = null;
-    node.children = node.children.filter(child => {
-        if (child.id === itemId) {
-            foundItem = child;
-            return false;
-        }
-        return true;
-    });
-
-    if (foundItem) return foundItem;
-
-    for (const child of node.children) {
-        if (child.type === 'folder') {
-            foundItem = findAndRemoveItemInTree(child, itemId);
-            if (foundItem) return foundItem;
-        }
-    }
-    return null;
-};
-
-const findAndUpdateItemInTree = (node, itemId, updateFn) => {
-    if (node.id === itemId) {
-        Object.assign(node, updateFn(node));
-        return true;
-    }
-    if (node.children) {
-        for (const child of node.children) {
-            if (findAndUpdateItemInTree(child, itemId, updateFn)) {
-                return true;
-            }
-        }
-    }
-    return false;
-};
-
-const findAndAdd = (node, parentId, item) => {
-    if (node.id === parentId && node.type === 'folder') {
-        if (!node.children) node.children = [];
-        node.children.push(item);
-        return true;
-    }
-    if (node.children) {
-        for (const child of node.children) {
-            if (child.type === 'folder' && findAndAdd(child, parentId, item)) {
-                return true;
-            }
-        }
-    }
-    return false;
-};
-
+// --- Main WebSocket Logic ---
 
 wss.on('connection', async (ws, req) => {
-    const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
-    const email = parsedUrl.searchParams.get('email');
-    const user = db.data.users.find(u => u.email === email);
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const email = url.searchParams.get('email');
+    const clientType = url.searchParams.get('clientType');
 
-    if (!user) {
-        console.log(`[WebSocket] Connection rejected: unknown user for email '${email}'.`);
+    if (clientType === 'playerPage') {
+        console.log('[WebSocket] Browser Player Page connected.');
+        ws.req = req; // Store request for IP lookup
+        browserPlayerClients.add(ws);
+        
+        if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ type: 'streamConfig', payload: { mimeType: currentMimeType } }));
+            ws.send(JSON.stringify({ type: 'metadataUpdate', payload: { ...currentMetadata, logoSrc: currentLogoSrc } }));
+        }
+        
+        ws.on('message', (message) => {
+            try {
+                const data = JSON.parse(message.toString());
+                if (data.type === 'chatMessage') {
+                    console.log(`[WebSocket] Chat from listener '${data.payload.from}': ${data.payload.text}`);
+                    const listenerMessage = {
+                        from: data.payload.from.substring(0, 20), // Sanitize nickname
+                        text: data.payload.text.substring(0, 280), // Sanitize text
+                        timestamp: Date.now()
+                    };
+
+                    // Broadcast to studio
+                    if (studioClientEmail) {
+                        const studioWs = clients.get(studioClientEmail);
+                        if (studioWs && studioWs.readyState === WebSocket.OPEN) {
+                            studioWs.send(JSON.stringify({ type: 'chatMessage', payload: listenerMessage }));
+                        }
+                    }
+
+                    // Broadcast to all player clients (including sender)
+                    browserPlayerClients.forEach(clientWs => {
+                        if (clientWs.readyState === WebSocket.OPEN) {
+                            clientWs.send(JSON.stringify({ type: 'chatMessage', payload: listenerMessage }));
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error('Error processing message from player page client:', e);
+            }
+        });
+
+        ws.on('close', () => {
+            console.log('[WebSocket] Browser Player Page disconnected.');
+            browserPlayerClients.delete(ws);
+        });
+        return;
+    }
+
+    if (!email) {
+        console.log('[WebSocket] Connection attempt without email rejected.');
         ws.close();
         return;
     }
-    
-    console.log(`[WebSocket] Client connected: ${email} (${user.role})`);
-    clients.set(email, { ws, role: user.role, email, onAir: false });
-    
-    sendFullStateToClient(ws);
-    broadcastMessage({ type: 'presenters-update', payload: { presenters: getOnlinePresenters() } });
+
+    await db.read();
+    const user = db.data.users.find(u => u.email === email);
+    if (!user) {
+        console.log(`[WebSocket] Connection from unknown user ${email} rejected.`);
+        ws.close();
+        return;
+    }
+
+    console.log(`[WebSocket] Client connected: ${email} (Role: ${user.role})`);
+    clients.set(email, ws);
+
+    if (user.role === 'studio') {
+        studioClientEmail = email;
+    } else if (user.role === 'presenter') {
+        presenterEmails.add(email);
+    }
+
+    broadcastPresenterList();
+
+    if (ws.readyState === ws.OPEN) {
+        // Send the current library state on connection
+        ws.send(JSON.stringify({ type: 'library-update', payload: libraryState }));
+        ws.send(JSON.stringify({
+            type: 'state-update',
+            payload: {
+                playlist: db.data.sharedPlaylist,
+                playerState: db.data.sharedPlayerState,
+            }
+        }));
+    }
 
     ws.on('message', async (message) => {
-        if (message instanceof Buffer && message.length > 1) {
-             const messageType = message.readUInt8(0);
-             if (messageType === 1) { // Public Stream Chunk
-                const audioChunk = message.slice(1);
-                for (const client of streamClients) {
-                    client.write(audioChunk);
-                }
-             }
-             return;
-        }
-
         try {
-            const data = JSON.parse(message);
-            switch(data.type) {
+             if (message instanceof Buffer && message.length > 1) {
+                const messageType = message.readUInt8(0);
+                if (messageType === MSG_TYPE_PUBLIC_STREAM_CHUNK && studioClientEmail && studioClientEmail === email) {
+                    const audioData = message.slice(1);
+                    if (!streamHeader) {
+                        streamHeader = audioData;
+                        console.log(`[Audio Stream] Header received (${streamHeader.length} bytes).`);
+                    }
+                    directStreamListeners.forEach(res => res.write(audioData));
+                    return;
+                }
+            }
+
+            const data = JSON.parse(message.toString());
+            
+            if (data.type !== 'ping') {
+                console.log(`[WebSocket] Received JSON message from ${email}:`, data.type);
+            }
+
+            switch (data.type) {
                 case 'ping':
                     ws.send(JSON.stringify({ type: 'pong' }));
                     break;
-                case 'studio-command': {
-                    if (clients.get(email)?.role !== 'studio') return;
-                    
-                    const { command, payload } = data.payload;
-                    let stateChanged = false;
-                    let libraryChanged = false;
-
-                    switch (command) {
-                        case 'togglePlay': db.data.playerState.isPlaying = !db.data.playerState.isPlaying; stateChanged = true; break;
-                        case 'next': db.data.playerState.currentTrackIndex = (db.data.playerState.currentTrackIndex + 1) % db.data.playlist.length; db.data.playerState.trackProgress = 0; stateChanged = true; break;
-                        case 'previous': db.data.playerState.currentTrackIndex = (db.data.playerState.currentTrackIndex - 1 + db.data.playlist.length) % db.data.playlist.length; db.data.playerState.trackProgress = 0; stateChanged = true; break;
-                        case 'playTrack': {
-                            const index = db.data.playlist.findIndex(t => t.id === payload.itemId);
-                            if (index > -1) {
-                                db.data.playerState.currentTrackIndex = index;
-                                db.data.playerState.currentPlayingItemId = payload.itemId;
-                                db.data.playerState.trackProgress = 0;
-                                db.data.playerState.isPlaying = true;
+                
+                case 'studio-command':
+                    if (studioClientEmail && studioClientEmail === email) {
+                        const { command, payload } = data.payload;
+                        console.log(`[WebSocket] Processing studio command: ${command}`);
+                
+                        await db.read(); // Read latest state
+                
+                        let stateChanged = false;
+                        const { sharedPlaylist, sharedPlayerState } = db.data;
+                
+                        switch (command) {
+                            // --- Filesystem modifying commands ---
+                            case 'removeFromLibrary': {
+                                const { id } = payload; // id is the relative path
+                                if (!id) break;
+                                const fullPath = path.join(mediaDir, id);
+                                try {
+                                    const stats = await fsPromises.stat(fullPath);
+                                    if (stats.isDirectory()) {
+                                        await fsPromises.rm(fullPath, { recursive: true, force: true });
+                                        console.log(`[FS] Deleted folder: ${fullPath}`);
+                                    } else {
+                                        await fsPromises.unlink(fullPath);
+                                        console.log(`[FS] Deleted file: ${fullPath}`);
+                                    }
+                                    // Watcher will trigger broadcast
+                                } catch (e) {
+                                    console.error(`[FS] Failed to delete item at ${fullPath}:`, e);
+                                }
+                                break;
+                            }
+                            case 'createFolder': {
+                                const { parentId, folderName } = payload;
+                                if (!folderName) break;
+                                const fullPath = path.join(mediaDir, parentId, folderName);
+                                try {
+                                    if (!fs.existsSync(fullPath)) {
+                                        await fsPromises.mkdir(fullPath, { recursive: true });
+                                        console.log(`[FS] Created folder: ${fullPath}`);
+                                    }
+                                    // Watcher will trigger broadcast
+                                } catch (e) {
+                                    console.error(`[FS] Failed to create folder at ${fullPath}:`, e);
+                                }
+                                break;
+                            }
+                             case 'moveItemInLibrary': {
+                                const { itemId, destinationFolderId } = payload;
+                                if (!itemId || !destinationFolderId) break;
+                                const sourcePath = path.join(mediaDir, itemId);
+                                const destPath = path.join(mediaDir, destinationFolderId, path.basename(itemId));
+                                try {
+                                    await fsPromises.rename(sourcePath, destPath);
+                                    console.log(`[FS] Moved item from ${sourcePath} to ${destPath}`);
+                                    // Watcher will trigger broadcast
+                                } catch (e) {
+                                    console.error(`[FS] Failed to move item:`, e);
+                                }
+                                break;
+                            }
+                            // --- Non-filesystem commands ---
+                            case 'next': {
+                                await advanceTrack(true);
                                 stateChanged = true;
+                                break;
                             }
-                            break;
-                        }
-                        case 'setStopAfterTrackId': db.data.playerState.stopAfterTrackId = payload.id; stateChanged = true; break;
-                        case 'clearPlaylist': db.data.playlist = []; db.data.playerState = defaultData.playerState; stateChanged = true; break;
-                        case 'setPlaylist': db.data.playlist = payload.playlist; stateChanged = true; break;
-                        case 'insertTrack': {
-                            const { track, beforeItemId } = payload;
-                            const insertIndex = beforeItemId ? db.data.playlist.findIndex(item => item.id === beforeItemId) : db.data.playlist.length;
-                            db.data.playlist.splice(insertIndex > -1 ? insertIndex : db.data.playlist.length, 0, track);
-                            stateChanged = true;
-                            break;
-                        }
-                        case 'removeFromPlaylist': {
-                            db.data.playlist = db.data.playlist.filter(item => item.id !== payload.itemId);
-                            stateChanged = true;
-                            break;
-                        }
-                        case 'reorderPlaylist': {
-                            const { draggedId, dropTargetId } = payload;
-                            const dragIndex = db.data.playlist.findIndex(item => item.id === draggedId);
-                            if (dragIndex === -1) break;
-                            const [draggedItem] = db.data.playlist.splice(dragIndex, 1);
-                            const dropIndex = dropTargetId ? db.data.playlist.findIndex(item => item.id === dropTargetId) : db.data.playlist.length;
-                            db.data.playlist.splice(dropIndex > -1 ? dropIndex : db.data.playlist.length, 0, draggedItem);
-                            stateChanged = true;
-                            break;
-                        }
-                        case 'saveBroadcast': {
-                            const index = db.data.broadcasts.findIndex(b => b.id === payload.broadcast.id);
-                            if (index > -1) db.data.broadcasts[index] = payload.broadcast;
-                            else db.data.broadcasts.push(payload.broadcast);
-                            stateChanged = true;
-                            break;
-                        }
-                        case 'deleteBroadcast': {
-                             db.data.broadcasts = db.data.broadcasts.filter(b => b.id !== payload.broadcastId);
-                             stateChanged = true;
-                             break;
-                        }
-                        case 'loadBroadcast': {
-                            const broadcast = db.data.broadcasts.find(b => b.id === payload.broadcastId);
-                            if (broadcast) {
-                                db.data.playlist = broadcast.playlist;
-                                db.data.playerState = defaultData.playerState;
+                             case 'crossfadeNext':
+                             case 'jumpToTrack': {
+                                const newIndex = command === 'jumpToTrack' ? payload.index : findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, 1);
+                                if (newIndex !== -1) {
+                                    const nextItem = sharedPlaylist[newIndex];
+                                    sharedPlayerState.currentTrackIndex = newIndex;
+                                    sharedPlayerState.currentPlayingItemId = nextItem.id;
+                                } else {
+                                    sharedPlayerState.isPlaying = false;
+                                }
                                 stateChanged = true;
+                                break;
                             }
-                            break;
-                        }
-                         // Library Commands
-                        case 'addUrlTrackToLibrary': {
-                            if (findAndAdd(db.data.mediaLibrary, payload.destinationFolderId, payload.track)) {
-                                libraryChanged = true;
+                            case 'previous': {
+                                const prevIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, -1);
+                                if (prevIndex !== -1) {
+                                    sharedPlayerState.currentTrackIndex = prevIndex;
+                                    sharedPlayerState.trackProgress = 0;
+                                    const prevItem = sharedPlaylist[prevIndex];
+                                    sharedPlayerState.currentPlayingItemId = prevItem.id;
+                                }
+                                stateChanged = true;
+                                break;
                             }
-                            break;
-                        }
-                        case 'createFolder': {
-                            const newFolder = { id: `folder-${uuidv4()}`, name: payload.folderName, type: 'folder', children: [] };
-                            if (findAndAdd(db.data.mediaLibrary, payload.parentId, newFolder)) {
-                                libraryChanged = true;
+                            case 'togglePlay': {
+                                if (sharedPlaylist.length > 0) {
+                                    sharedPlayerState.isPlaying = !sharedPlayerState.isPlaying;
+                                    if (sharedPlayerState.isPlaying) {
+                                        const currentItem = sharedPlaylist[sharedPlayerState.currentTrackIndex];
+                                        if (currentItem && !currentItem.markerType) {
+                                            sharedPlayerState.currentPlayingItemId = currentItem.id;
+                                        }
+                                    }
+                                }
+                                stateChanged = true;
+                                break;
                             }
-                            break;
-                        }
-                        case 'removeFromLibrary': {
-                            const item = findAndRemoveItemInTree(db.data.mediaLibrary, payload.id);
-                            if (item) libraryChanged = true;
-                            // Note: This doesn't delete the physical file, scan will re-add it.
-                            break;
-                        }
-                        case 'moveItemInLibrary': {
-                            const item = findAndRemoveItemInTree(db.data.mediaLibrary, payload.itemId);
-                            if (item && findAndAdd(db.data.mediaLibrary, payload.destinationFolderId, item)) {
-                                libraryChanged = true;
+                            case 'toggleAutoMode': {
+                                const studioData = db.data.userdata[studioClientEmail];
+                                if (studioData) {
+                                    if (!studioData.settings) studioData.settings = {};
+                                    studioData.settings.isAutoModeEnabled = payload.enabled;
+                                    
+                                    if (payload.enabled) {
+                                        startPlaybackLoop();
+                                        // If not playing, start it
+                                        if (!sharedPlayerState.isPlaying && sharedPlaylist.length > 0) {
+                                            sharedPlayerState.isPlaying = true;
+                                        }
+                                    } else {
+                                        stopPlaybackLoop();
+                                        sharedPlayerState.isPlaying = false;
+                                    }
+                                    stateChanged = true;
+                                }
+                                break;
                             }
-                            break;
-                        }
-                        case 'updateFolderMetadata': {
-                            if (findAndUpdateItemInTree(db.data.mediaLibrary, payload.folderId, folder => ({ ...folder, suppressMetadata: payload.settings }))) {
-                                libraryChanged = true;
+                            case 'playTrack': {
+                                const { itemId } = payload;
+                                const targetIndex = sharedPlaylist.findIndex(item => item.id === itemId);
+                                if (targetIndex !== -1) {
+                                    const newTrack = sharedPlaylist[targetIndex];
+                                    if (!newTrack.markerType) {
+                                        sharedPlayerState.currentTrackIndex = targetIndex;
+                                        sharedPlayerState.currentPlayingItemId = newTrack.id;
+                                        sharedPlayerState.trackProgress = 0;
+                                        sharedPlayerState.isPlaying = true;
+                                    }
+                                }
+                                stateChanged = true;
+                                break;
                             }
-                            break;
-                        }
-                        case 'updateTrackMetadata': {
-                            if (findAndUpdateItemInTree(db.data.mediaLibrary, payload.trackId, track => ({ ...track, ...payload.newMetadata }))) {
-                                libraryChanged = true;
+                             case 'setStopAfterTrackId': {
+                                sharedPlayerState.stopAfterTrackId = payload.id;
+                                stateChanged = true;
+                                break;
                             }
-                            break;
-                        }
-                        case 'updateTrackTags': {
-                            if (findAndUpdateItemInTree(db.data.mediaLibrary, payload.trackId, item => ({ ...item, tags: payload.tags.length > 0 ? payload.tags.sort() : undefined }))) {
-                                libraryChanged = true;
+                            case 'stopAtId': {
+                                sharedPlayerState.isPlaying = false;
+                                sharedPlayerState.stopAfterTrackId = null;
+                                stateChanged = true;
+                                break;
                             }
-                            break;
-                        }
-                        case 'updateFolderTags': {
-                            if (findAndUpdateItemInTree(db.data.mediaLibrary, payload.folderId, item => ({ ...item, tags: payload.newTags.length > 0 ? payload.newTags.sort() : undefined }))) {
-                                libraryChanged = true;
+                            case 'insertTrack': {
+                                const { track, beforeItemId } = payload;
+                                if (!track || !track.id) break;
+                                const newPlaylist = [...sharedPlaylist];
+                                const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, track);
+                                db.data.sharedPlaylist = newPlaylist;
+                                stateChanged = true;
+                                break;
                             }
-                            break;
-                        }
-                    }
+                            case 'insertTimeMarker': {
+                                const { marker, beforeItemId } = payload;
+                                if (!marker || !marker.id) break;
+                                const newPlaylist = [...sharedPlaylist];
+                                const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, marker);
+                                db.data.sharedPlaylist = newPlaylist;
+                                stateChanged = true;
+                                break;
+                            }
+                            case 'updateTimeMarker': {
+                                const { markerId, updates } = payload;
+                                if (!markerId || !updates) break;
+                                const newPlaylist = sharedPlaylist.map(item => {
+                                    if (item.id === markerId && item.type === 'marker') {
+                                        return { ...item, ...updates };
+                                    }
+                                    return item;
+                                });
+                                db.data.sharedPlaylist = newPlaylist;
+                                stateChanged = true;
+                                break;
+                            }
+                             case 'removeFromPlaylist': {
+                                const { itemId } = payload;
+                                const newPlaylist = sharedPlaylist.filter(item => item.id !== itemId);
+                                if (sharedPlayerState.currentPlayingItemId === itemId) {
+                                    sharedPlayerState.isPlaying = false;
+                                    sharedPlayerState.currentPlayingItemId = null;
+                                    const firstPlayable = findNextPlayableIndex(newPlaylist, -1, 1);
+                                    sharedPlayerState.currentTrackIndex = firstPlayable > -1 ? firstPlayable : 0;
+                                } else {
+                                    const newIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
+                                    if(newIndex > -1) sharedPlayerState.currentTrackIndex = newIndex;
+                                }
+                                db.data.sharedPlaylist = newPlaylist;
+                                stateChanged = true;
+                                break;
+                            }
+                            case 'reorderPlaylist': {
+                                const { draggedId, dropTargetId } = payload;
+                                const newPlaylist = [...sharedPlaylist];
+                                const dragIndex = newPlaylist.findIndex(item => item.id === draggedId);
+                                if (dragIndex !== -1) {
+                                    const [draggedItem] = newPlaylist.splice(dragIndex, 1);
+                                    const dropIndex = dropTargetId ? newPlaylist.findIndex(item => item.id === dropTargetId) : newPlaylist.length;
+                                    newPlaylist.splice(dropIndex !== -1 ? dropIndex : newPlaylist.length, 0, draggedItem);
+                                    db.data.sharedPlaylist = newPlaylist;
 
-                    if (stateChanged || libraryChanged) {
-                        await db.write();
+                                    if(sharedPlayerState.currentPlayingItemId) {
+                                        const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
+                                        if (newCurrentIndex !== -1) sharedPlayerState.currentTrackIndex = newCurrentIndex;
+                                    }
+                                    stateChanged = true;
+                                }
+                                break;
+                            }
+                            case 'clearPlaylist': {
+                                db.data.sharedPlaylist = [];
+                                sharedPlayerState.isPlaying = false;
+                                sharedPlayerState.currentPlayingItemId = null;
+                                sharedPlayerState.currentTrackIndex = 0;
+                                sharedPlayerState.trackProgress = 0;
+                                sharedPlayerState.stopAfterTrackId = null;
+                                stateChanged = true;
+                                break;
+                            }
+                            // Fallback for simple state changes
+                            case 'setPlayerState':
+                                db.data.sharedPlayerState = { ...sharedPlayerState, ...payload };
+                                stateChanged = true;
+                                break;
+                        }
+                
                         if (stateChanged) {
-                            broadcastMessage({
-                                type: 'state-update',
-                                payload: { playlist: db.data.playlist, playerState: db.data.playerState, broadcasts: db.data.broadcasts }
-                            });
-                        }
-                        if (libraryChanged) {
-                            broadcastMessage({ type: 'library-update', payload: db.data.mediaLibrary });
+                            await db.write();
+                            broadcastState();
                         }
                     }
                     break;
-                }
-                case 'voiceTrackAdd': { // Received from presenter
-                    const { voiceTrack, vtMix, beforeItemId, audioDataUrl } = data.payload;
-                    // Save blob to media library
-                    const base64Data = audioDataUrl.split(';base64,').pop();
-                    const filename = `${voiceTrack.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_${Date.now()}.webm`;
-                    const filePath = path.join(MEDIA_DIR, filename);
-                    await fs.writeFile(filePath, base64Data, { encoding: 'base64' });
-                    console.log(`[VT] Saved new voice track from ${email} to ${filename}`);
-                    // Trigger a rescan to add it to library
-                    scanMediaLibrary();
-                    // Forward to studio to add to playlist
-                    broadcastToStudio(data);
-                    break;
-                }
-                case 'webrtc-signal': {
-                    const targetClient = clients.get(data.target);
-                    if (targetClient) {
-                        targetClient.ws.send(JSON.stringify({
-                            type: 'webrtc-signal',
-                            sender: email,
-                            payload: data.payload
-                        }));
-                    }
-                    break;
-                }
-                case 'presenter-state-change': { // Presenter tells studio they are on/off air
-                    const client = clients.get(email);
-                    if (client) {
-                        client.onAir = data.payload.onAir;
-                        broadcastToStudio({
-                            type: 'presenter-on-air-request',
-                            payload: { presenterEmail: email, onAir: data.payload.onAir }
+
+                case 'chatMessage':
+                    if (studioClientEmail && studioClientEmail === email) {
+                        const studioMessage = {
+                            from: 'Studio',
+                            text: data.payload.text,
+                            timestamp: Date.now(),
+                        };
+                        browserPlayerClients.forEach(clientWs => {
+                            if (clientWs.readyState === WebSocket.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'chatMessage', payload: studioMessage }));
+                            }
                         });
                     }
                     break;
-                }
-                 case 'chatMessage':
-                    broadcastMessage(data); // Echo to all clients, including sender
+                
+                case 'configUpdate':
+                    if (studioClientEmail && studioClientEmail === email) {
+                        currentLogoSrc = data.payload.logoSrc;
+                        console.log(`[WebSocket] Studio updated logo.`);
+                        browserPlayerClients.forEach(clientWs => {
+                            if (clientWs.readyState === ws.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'configUpdate', payload: { logoSrc: currentLogoSrc } }));
+                            }
+                        });
+                    }
                     break;
+
                 case 'streamConfigUpdate':
-                    streamMimeType = data.payload.mimeType;
+                    if (studioClientEmail && studioClientEmail === email) {
+                        currentMimeType = data.payload.mimeType;
+                        console.log(`[Audio Stream] Mime type updated to: ${currentMimeType}. Resetting stream.`);
+                        directStreamListeners.forEach(res => res.end());
+                        directStreamListeners.clear();
+                        streamHeader = null;
+                        browserPlayerClients.forEach(clientWs => {
+                             if (clientWs.readyState === ws.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'streamConfig', payload: { mimeType: currentMimeType } }));
+                            }
+                        });
+                    }
                     break;
+
                 case 'metadataUpdate':
-                    streamMetadata = data.payload;
-                    broadcastMessage({ type: 'metadataUpdate', payload: streamMetadata });
+                    if (studioClientEmail && studioClientEmail === email) {
+                        currentMetadata = data.payload;
+                        browserPlayerClients.forEach(clientWs => {
+                            if (clientWs.readyState === ws.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'metadataUpdate', payload: { ...currentMetadata, logoSrc: currentLogoSrc } }));
+                            }
+                        });
+                    }
+                    break;
+                
+                case 'webrtc-signal':
+                    const targetClient = clients.get(data.target);
+                    if (targetClient && targetClient.readyState === ws.OPEN) {
+                        targetClient.send(JSON.stringify({
+                            type: 'webrtc-signal',
+                            payload: data.payload,
+                            sender: email
+                        }));
+                    }
+                    break;
+                
+                case 'voiceTrackAdd':
+                    if (studioClientEmail) {
+                        const studioWs = clients.get(studioClientEmail);
+                        if (studioWs && studioWs.readyState === ws.OPEN) {
+                           console.log(`[WebSocket] Forwarding VT from ${email} to studio.`);
+                            studioWs.send(JSON.stringify({
+                                type: 'voiceTrackAdd',
+                                payload: data.payload,
+                                sender: email,
+                            }));
+                        }
+                    } else {
+                        console.log(`[WebSocket] Received VT from ${email}, but no studio is connected.`);
+                    }
+                    break;
+                
+                case 'presenter-state-change':
+                    if (studioClientEmail) {
+                        const studioWs = clients.get(studioClientEmail);
+                        if (studioWs && studioWs.readyState === ws.OPEN) {
+                            console.log(`[WebSocket] Relaying on-air status change from ${email} to studio.`);
+                            studioWs.send(JSON.stringify({
+                                type: 'presenter-on-air-request',
+                                payload: { ...data.payload, presenterEmail: email }
+                            }));
+                        }
+                    }
                     break;
             }
-        } catch (error) {
-            console.error('[WebSocket] Error processing message:', error);
+        } catch (e) {
+             console.error('[WebSocket] Error processing message:', e);
         }
     });
 
     ws.on('close', () => {
         console.log(`[WebSocket] Client disconnected: ${email}`);
         clients.delete(email);
-        broadcastMessage({ type: 'presenters-update', payload: { presenters: getOnlinePresenters() } });
-    });
-});
+        let listChanged = false;
+        if (studioClientEmail === email) {
+            studioClientEmail = null;
+            console.log('[WebSocket] Studio client disconnected. Ending public stream.');
+            directStreamListeners.forEach(res => res.end());
+            directStreamListeners.clear();
+            browserPlayerClients.forEach(clientWs => {
+                if (clientWs.readyState === ws.OPEN) {
+                    clientWs.send(JSON.stringify({ type: 'streamEnded' }));
+                }
+            });
+        }
+        if (presenterEmails.has(email)) {
+            presenterEmails.delete(email);
+            listChanged = true;
+        }
 
-// --- Serve Frontend ---
-// Serve static files from the 'dist' directory
-app.use(express.static(DIST_DIR));
-
-// Fallback for client-side routing: send index.html for any unknown GET request
-app.get('*', (req, res) => {
-    // Check if the file exists in the static directory first to avoid sending index.html for missing assets
-    const filePath = path.join(DIST_DIR, req.path);
-    fsc.access(filePath, fsc.constants.F_OK, (err) => {
-        if (err) {
-            // File does not exist, send index.html
-            res.sendFile(path.join(DIST_DIR, 'index.html'));
-        } else {
-            // File exists, let the static middleware handle it (or send 404 if it's a directory)
-            res.status(404).send('Not found');
+        if (listChanged) {
+            broadcastPresenterList();
         }
     });
 });
 
-// --- Server Startup ---
-server.listen(PORT, async () => {
-    console.log(`[Server] RadioHost.cloud backend running on http://localhost:${PORT}`);
-    await scanMediaLibrary();
+server.on('upgrade', (request, socket, head) => {
+    const url = new URL(request.url, `http://${request.headers.host}`);
+  
+    if (url.pathname === '/socket') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    } else {
+      console.log(`[WebSocket] Upgrade request for unknown path rejected: ${url.pathname}`);
+      socket.destroy();
+    }
 });
+
+
+// --- Middleware ---
+app.use(cors());
+app.use(express.json());
+app.set('trust proxy', 1);
+
+app.use('/media', express.static(mediaDir));
+
+const getPlayerPageHTML = (stationName) => `
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${stationName || 'RadioHost.cloud Live Player'}</title>
+
+    <!-- PWA and Mobile meta tags -->
+    <meta name="theme-color" content="#000000" />
+    <link rel="manifest" href="/stream/manifest.json">
+    <link rel="apple-touch-icon" href="/stream/icon/192.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="${stationName || 'Live Radio'}">
+
+    <style>
+        :root { --bg-color: #000; --text-color: #fff; --subtext-color: #a0a0a0; --accent-color: #ef4444; }
+        html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-color); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px 0; }
+        .player-container { max-width: 350px; width: 90%; background: rgba(255,255,255,0.05); border-radius: 20px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); backdrop-filter: blur(10px); }
+        #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease; }
+        #title { font-size: 1.5rem; font-weight: bold; margin: 0; min-height: 2.25rem; }
+        #artist { font-size: 1rem; color: var(--subtext-color); margin: 5px 0 20px; min-height: 1.5rem; }
+        #next-track { font-size: 0.8rem; color: var(--subtext-color); margin-top: -15px; margin-bottom: 20px; min-height: 1.2rem; display: none; font-weight: 500; }
+        .play-button { background-color: var(--accent-color); color: white; border: none; border-radius: 50%; width: 60px; height: 60px; font-size: 2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; margin: 0 auto; transition: background-color 0.2s; }
+        .play-button:hover { background-color: #d03838; }
+        .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; }
+        .footer a { color: var(--text-color); text-decoration: none; }
+        
+        /* Compact Chat Styles */
+        #chat-container { position: fixed; bottom: 20px; right: 20px; z-index: 1000; }
+        #chat-fab { width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; border: none; color: white; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.3); transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease; position: relative; }
+        #chat-fab:hover { transform: scale(1.1); box-shadow: 0 6px 15px rgba(0,0,0,0.4); }
+        #chat-fab.open { background-color: #555; }
+        #chat-fab .icon { width: 32px; height: 32px; transition: transform 0.3s ease, opacity 0.3s ease; position: absolute; }
+        #chat-fab .icon-chat { opacity: 1; }
+        #chat-fab .icon-close { opacity: 0; transform: rotate(-45deg) scale(0.5); }
+        #chat-fab.open .icon-chat { opacity: 0; transform: rotate(45deg) scale(0.5); }
+        #chat-fab.open .icon-close { opacity: 1; transform: rotate(0) scale(1); }
+        #chat-fab .notification-dot { position: absolute; top: 8px; right: 8px; width: 10px; height: 10px; background-color: #fff; border: 2px solid var(--accent-color); border-radius: 50%; display: none; }
+        #chat-window { position: absolute; bottom: 75px; right: 0; width: 350px; height: 450px; background-color: rgba(30,30,30,0.95); backdrop-filter: blur(10px); border-radius: 15px; z-index: 999; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 5px 25px rgba(0,0,0,0.4); transform-origin: bottom right; transition: opacity 0.2s ease-out, transform 0.2s ease-out; opacity: 0; transform: scale(0.95) translateY(10px); pointer-events: none; }
+        #chat-window.open { opacity: 1; transform: scale(1) translateY(0); pointer-events: auto; }
+        .chat-header { padding: 10px 15px; font-weight: bold; background-color: rgba(0,0,0,0.2); border-bottom: 1px solid rgba(255,255,255,0.1); }
+        #chatMessages { list-style: none; padding: 15px; margin: 0; flex-grow: 1; overflow-y: auto; }
+        #chatMessages li { margin-bottom: 10px; }
+        #chatMessages .msg-bubble { display: inline-block; max-width: 85%; padding: 8px 12px; border-radius: 15px; word-wrap: break-word; }
+        #chatMessages .msg-studio .msg-bubble { background-color: var(--accent-color); color: white; border-bottom-right-radius: 3px; }
+        #chatMessages .msg-listener .msg-bubble { background-color: #333; border-bottom-left-radius: 3px; }
+        #chatMessages .msg-studio { text-align: right; }
+        #chatMessages .msg-from { font-size: 0.75rem; font-weight: bold; color: var(--subtext-color); margin-bottom: 3px; }
+        #chatMessages .msg-listener .msg-from { margin-left: 5px; }
+        .chat-input-area { padding: 10px; background-color: rgba(0,0,0,0.2); border-top: 1px solid rgba(255,255,255,0.1); }
+        .chat-input-area input { width: 100%; background: #222; border: 1px solid #444; border-radius: 8px; padding: 8px 10px; color: white; font-size: 0.9rem; }
+        .chat-input-area input:focus { outline: none; border-color: var(--accent-color); }
+        .chat-input-area form { display: flex; gap: 10px; }
+        .chat-input-area button { background: var(--accent-color); border: none; border-radius: 8px; color: white; padding: 0 12px; cursor: pointer; }
+        .chat-input-area button:disabled { background: #555; cursor: not-allowed; }
+
+        @media (max-width: 480px) {
+            #chat-window { width: calc(100vw - 40px); height: 60vh; }
+        }
+    </style>
+</head>
+<body>
+    <img id="logo" style="max-height: 40px; display: none; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); margin-bottom: 20px;">
+    <div class="player-container">
+        <img id="artwork" src="https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png" alt="Album Art">
+        <h1 id="title">RadioHost.cloud</h1>
+        <h2 id="artist">Live Stream</h2>
+        <div id="next-track"></div>
+        <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
+        <div class="footer">
+            Powered by <a href="https://radiohost.cloud" target="_blank">RadioHost.cloud</a>
+        </div>
+    </div>
+    <audio id="audioPlayer" preload="none" crossOrigin="anonymous"></audio>
+
+    <div id="chat-container">
+        <div id="chat-window">
+            <div class="chat-header">Live Chat</div>
+            <ul id="chatMessages"></ul>
+            <div class="chat-input-area">
+                <input type="text" id="chatNickname" placeholder="Your Name" maxlength="20">
+                <form id="chatForm">
+                    <input type="text" id="chatInput" placeholder="Type a message..." required>
+                    <button type="submit" id="chatSendBtn">&#10148;</button>
+                </form>
+            </div>
+        </div>
+        <button id="chat-fab" aria-label="Toggle Chat">
+            <svg class="icon icon-chat" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
+            <svg class="icon icon-close" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            <span class="notification-dot"></span>
+        </button>
+    </div>
+
+    <script>
+        const playBtn = document.getElementById('playBtn');
+        const audioPlayer = document.getElementById('audioPlayer');
+        const titleEl = document.getElementById('title');
+        const artistEl = document.getElementById('artist');
+        const artworkEl = document.getElementById('artwork');
+        const logoEl = document.getElementById('logo');
+        const nextTrackEl = document.getElementById('next-track');
+
+        const chatFab = document.getElementById('chat-fab');
+        const chatNotificationDot = chatFab.querySelector('.notification-dot');
+        const chatWindow = document.getElementById('chat-window');
+        const chatMessages = document.getElementById('chatMessages');
+        const chatNickname = document.getElementById('chatNickname');
+        const chatForm = document.getElementById('chatForm');
+        const chatInput = document.getElementById('chatInput');
+        const chatSendBtn = document.getElementById('chatSendBtn');
+
+        let ws;
+        let currentMimeType = '';
+        let isPlaying = false;
+        
+        chatNickname.value = localStorage.getItem('chatNickname') || \`Listener-\${Math.floor(Math.random() * 9000) + 1000}\`;
+        chatNickname.addEventListener('change', () => {
+            localStorage.setItem('chatNickname', chatNickname.value);
+        });
+
+        chatFab.addEventListener('click', () => {
+            chatWindow.classList.toggle('open');
+            chatFab.classList.toggle('open');
+            if (chatWindow.classList.contains('open')) {
+                chatNotificationDot.style.display = 'none';
+                chatInput.focus();
+            }
+        });
+
+        function addChatMessage(msg) {
+            const li = document.createElement('li');
+            const isStudio = msg.from === 'Studio';
+            li.className = isStudio ? 'msg-studio' : 'msg-listener';
+            
+            let fromHtml = '';
+            if (!isStudio) {
+                fromHtml = \`<div class="msg-from">\${msg.from}</div>\`;
+            }
+            
+            li.innerHTML = \`
+                \${fromHtml}
+                <div class="msg-bubble">\${msg.text}</div>
+            \`;
+            chatMessages.appendChild(li);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            if (!chatWindow.classList.contains('open')) {
+                chatNotificationDot.style.display = 'block';
+            }
+        }
+
+        chatForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const text = chatInput.value.trim();
+            const nickname = chatNickname.value.trim();
+            if (text && nickname && ws && ws.readyState === WebSocket.OPEN) {
+                const message = {
+                    from: nickname,
+                    text: text,
+                    timestamp: Date.now()
+                };
+                ws.send(JSON.stringify({ type: 'chatMessage', payload: message }));
+                chatInput.value = '';
+            }
+        });
+
+        function getExtension(mime) {
+            if (!mime) return '';
+            if (mime.includes('webm')) return '.webm';
+            if (mime.includes('mp4')) return '.mp4';
+            if (mime.includes('mpeg')) return '.mp3';
+            return '';
+        }
+        
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = \`\${protocol}//\${window.location.host}/socket?clientType=playerPage\`;
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) return; 
+
+                const data = JSON.parse(event.data);
+                switch (data.type) {
+                    case 'streamConfig':
+                        currentMimeType = data.payload.mimeType;
+                        if (isPlaying) {
+                            const streamUrl = '/stream/live' + getExtension(currentMimeType);
+                            audioPlayer.src = streamUrl;
+                            audioPlayer.load();
+                            audioPlayer.play();
+                        }
+                        break;
+                    case 'metadataUpdate':
+                        const { title, artist, artworkUrl, logoSrc, nextTrackTitle } = data.payload;
+                        titleEl.textContent = title || '...';
+                        artistEl.textContent = artist || '...';
+                        artworkEl.src = artworkUrl || 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
+                        if (logoSrc) { logoEl.src = logoSrc; logoEl.style.display = 'block'; }
+                        else { logoEl.style.display = 'none'; }
+                        if (nextTrackTitle) { nextTrackEl.textContent = 'Up Next: ' + nextTrackTitle; nextTrackEl.style.display = 'block'; }
+                        else { nextTrackEl.style.display = 'none'; }
+                        
+                        if ('mediaSession' in navigator) {
+                            navigator.mediaSession.metadata = new MediaMetadata({
+                                title: title || '...',
+                                artist: artist || 'RadioHost.cloud',
+                                album: '${stationName || 'Live Stream'}',
+                                artwork: artworkUrl ? [
+                                    { src: artworkUrl.replace('600x600', '96x96'), sizes: '96x96', type: 'image/jpeg' },
+                                    { src: artworkUrl.replace('600x600', '128x128'), sizes: '128x128', type: 'image/jpeg' },
+                                    { src: artworkUrl.replace('600x600', '192x192'), sizes: '192x192', type: 'image/jpeg' },
+                                    { src: artworkUrl.replace('600x600', '256x256'), sizes: '256x256', type: 'image/jpeg' },
+                                    { src: artworkUrl.replace('600x600', '384x384'), sizes: '384x384', type: 'image/jpeg' },
+                                    { src: artworkUrl.replace('600x600', '512x512'), sizes: '512x512', type: 'image/jpeg' },
+                                ] : []
+                            });
+                        }
+                        break;
+                    case 'configUpdate':
+                        if (data.payload.logoSrc) { logoEl.src = data.payload.logoSrc; logoEl.style.display = 'block'; }
+                        else { logoEl.style.display = 'none'; }
+                        break;
+                    case 'streamEnded':
+                        artistEl.textContent = 'Stream Offline';
+                        audioPlayer.pause();
+                        audioPlayer.src = '';
+                        break;
+                    case 'chatMessage':
+                        addChatMessage(data.payload);
+                        break;
+                }
+            };
+            ws.onclose = () => setTimeout(connect, 5000);
+            ws.onerror = (err) => { console.error('WebSocket error:', err); ws.close(); };
+        }
+
+        playBtn.addEventListener('click', () => {
+            if (audioPlayer.paused) {
+                if (!audioPlayer.src && currentMimeType) {
+                    const streamUrl = '/stream/live' + getExtension(currentMimeType);
+                    audioPlayer.src = streamUrl;
+                    audioPlayer.load();
+                }
+                audioPlayer.play().catch(e => {
+                    console.error("Playback failed:", e);
+                    artistEl.textContent = 'Playback failed. Tap to retry.';
+                });
+            } else {
+                audioPlayer.pause();
+            }
+        });
+        
+        audioPlayer.onplaying = () => { isPlaying = true; playBtn.innerHTML = '&#10074;&#10074;'; artworkEl.style.transform = 'scale(1.05)'; };
+        audioPlayer.onpause = () => { isPlaying = false; playBtn.innerHTML = '&#9658;'; artworkEl.style.transform = 'scale(1)'; };
+        
+        if ('mediaSession' in navigator) {
+            navigator.mediaSession.setActionHandler('play', () => audioPlayer.play());
+            navigator.mediaSession.setActionHandler('pause', () => audioPlayer.pause());
+        }
+        
+        connect();
+
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/stream-service-worker.js').then(registration => {
+                    console.log('Stream Player SW registered: ', registration);
+                }).catch(registrationError => {
+                    console.log('Stream Player SW registration failed: ', registrationError);
+                });
+            });
+        }
+    </script>
+</body>
+</html>
+`;
+
+// --- API Endpoints ---
+app.get('/api/stream-listeners', async (req, res) => {
+    try {
+        const listenerPromises = Array.from(browserPlayerClients).map(async (listenerWs) => {
+            const listenerReq = listenerWs.req;
+            if (!listenerReq) return { ip: 'N/A', country: 'N/A', city: 'N/A' };
+
+            let ip = listenerReq.headers['x-forwarded-for'] || listenerReq.socket.remoteAddress;
+
+            if (ip === '::1' || ip === '127.0.0.1') {
+                return { ip: '127.0.0.1', country: 'Localhost', city: 'Local' };
+            }
+            if (ip.startsWith('::ffff:')) {
+                ip = ip.substring(7);
+            }
+
+            try {
+                const geoResponse = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,city`);
+                if (!geoResponse.ok) {
+                    return { ip, country: 'N/A', city: 'N/A' };
+                }
+                const geoData = await geoResponse.json();
+                if (geoData.status === 'success') {
+                    return { ip, country: geoData.country || 'N/A', city: geoData.city || 'N/A' };
+                }
+                return { ip, country: 'N/A', city: 'N/A' };
+            } catch (error) {
+                console.error(`GeoIP lookup failed for ${ip}:`, error.message);
+                return { ip, country: 'N/A', city: 'N/A' };
+            }
+        });
+
+        const listenersData = await Promise.all(listenerPromises);
+        res.json(listenersData);
+    } catch (error) {
+        console.error("Error fetching listener data:", error);
+        res.status(500).json([]);
+    }
+});
+
+app.post('/api/signup', async (req, res) => {
+    const { email, password, nickname } = req.body;
+    const isFirstUser = db.data.users.length === 0;
+    const existingUser = db.data.users.find(u => u.email === email);
+    if (existingUser) return res.status(409).json({ message: 'User already exists' });
+
+    const role = isFirstUser ? 'studio' : 'presenter';
+    const newUser = { email, password, nickname, role };
+    db.data.users.push(newUser);
+    await db.write();
+    const { password: _, ...userToReturn } = newUser;
+    res.status(201).json(userToReturn);
+});
+
+app.post('/api/login', (req, res) => {
+    const { email, password } = req.body;
+    const user = db.data.users.find(u => u.email === email && u.password === password);
+    if (user) {
+        const { password: _, ...userToReturn } = user;
+        res.json(userToReturn);
+    } else {
+        res.status(401).json({ message: 'Invalid credentials' });
+    }
+});
+
+app.get('/api/users', (req, res) => {
+    const usersWithoutPasswords = db.data.users.map(({ password, ...user }) => user);
+    res.json(usersWithoutPasswords);
+});
+app.get('/api/user/:email', (req, res) => {
+    const user = db.data.users.find(u => u.email === req.params.email);
+    if(user){
+        const { password, ...userToReturn } = user;
+        res.json(userToReturn);
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+});
+
+app.put('/api/user/:email/role', async (req, res) => {
+    const { email } = req.params;
+    const { role } = req.body;
+
+    if (!['studio', 'presenter'].includes(role)) {
+        return res.status(400).json({ message: 'Invalid role specified.' });
+    }
+
+    const user = db.data.users.find(u => u.email === email);
+
+    if (user) {
+        user.role = role;
+        await db.write();
+        const { password, ...updatedUser } = user;
+        res.json(updatedUser);
+    } else {
+        res.status(404).json({ message: 'User not found.' });
+    }
+});
+
+app.get('/api/userdata/:email', (req, res) => res.json(db.data.userdata[req.params.email] || null));
+app.post('/api/userdata/:email', async (req, res) => {
+    db.data.userdata[req.params.email] = req.body;
+    await db.write();
+    res.json({ success: true });
+});
+
+app.post('/api/folder', async (req, res) => {
+    const { path: folderPath } = req.body;
+    if (!folderPath) {
+        return res.status(400).json({ message: 'Folder path is required.' });
+    }
+    try {
+        const fullPath = path.join(mediaDir, folderPath);
+        await fsPromises.mkdir(fullPath, { recursive: true });
+        // The watcher will handle the library update
+        res.status(201).json({ success: true, message: `Folder created at ${folderPath}` });
+    } catch (error) {
+        console.error('Error creating folder:', error);
+        res.status(500).json({ message: 'Failed to create folder. Check server logs and permissions.' });
+    }
+});
+
+app.post('/api/upload', multer({ storage: multer.memoryStorage() }).single('audioFile'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ message: 'No audio file uploaded.' });
+    }
+    
+    try {
+        const webkitRelativePath = req.body.webkitRelativePath || '';
+        const destinationDir = path.dirname(webkitRelativePath);
+        const finalDir = path.join(mediaDir, destinationDir);
+        
+        await fsPromises.mkdir(finalDir, { recursive: true });
+
+        let finalFilename = req.file.originalname;
+        let finalPath = path.join(finalDir, finalFilename);
+        let counter = 1;
+        const ext = path.extname(finalFilename);
+        const basename = path.basename(finalFilename, ext);
+        
+        while (fs.existsSync(finalPath)) {
+            finalFilename = `${basename} (${counter})${ext}`;
+            finalPath = path.join(finalDir, finalFilename);
+            counter++;
+        }
+
+        await fsPromises.writeFile(finalPath, req.file.buffer);
+        console.log(`[Upload] Saved file to: ${finalPath}`);
+        // Watcher will handle broadcasting the library update.
+        res.status(201).json({ success: true, message: `File ${finalFilename} uploaded.` });
+    } catch (e) {
+        console.error('Error processing upload:', e);
+        res.status(500).json({ message: 'Error processing upload. Check server logs and permissions.' });
+    }
+});
+
+
+app.post('/api/track/delete', async (req, res) => {
+    // Note: The 'id' of a library item is its relative path.
+    const { id } = req.body;
+    if (!id) {
+        return res.status(400).json({ message: 'Track ID (relative path) is required.' });
+    }
+
+    try {
+        const fullPath = path.join(mediaDir, id);
+        if (fs.existsSync(fullPath)) {
+             await fsPromises.rm(fullPath, { recursive: true, force: true });
+             res.json({ success: true, message: 'Item deleted.' });
+        } else {
+             res.status(404).json({ message: 'Item not found on disk.' });
+        }
+        // Watcher will handle broadcasting the library update.
+    } catch (error) {
+        console.error("Error deleting item:", error);
+        res.status(500).json({ message: 'Error deleting item. Check server logs and permissions.' });
+    }
+});
+
+const findArtworkRecursive = async (dir, baseName) => {
+    const files = await fsPromises.readdir(dir, { withFileTypes: true });
+    for (const file of files) {
+        const fullPath = path.join(dir, file.name);
+        if (file.isDirectory()) {
+            const result = await findArtworkRecursive(fullPath, baseName);
+            if (result) return result;
+        } else if (file.name.startsWith(baseName)) {
+            return fullPath;
+        }
+    }
+    return null;
+};
+
+app.get('/api/artwork/:id', async (req, res) => {
+    try {
+        const trackId = req.params.id;
+        const trackBaseName = path.basename(trackId, path.extname(trackId));
+        const filePath = await findArtworkRecursive(artworkDir, trackBaseName);
+
+        if (filePath) {
+            res.sendFile(filePath);
+        } else {
+            res.status(404).send('Artwork not found');
+        }
+    } catch (err) {
+        console.error("Error searching for artwork:", err);
+        res.status(500).send('Error searching for artwork');
+    }
+});
+
+
+const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
+if (isDirectRun) {
+    const distPath = path.join(__dirname, 'dist');
+    app.use(express.static(distPath));
+
+    app.get('/stream/manifest.json', async (req, res) => {
+        try {
+            const { stationName, description } = await getStationSettings();
+            const manifest = {
+                name: stationName,
+                short_name: stationName.length > 12 ? stationName.substring(0, 9) + '...' : stationName,
+                description: description,
+                start_url: "/stream",
+                display: "standalone",
+                background_color: "#000000",
+                theme_color: "#ef4444",
+                icons: [
+                    {
+                        src: "/stream/icon/192.png",
+                        sizes: "192x192",
+                        type: "image/png",
+                        purpose: "any maskable"
+                    },
+                    {
+                        src: "/stream/icon/512.png",
+                        sizes: "512x512",
+                        type: "image/png",
+                        purpose: "any maskable"
+                    }
+                ]
+            };
+            res.json(manifest);
+        } catch (error) {
+            console.error('Error generating stream manifest:', error);
+            res.status(500).json({ error: 'Could not generate manifest' });
+        }
+    });
+    
+    app.get('/stream/icon/:size.png', async (req, res) => {
+        try {
+            const { logoSrc } = await getStationSettings();
+            if (logoSrc && logoSrc.startsWith('data:image/')) {
+                const parts = logoSrc.split(',');
+                const mimeType = parts[0].split(':')[1].split(';')[0];
+                const imageBuffer = Buffer.from(parts[1], 'base64');
+                res.writeHead(200, {
+                    'Content-Type': mimeType,
+                    'Content-Length': imageBuffer.length
+                });
+                res.end(imageBuffer);
+            } else {
+                res.redirect('https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png');
+            }
+        } catch (error) {
+            console.error('Error serving stream icon:', error);
+            res.status(500).send('Error serving icon');
+        }
+    });
+
+    // Endpoint for the player page HTML
+    app.get('/stream', async (req, res) => {
+        try {
+            const { stationName } = await getStationSettings();
+            res.setHeader('Content-Type', 'text/html');
+            res.send(getPlayerPageHTML(stationName));
+        } catch (error) {
+            console.error('Error serving player page:', error);
+            res.status(500).send('Could not load player.');
+        }
+    });
+    
+    app.get('/stream/live.:ext?', (req, res) => {
+        console.log(`[Audio Stream] New listener connected. Sending headers.`);
+        res.writeHead(200, {
+            'Content-Type': currentMimeType,
+            'Connection': 'keep-alive',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Access-Control-Allow-Origin': '*'
+        });
+    
+        if (streamHeader) {
+            res.write(streamHeader);
+        }
+    
+        directStreamListeners.add(res);
+    
+        req.on('close', () => {
+            console.log('[Audio Stream] Listener disconnected.');
+            directStreamListeners.delete(res);
+        });
+    });
+
+    // SPA Fallback: This should be the last route.
+    app.get('*', (req, res, next) => {
+        if (req.path.startsWith('/api/') ||
+            req.path.startsWith('/stream') ||
+            req.path.startsWith('/media/') ||
+            req.path.startsWith('/socket') ||
+            path.extname(req.path)) {
+            return next();
+        }
+        res.sendFile(path.join(distPath, 'index.html'));
+    });
+    
+    // Server startup logic
+    const startup = async () => {
+        console.log('[Startup] Initial scan of Media directory...');
+        const initialChildren = await scanMediaToTree(mediaDir);
+        libraryState.children = initialChildren;
+        console.log('[Startup] Initial library state generated.');
+        
+        server.listen(PORT, '0.0.0.0', () => {
+            console.log(`RadioHost.cloud HOST server running on http://0.0.0.0:${PORT}`);
+            // Startup Logic: Check if auto mode should be running
+            const studioUser = db.data.users.find(u => u.role === 'studio');
+            if (studioUser && db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
+                console.log('[Startup] Auto Mode is enabled. Starting playback loop.');
+                startPlaybackLoop();
+            }
+        });
+    };
+
+    startup();
+}
+
+export default app;
