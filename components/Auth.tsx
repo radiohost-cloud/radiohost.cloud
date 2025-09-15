@@ -7,29 +7,24 @@ import { type User } from '../types';
 interface AuthProps {
     onLogin: (user: User) => void;
     onSignup: (user: User) => void;
-    onGoBack: () => void;
 }
 
-const Auth: React.FC<AuthProps> = ({ onLogin, onSignup, onGoBack }) => {
+const Auth: React.FC<AuthProps> = ({ onLogin, onSignup }) => {
     const [isLogin, setIsLogin] = useState(true);
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [nickname, setNickname] = useState('');
     const [error, setError] = useState('');
-    
-    const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
 
     useEffect(() => {
         const checkUsers = async () => {
-            if (isHostMode) {
-                const users = await dataService.getAllUsers();
-                if (users.length === 0) {
-                    setIsLogin(false);
-                }
+            const users = await dataService.getAllUsers();
+            if (users.length === 0) {
+                setIsLogin(false);
             }
         };
         checkUsers();
-    }, [isHostMode]);
+    }, []);
 
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -56,7 +51,7 @@ const Auth: React.FC<AuthProps> = ({ onLogin, onSignup, onGoBack }) => {
             if (isLogin) {
                 user = await dataService.login(email, password);
                 if (user) {
-                    if (isHostMode && user.role) {
+                    if (user.role) {
                         sessionStorage.setItem('playoutMode', user.role);
                     }
                     await dataService.putAppState('currentUserEmail', email);
@@ -68,7 +63,7 @@ const Auth: React.FC<AuthProps> = ({ onLogin, onSignup, onGoBack }) => {
                 const newUser: User = { email, password, nickname };
                 user = await dataService.signup(newUser);
                  if (user) {
-                    if (isHostMode && user.role) {
+                    if (user.role) {
                         sessionStorage.setItem('playoutMode', user.role);
                     }
                     await dataService.putAppState('currentUserEmail', email);
@@ -163,21 +158,6 @@ const Auth: React.FC<AuthProps> = ({ onLogin, onSignup, onGoBack }) => {
                             {isLogin ? 'Sign Up' : 'Sign In'}
                         </button>
                     </p>
-                    
-                    <div className="relative flex items-center justify-center">
-                        <div className="absolute inset-0 flex items-center">
-                            <div className="w-full border-t border-neutral-300 dark:border-neutral-700"></div>
-                        </div>
-                        <div className="relative px-2 bg-white dark:bg-neutral-900 text-sm text-neutral-500">
-                            Or
-                        </div>
-                    </div>
-                    
-                    <div className="text-center">
-                         <button onClick={onGoBack} className="font-medium text-sm text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white">
-                            &larr; Back to mode selection
-                        </button>
-                    </div>
                 </div>
                 
                 <div className="!mt-4 space-y-3">

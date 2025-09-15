@@ -1,6 +1,6 @@
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
-// To run: `npm install express cors multer lowdb ws node-id3` then `node server.js`
+// To run: `npm install express cors multer lowdb ws node-id3 fluent-ffmpeg` then `node server.js`
 
 import express from 'express';
 import cors from 'cors';
@@ -14,6 +14,7 @@ import { promises as fsPromises } from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 import NodeID3 from 'node-id3';
+import ffmpeg from 'fluent-ffmpeg';
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -24,6 +25,19 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 const PORT = process.env.PORT || 3000;
+
+// --- Icecast Configuration ---
+const icecastConfig = {
+    serverUrl: 'localhost',
+    port: 8000,
+    mountPoint: 'live',
+    username: 'source',
+    password: 'yourpassword',
+    bitrate: '128k',
+    codec: 'libmp3lame',
+    format: 'mp3',
+    contentType: 'audio/mpeg'
+};
 
 // --- Database Setup (using lowdb for simplicity) ---
 const file = path.join(__dirname, 'db.json');
@@ -58,6 +72,19 @@ const mediaDir = path.join(__dirname, 'Media');
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 const artworkDir = path.join(__dirname, 'Artwork');
 if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir, { recursive: true });
+
+// --- Promise wrapper for ffprobe ---
+const getDuration = (filePath) => {
+    return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(filePath, (err, metadata) => {
+            if (err) {
+                return reject(err);
+            }
+            resolve(metadata.format.duration);
+        });
+    });
+};
+
 
 // --- Artwork Fetching Helper (moved from artworkService.ts) ---
 const fetchArtwork = async (artist, title) => {
@@ -95,8 +122,9 @@ const fetchArtwork = async (artist, title) => {
 
 
 // --- NEW: Filesystem-based Media Library Logic ---
-const createTrackObject = async (entryFullPath, entryRelativePath, entryName, durationFromClient) => {
+const createTrackObject = async (entryFullPath, entryRelativePath, entryName) => {
     try {
+        const durationInSeconds = await getDuration(entryFullPath);
         const tags = NodeID3.read(entryFullPath);
         let hasArtwork = false;
         let remoteArtworkUrl = null;
@@ -121,8 +149,6 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, du
             remoteArtworkUrl = await fetchArtwork(artist, title);
         }
         
-        const durationInSeconds = durationFromClient ?? (tags.length ? parseFloat(tags.length) / 1000 : 180);
-
         const customTags = tags.userDefinedText && tags.userDefinedText.find(t => t.description === 'RH_TAGS');
 
         return {
@@ -143,7 +169,7 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, du
             id: entryRelativePath,
             title: entryName.replace(/\.[^/.]+$/, ""),
             artist: 'Unknown Artist',
-            duration: durationFromClient || 180,
+            duration: 180, // Default duration on error
             type: 'Song',
             src: `/media/${encodeURIComponent(entryRelativePath)}`,
             originalFilename: entryName,
@@ -305,44 +331,38 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
     return -1;
 };
 
-// --- Autonomous Playback Engine ---
-let playbackInterval = null;
-const PLAYBACK_INTERVAL_MS = 1000;
+// --- Autonomous FFmpeg Playout Engine ---
+let currentFfmpegCommand = null;
 
-const advanceTrack = async (fromCommand = false) => {
+const stopPlayout = () => {
+    if (currentFfmpegCommand) {
+        console.log('[FFMPEG] Stopping current playout command.');
+        currentFfmpegCommand.kill('SIGTERM'); // Use SIGTERM for graceful shutdown
+        currentFfmpegCommand = null;
+    }
+};
+
+const advanceTrackAndPlay = async (fromCommand = false) => {
     console.log(`[Playback] Advancing track. Called from command: ${fromCommand}`);
     const { sharedPlaylist: playlist, sharedPlayerState: playerState } = db.data;
     
     if (playlist.length === 0) {
         playerState.isPlaying = false;
+        await db.write();
+        broadcastState();
         return;
     }
 
     const endedItem = playlist[playerState.currentTrackIndex];
 
     if (endedItem && !endedItem.markerType) {
-        // Add to history only if a track actually ended (not a manual skip)
-        if (!fromCommand) {
-            const studioUser = db.data.users.find(u => u.role === 'studio');
-            if (studioUser && db.data.userdata[studioUser.email]) {
-                if (!db.data.userdata[studioUser.email].playoutHistory) {
-                    db.data.userdata[studioUser.email].playoutHistory = [];
-                }
-                db.data.userdata[studioUser.email].playoutHistory.push({
-                    trackId: endedItem.originalId || endedItem.id,
-                    title: endedItem.title,
-                    artist: endedItem.artist,
-                    playedAt: Date.now()
-                });
-                db.data.userdata[studioUser.email].playoutHistory = db.data.userdata[studioUser.email].playoutHistory.slice(-100);
-            }
-        }
-        
-        // Check for stopAfterTrackId
         if (playerState.stopAfterTrackId && playerState.stopAfterTrackId === endedItem.id) {
             playerState.isPlaying = false;
             playerState.stopAfterTrackId = null;
             console.log(`[Playback] stopAfterTrackId reached. Stopping playback.`);
+            stopPlayout();
+            await db.write();
+            broadcastState();
             return;
         }
     }
@@ -354,50 +374,93 @@ const advanceTrack = async (fromCommand = false) => {
         const nextItem = playlist[nextIndex];
         playerState.currentPlayingItemId = nextItem.id;
         console.log(`[Playback] Next track is index ${nextIndex}: "${nextItem.title}"`);
+        await db.write();
+        broadcastState();
+        startPlayout(); // Start the next track
     } else {
         playerState.isPlaying = false;
         console.log('[Playback] End of playlist reached. Stopping playback.');
+        stopPlayout();
+        await db.write();
+        broadcastState();
     }
 };
 
-const playbackLoop = async () => {
-    await db.read();
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    if (!studioUser || !db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
-        return stopPlaybackLoop();
+
+const startPlayout = () => {
+    stopPlayout(); // Ensure any previous command is stopped
+
+    const { sharedPlaylist, sharedPlayerState } = db.data;
+    const track = sharedPlaylist[sharedPlayerState.currentTrackIndex];
+
+    if (!track || track.markerType) {
+        console.log('[FFMPEG] Current item is not a track, trying to advance.');
+        advanceTrackAndPlay(true);
+        return;
     }
 
-    const { sharedPlayerState: playerState, sharedPlaylist: playlist } = db.data;
-    if (!playerState.isPlaying) return;
-
-    const currentTrack = playlist[playerState.currentTrackIndex];
-    if (!currentTrack || currentTrack.markerType) {
-        console.log('[Playback Loop] Current item is not playable, advancing.');
-        await advanceTrack();
-    } else {
-        playerState.trackProgress += 1; // Increment by 1 second
-        if (playerState.trackProgress >= currentTrack.duration) {
-            console.log(`[Playback Loop] Track "${currentTrack.title}" finished. Advancing.`);
-            await advanceTrack();
-        }
+    const trackPath = path.join(mediaDir, track.id);
+    if (!fs.existsSync(trackPath)) {
+        console.error(`[FFMPEG] File not found: ${trackPath}. Skipping.`);
+        advanceTrackAndPlay(true);
+        return;
     }
-    
-    await db.write();
-    broadcastState();
+
+    const outputUrl = `icecast://${icecastConfig.username}:${icecastConfig.password}@${icecastConfig.serverUrl}:${icecastConfig.port}/${icecastConfig.mountPoint}`;
+
+    const command = ffmpeg(trackPath)
+        .inputOptions('-re') // Read input at native frame rate
+        .audioCodec(icecastConfig.codec)
+        .audioBitrate(icecastConfig.bitrate)
+        .format(icecastConfig.format)
+        .outputOptions('-content_type', icecastConfig.contentType)
+        .on('start', (commandLine) => {
+            console.log('[FFMPEG] Spawned: ' + commandLine);
+            sharedPlayerState.isPlaying = true;
+            sharedPlayerState.trackProgress = 0;
+            db.write();
+            broadcastState();
+        })
+        .on('progress', (progress) => {
+            const parts = progress.timemark.split(':');
+            const seconds = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
+            const flooredSeconds = Math.floor(seconds);
+            if (sharedPlayerState.trackProgress !== flooredSeconds) {
+                sharedPlayerState.trackProgress = flooredSeconds;
+                broadcastState(); // Broadcast every second
+            }
+        })
+        .on('end', () => {
+            console.log(`[FFMPEG] Track finished: ${track.title}`);
+            currentFfmpegCommand = null;
+            // Only advance if auto mode is on
+            const studioData = db.data.userdata[studioClientEmail];
+            if (studioData?.settings?.isAutoModeEnabled) {
+                advanceTrackAndPlay(false);
+            } else {
+                sharedPlayerState.isPlaying = false;
+                db.write();
+                broadcastState();
+            }
+        })
+        .on('error', (err, stdout, stderr) => {
+            // 'end' is sometimes not called on kill, so we check the error message
+            if (!err.message.includes('SIGTERM')) {
+                 console.error(`[FFMPEG] Error playing ${track.title}:`, err.message);
+            }
+            if (currentFfmpegCommand) { // Check if it was killed by us
+                currentFfmpegCommand = null;
+                const studioData = db.data.userdata[studioClientEmail];
+                if (studioData?.settings?.isAutoModeEnabled) {
+                     advanceTrackAndPlay(false);
+                }
+            }
+        })
+        .save(outputUrl);
+        
+    currentFfmpegCommand = command;
 };
 
-const startPlaybackLoop = () => {
-    if (playbackInterval) return;
-    console.log('[Playback] Starting autonomous playback loop.');
-    playbackInterval = setInterval(playbackLoop, PLAYBACK_INTERVAL_MS);
-};
-
-const stopPlaybackLoop = () => {
-    if (!playbackInterval) return;
-    console.log('[Playback] Stopping autonomous playback loop.');
-    clearInterval(playbackInterval);
-    playbackInterval = null;
-};
 
 // --- Main WebSocket Logic ---
 
@@ -487,6 +550,7 @@ wss.on('connection', async (ws, req) => {
             payload: {
                 playlist: db.data.sharedPlaylist,
                 playerState: db.data.sharedPlayerState,
+                broadcasts: db.data.userdata[studioClientEmail]?.broadcasts || [],
             }
         }));
     }
@@ -649,21 +713,7 @@ wss.on('connection', async (ws, req) => {
                                 break;
                             }
                             case 'next': {
-                                await advanceTrack(true);
-                                stateChanged = true;
-                                break;
-                            }
-                             case 'crossfadeNext':
-                             case 'jumpToTrack': {
-                                const newIndex = command === 'jumpToTrack' ? payload.index : findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, 1);
-                                if (newIndex !== -1) {
-                                    const nextItem = sharedPlaylist[newIndex];
-                                    sharedPlayerState.currentTrackIndex = newIndex;
-                                    sharedPlayerState.currentPlayingItemId = nextItem.id;
-                                } else {
-                                    sharedPlayerState.isPlaying = false;
-                                }
-                                stateChanged = true;
+                                advanceTrackAndPlay(true);
                                 break;
                             }
                             case 'previous': {
@@ -673,21 +723,22 @@ wss.on('connection', async (ws, req) => {
                                     sharedPlayerState.trackProgress = 0;
                                     const prevItem = sharedPlaylist[prevIndex];
                                     sharedPlayerState.currentPlayingItemId = prevItem.id;
+                                    if (sharedPlayerState.isPlaying) {
+                                        startPlayout();
+                                    } else {
+                                        stateChanged = true;
+                                    }
                                 }
-                                stateChanged = true;
                                 break;
                             }
                             case 'togglePlay': {
-                                if (sharedPlaylist.length > 0) {
-                                    sharedPlayerState.isPlaying = !sharedPlayerState.isPlaying;
-                                    if (sharedPlayerState.isPlaying) {
-                                        const currentItem = sharedPlaylist[sharedPlayerState.currentTrackIndex];
-                                        if (currentItem && !currentItem.markerType) {
-                                            sharedPlayerState.currentPlayingItemId = currentItem.id;
-                                        }
-                                    }
+                                sharedPlayerState.isPlaying = !sharedPlayerState.isPlaying;
+                                if (sharedPlayerState.isPlaying) {
+                                    startPlayout();
+                                } else {
+                                    stopPlayout();
                                 }
-                                stateChanged = true;
+                                stateChanged = true; // State is broadcast from within start/stop
                                 break;
                             }
                             case 'toggleAutoMode': {
@@ -696,14 +747,12 @@ wss.on('connection', async (ws, req) => {
                                     if (!studioData.settings) studioData.settings = {};
                                     studioData.settings.isAutoModeEnabled = payload.enabled;
                                     
-                                    if (payload.enabled) {
-                                        startPlaybackLoop();
-                                        if (!sharedPlayerState.isPlaying && sharedPlaylist.length > 0) {
-                                            sharedPlayerState.isPlaying = true;
-                                        }
-                                    } else {
-                                        stopPlaybackLoop();
+                                    if (payload.enabled && !sharedPlayerState.isPlaying && sharedPlaylist.length > 0) {
+                                        sharedPlayerState.isPlaying = true;
+                                        startPlayout();
+                                    } else if (!payload.enabled && sharedPlayerState.isPlaying) {
                                         sharedPlayerState.isPlaying = false;
+                                        stopPlayout();
                                     }
                                     stateChanged = true;
                                 }
@@ -719,19 +768,13 @@ wss.on('connection', async (ws, req) => {
                                         sharedPlayerState.currentPlayingItemId = newTrack.id;
                                         sharedPlayerState.trackProgress = 0;
                                         sharedPlayerState.isPlaying = true;
+                                        startPlayout();
                                     }
                                 }
-                                stateChanged = true;
                                 break;
                             }
                              case 'setStopAfterTrackId': {
                                 sharedPlayerState.stopAfterTrackId = payload.id;
-                                stateChanged = true;
-                                break;
-                            }
-                            case 'stopAtId': {
-                                sharedPlayerState.isPlaying = false;
-                                sharedPlayerState.stopAfterTrackId = null;
                                 stateChanged = true;
                                 break;
                             }
@@ -772,10 +815,17 @@ wss.on('connection', async (ws, req) => {
                                 const { itemId } = payload;
                                 const newPlaylist = sharedPlaylist.filter(item => item.id !== itemId);
                                 if (sharedPlayerState.currentPlayingItemId === itemId) {
+                                    const wasPlaying = sharedPlayerState.isPlaying;
                                     sharedPlayerState.isPlaying = false;
-                                    sharedPlayerState.currentPlayingItemId = null;
+                                    stopPlayout();
                                     const firstPlayable = findNextPlayableIndex(newPlaylist, -1, 1);
                                     sharedPlayerState.currentTrackIndex = firstPlayable > -1 ? firstPlayable : 0;
+                                    const nextItem = newPlaylist[sharedPlayerState.currentTrackIndex];
+                                    sharedPlayerState.currentPlayingItemId = nextItem ? nextItem.id : null;
+                                    if(wasPlaying) { // if it was playing, start the next one
+                                       sharedPlayerState.isPlaying = true;
+                                       startPlayout();
+                                    }
                                 } else {
                                     const newIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
                                     if(newIndex > -1) sharedPlayerState.currentTrackIndex = newIndex;
@@ -805,6 +855,7 @@ wss.on('connection', async (ws, req) => {
                             case 'clearPlaylist': {
                                 db.data.sharedPlaylist = [];
                                 sharedPlayerState.isPlaying = false;
+                                stopPlayout();
                                 sharedPlayerState.currentPlayingItemId = null;
                                 sharedPlayerState.currentTrackIndex = 0;
                                 sharedPlayerState.trackProgress = 0;
@@ -812,11 +863,6 @@ wss.on('connection', async (ws, req) => {
                                 stateChanged = true;
                                 break;
                             }
-                            // Fallback for simple state changes
-                            case 'setPlayerState':
-                                db.data.sharedPlayerState = { ...sharedPlayerState, ...payload };
-                                stateChanged = true;
-                                break;
                         }
                 
                         if (stateChanged) {
@@ -1388,9 +1434,8 @@ app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
     }
 
     try {
-        const durationFromClient = req.body.duration ? parseFloat(req.body.duration) : null;
         const relativePath = req.body.webkitRelativePath || req.file.originalname;
-        const trackObject = await createTrackObject(req.file.path, relativePath.replace(/\\/g, '/'), req.file.originalname, durationFromClient);
+        const trackObject = await createTrackObject(req.file.path, relativePath.replace(/\\/g, '/'), req.file.originalname);
         res.status(201).json(trackObject);
     } catch (error) {
         console.error('Error processing uploaded file:', error);
@@ -1501,7 +1546,11 @@ if (fs.existsSync(distPath)) {
     console.log(`[Startup] Scan complete. Found ${libraryState.children.length} items in root.`);
     const studioUser = db.data.users.find(u => u.role === 'studio');
     if (studioUser && db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
-        startPlaybackLoop();
+        if (db.data.sharedPlaylist.length > 0) {
+            db.data.sharedPlayerState.isPlaying = true;
+            await db.write();
+            startPlayout();
+        }
     }
 })();
 
