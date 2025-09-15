@@ -1,5 +1,4 @@
 
-
 import React, { useState, useMemo } from 'react';
 import { type SequenceItem, TrackType, type Folder, TimeMarkerType, type TimeMarker, type Track, PlayoutPolicy, type VtMixDetails } from '../types';
 import { TrashIcon } from './icons/TrashIcon';
@@ -513,16 +512,19 @@ const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, curren
             <div className="flex-grow overflow-y-auto">
                 <ul className="p-2 space-y-1">
                      {items.map((item, index) => {
-                        const prevItem = index > 0 ? items[index-1] : null;
-                        const showAddMarkerButton = isMarkerModeActive && index > 0 && (!prevItem || (!('markerType' in prevItem) && prevItem.type !== TrackType.VOICETRACK)) && !('markerType' in item) && item.type !== TrackType.VOICETRACK;
-                        const showAddVtButton = isVtModeActive && !('markerType' in item) && item.type !== TrackType.VOICETRACK && index > 0 && prevItem && !('markerType' in prevItem) && prevItem.type !== TrackType.VOICETRACK;
+                        const prevItem = index > 0 ? items[index - 1] : null;
+
+                        const currentItemIsValid = !('markerType' in item) && item.type !== TrackType.VOICETRACK;
+                        const prevItemIsValid = !!prevItem && !('markerType' in prevItem) && prevItem.type !== TrackType.VOICETRACK;
+
+                        const showAddMarkerButton = isMarkerModeActive && currentItemIsValid && (index === 0 || prevItemIsValid);
+                        const showAddVtButton = isVtModeActive && currentItemIsValid && prevItemIsValid;
 
                         return (
                            <React.Fragment key={item.id}>
                                 {(showAddMarkerButton || showAddVtButton) && (
                                     <li className="flex justify-center items-center h-4 my-1 group">
                                         <div className="w-full h-px bg-neutral-200 dark:bg-neutral-800 relative">
-                                            {/* FIX: Broken line fixed and component logic restored */}
                                             <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                                 {showAddMarkerButton && <button onClick={() => setMarkerModalState({ beforeItemId: item.id, existingMarker: undefined })} className="p-1 bg-white dark:bg-neutral-900 rounded-full text-neutral-500 hover:bg-red-500 hover:text-white shadow-md" title="Insert Time Marker"><ClockPlusIcon className="w-5 h-5"/></button>}
                                                 {showAddVtButton && <button onClick={() => setVtEditorState({ isOpen: true, prevTrack: (prevItem as Track), nextTrack: item as Track, beforeItemId: item.id })} className="p-1 bg-white dark:bg-neutral-900 rounded-full text-neutral-500 hover:bg-red-500 hover:text-white shadow-md" title="Insert Voice Track"><VoiceTrackIcon className="w-5 h-5"/></button>}

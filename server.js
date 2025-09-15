@@ -1,3 +1,4 @@
+
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
 // To run: `npm install express cors multer lowdb ws node-id3` then `node server.js`
@@ -28,11 +29,10 @@ const PORT = process.env.PORT || 3000;
 // --- Database Setup (using lowdb for simplicity) ---
 const file = path.join(__dirname, 'db.json');
 const adapter = new JSONFile(file);
-// `sharedMediaLibrary` is no longer stored in the DB. The filesystem is the source of truth.
 const defaultData = {
     users: [],
     userdata: {},
-    // sharedMediaLibrary is now generated on the fly from the filesystem
+    folderMetadata: {},
     sharedPlaylist: [],
     sharedPlayerState: {
         currentPlayingItemId: null,
@@ -94,21 +94,29 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, du
         let hasArtwork = false;
         let remoteArtworkUrl = null;
 
+        const artworkRelativePath = entryRelativePath.replace(/\.[^/.]+$/, ".jpg");
+        const artworkFullPath = path.join(artworkDir, artworkRelativePath);
+
         if (tags && tags.image && tags.image.imageBuffer) {
-            const artworkFilename = `${path.basename(entryName, path.extname(entryName))}.jpg`;
-            const artworkPath = path.join(artworkDir, artworkFilename);
-            await fsPromises.writeFile(artworkPath, tags.image.imageBuffer);
+            await fsPromises.mkdir(path.dirname(artworkFullPath), { recursive: true });
+            await fsPromises.writeFile(artworkFullPath, tags.image.imageBuffer);
             hasArtwork = true;
         }
 
         const title = tags.title || entryName.replace(/\.[^/.]+$/, "");
         const artist = tags.artist || 'Unknown Artist';
 
+        if (!hasArtwork && fs.existsSync(artworkFullPath)) {
+             hasArtwork = true;
+        }
+
         if (!hasArtwork) {
             remoteArtworkUrl = await fetchArtwork(artist, title);
         }
         
         const durationInSeconds = durationFromClient ?? (tags.length ? parseFloat(tags.length) / 1000 : 180);
+
+        const customTags = tags.userDefinedText && tags.userDefinedText.find(t => t.description === 'RH_TAGS');
 
         return {
             id: entryRelativePath,
@@ -120,6 +128,7 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, du
             originalFilename: entryName,
             hasEmbeddedArtwork: hasArtwork,
             remoteArtworkUrl: remoteArtworkUrl,
+            tags: customTags ? customTags.value.split(',').map(t => t.trim()).filter(Boolean) : [],
         };
     } catch (tagError) {
         console.error(`Error processing metadata for ${entryName}:`, tagError);
@@ -131,6 +140,7 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, du
             type: 'Song',
             src: `/media/${encodeURIComponent(entryRelativePath)}`,
             originalFilename: entryName,
+            tags: [],
         };
     }
 };
@@ -146,11 +156,13 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
             const entryFullPath = path.join(fullPath, entry.name);
 
             if (entry.isDirectory()) {
+                const folderMetadata = db.data.folderMetadata[entryRelativePath] || {};
                 children.push({
                     id: entryRelativePath,
                     name: entry.name,
                     type: 'folder',
                     children: await scanMediaToTree(entry.name, entryRelativePath),
+                    tags: folderMetadata.tags || [],
                 });
             } else if (/\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(entry.name)) {
                 const trackObject = await createTrackObject(entryFullPath, entryRelativePath, entry.name);
@@ -181,6 +193,7 @@ const refreshAndBroadcastLibrary = () => {
     watchTimeout = setTimeout(async () => {
         console.log('[File Watcher] Change detected. Re-scanning media library...');
         try {
+            await db.read(); // Read latest folder metadata
             const newChildren = await scanMediaToTree(mediaDir);
             libraryState.children = newChildren;
             broadcastLibraryUpdate();
@@ -508,21 +521,46 @@ wss.on('connection', async (ws, req) => {
                         const { sharedPlaylist, sharedPlayerState } = db.data;
                 
                         switch (command) {
-                            // --- Filesystem modifying commands ---
+                            case 'updateTrackTags': {
+                                const { trackId, tags } = payload;
+                                const fullPath = path.join(mediaDir, trackId);
+                                const success = NodeID3.update({
+                                    userDefinedText: [{
+                                        description: "RH_TAGS",
+                                        value: tags.join(', ')
+                                    }]
+                                }, fullPath);
+                                if (success) {
+                                    console.log(`[Tags] Updated tags for ${trackId}`);
+                                    refreshAndBroadcastLibrary();
+                                }
+                                break;
+                            }
+                            case 'updateFolderTags': {
+                                const { folderId, newTags } = payload;
+                                if (!db.data.folderMetadata) db.data.folderMetadata = {};
+                                db.data.folderMetadata[folderId] = { ...(db.data.folderMetadata[folderId] || {}), tags: newTags };
+                                await db.write();
+                                console.log(`[Tags] Updated tags for folder ${folderId}`);
+                                refreshAndBroadcastLibrary();
+                                break;
+                            }
                             case 'removeFromLibrary': {
                                 const { id } = payload; // id is the relative path
                                 if (!id) break;
                                 const fullPath = path.join(mediaDir, id);
                                 try {
-                                    const stats = await fsPromises.stat(fullPath);
-                                    if (stats.isDirectory()) {
+                                    if (fs.existsSync(fullPath)) {
                                         await fsPromises.rm(fullPath, { recursive: true, force: true });
-                                        console.log(`[FS] Deleted folder: ${fullPath}`);
-                                    } else {
-                                        await fsPromises.unlink(fullPath);
-                                        console.log(`[FS] Deleted file: ${fullPath}`);
+                                        console.log(`[FS] Deleted item: ${fullPath}`);
+                                        
+                                        // Also delete associated artwork
+                                        const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
+                                        if (fs.existsSync(artworkPath)) {
+                                            await fsPromises.unlink(artworkPath);
+                                            console.log(`[FS] Deleted artwork: ${artworkPath}`);
+                                        }
                                     }
-                                    // Watcher will trigger broadcast
                                 } catch (e) {
                                     console.error(`[FS] Failed to delete item at ${fullPath}:`, e);
                                 }
@@ -531,7 +569,6 @@ wss.on('connection', async (ws, req) => {
                             case 'createFolder': {
                                 const { parentId, folderName } = payload;
                                 if (!folderName) break;
-                                // FIX: Treat 'root' as the base media directory, not a subdirectory.
                                 const basePath = parentId === 'root' ? mediaDir : path.join(mediaDir, parentId);
                                 const fullPath = path.join(basePath, folderName);
                                 try {
@@ -539,7 +576,6 @@ wss.on('connection', async (ws, req) => {
                                         await fsPromises.mkdir(fullPath, { recursive: true });
                                         console.log(`[FS] Created folder: ${fullPath}`);
                                     }
-                                    // Watcher will trigger broadcast
                                 } catch (e) {
                                     console.error(`[FS] Failed to create folder at ${fullPath}:`, e);
                                 }
@@ -549,19 +585,16 @@ wss.on('connection', async (ws, req) => {
                                 const { itemId, destinationFolderId } = payload;
                                 if (!itemId || !destinationFolderId) break;
                                 const sourcePath = path.join(mediaDir, itemId);
-                                // FIX: Treat 'root' as the base media directory for the destination.
                                 const destDir = destinationFolderId === 'root' ? mediaDir : path.join(mediaDir, destinationFolderId);
                                 const destPath = path.join(destDir, path.basename(itemId));
                                 try {
                                     await fsPromises.rename(sourcePath, destPath);
                                     console.log(`[FS] Moved item from ${sourcePath} to ${destPath}`);
-                                    // Watcher will trigger broadcast
                                 } catch (e) {
                                     console.error(`[FS] Failed to move item:`, e);
                                 }
                                 break;
                             }
-                            // --- Non-filesystem commands ---
                             case 'next': {
                                 await advanceTrack(true);
                                 stateChanged = true;
@@ -612,7 +645,6 @@ wss.on('connection', async (ws, req) => {
                                     
                                     if (payload.enabled) {
                                         startPlaybackLoop();
-                                        // If not playing, start it
                                         if (!sharedPlayerState.isPlaying && sharedPlaylist.length > 0) {
                                             sharedPlayerState.isPlaying = true;
                                         }

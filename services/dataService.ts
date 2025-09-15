@@ -1,3 +1,4 @@
+
 import * as dbService from './dbService';
 import * as apiService from './apiService';
 import { type Track, type User, TrackType } from '../types';
@@ -99,8 +100,8 @@ export const getArtworkUrl = async (track: Track): Promise<string | null> => {
     if (track.hasEmbeddedArtwork) {
         const trackId = track.originalId || track.id;
         if (mode === 'HOST') {
-            const artworkFilename = `${track.id.substring(0, track.id.lastIndexOf('.'))}.jpg`;
-            return `/api/artwork/${encodeURIComponent(artworkFilename)}`;
+            const artworkPath = trackId.replace(/\.[^/.]+$/, ".jpg");
+            return `/artwork/${encodeURIComponent(artworkPath)}`;
         } else { // DEMO mode
             const blob = await dbService.getArtwork(trackId);
             if (blob) {
