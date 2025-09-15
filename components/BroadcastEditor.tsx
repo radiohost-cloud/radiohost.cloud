@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { type Broadcast, type Folder, type SequenceItem, type Track, type TimeMarker, TimeMarkerType, PlayoutPolicy, VtMixDetails, TrackType, RepeatSettings } from '../types';
 import { CloseIcon } from './icons/CloseIcon';
@@ -187,10 +186,17 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
     };
     
     const handleInsertTrack = useCallback((track: Track, beforeItemId: string | null) => {
+        // Create a new unique instance for the playlist
+        const newPlaylistItem: Track = {
+            ...track,
+            id: `bpli-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            originalId: track.id,
+        };
+    
         setPlaylist(prev => {
             const newPlaylist = [...prev];
             const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
-            newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, track);
+            newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, newPlaylistItem);
             return newPlaylist;
         });
     }, []);
