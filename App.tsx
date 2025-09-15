@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -2909,7 +2910,10 @@ const AppInternal: React.FC = () => {
                             timeline={timeline}
                             onInsertTimeMarker={handleInsertTimeMarker}
                             onUpdateTimeMarker={handleUpdateTimeMarker}
-                            onInsertVoiceTrack={(data, beforeItemId) => handleInsertVoiceTrack(data.track, data.blob, data.vtMix, beforeItemId)}
+                            // FIX: The onInsertVoiceTrack prop was being passed an incorrect lambda.
+                            // The signature of the lambda did not match the expected prop type in PlaylistProps.
+                            // Changed to pass `handleInsertVoiceTrack` directly, which has the correct signature.
+                            onInsertVoiceTrack={handleInsertVoiceTrack}
                             policy={playoutPolicy}
                             isContributor={playoutPolicy.playoutMode === 'presenter'}
                         />
