@@ -41,6 +41,17 @@ const WhatsNewPopup: React.FC<WhatsNewPopupProps> = ({ isOpen, onClose }) => {
                         Check out the latest features to enhance your broadcasting experience:
                     </p>
                     <ul className="space-y-3">
+                        <li className="flex items-start gap-3">
+                            <div className="flex-shrink-0 mt-1 p-1.5 bg-green-100 dark:bg-green-900/50 rounded-full">
+                                <UsersIcon className="w-5 h-5 text-green-600 dark:text-green-400" />
+                            </div>
+                            <div>
+                                <h4 className="font-semibold text-black dark:text-white">Remote Presenter Connection</h4>
+                                <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                                    Collaborate in real-time! Invite co-hosts to join your show from anywhere. Their audio appears in your mixer instantly.
+                                </p>
+                            </div>
+                        </li>
                          <li className="flex items-start gap-3">
                             <div className="flex-shrink-0 mt-1 p-1.5 bg-purple-100 dark:bg-purple-900/50 rounded-full">
                                 <CalendarIcon className="w-5 h-5 text-purple-600 dark:text-purple-400" />
@@ -48,7 +59,7 @@ const WhatsNewPopup: React.FC<WhatsNewPopupProps> = ({ isOpen, onClose }) => {
                             <div>
                                 <h4 className="font-semibold text-black dark:text-white">Broadcast Scheduler</h4>
                                 <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                                    Plan your shows in advance! Use the new "Scheduler" tab to create playlists that will be prompted to load at their scheduled time.
+                                    Plan your shows in advance! Use the "Scheduler" tab to create playlists that will be prompted to load at their scheduled time.
                                 </p>
                             </div>
                         </li>
@@ -64,22 +75,6 @@ const WhatsNewPopup: React.FC<WhatsNewPopupProps> = ({ isOpen, onClose }) => {
                             </div>
                         </li>
                     </ul>
-                    <div className="pt-3 border-t border-neutral-200 dark:border-neutral-700">
-                         <h4 className="font-semibold text-black dark:text-white text-center mb-2">Coming Soon</h4>
-                        <ul className="space-y-3">
-                            <li className="flex items-start gap-3">
-                                <div className="flex-shrink-0 mt-1 p-1.5 bg-green-100 dark:bg-green-900/50 rounded-full">
-                                    <UsersIcon className="w-5 h-5 text-green-600 dark:text-green-400" />
-                                </div>
-                                <div>
-                                    <h4 className="font-semibold text-black dark:text-white">Remote Presenter Connection</h4>
-                                    <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                                        Invite co-hosts to join your show from anywhere in the world.
-                                    </p>
-                                </div>
-                            </li>
-                        </ul>
-                    </div>
                 </div>
             </div>
         </div>
