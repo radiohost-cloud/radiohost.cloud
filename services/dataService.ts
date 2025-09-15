@@ -109,16 +109,17 @@ export const getTrackBlob = async (track: Track): Promise<Blob | null> => {
     return dbService.getTrack(track.id);
 };
 
-export const addTrack = async (track: Track, file: Blob, artworkBlob?: Blob, destinationPath?: string) => {
+export const addTrack = async (track: Track, file: Blob, artworkBlob?: Blob, webkitRelativePath?: string) => {
     const mode = getMode();
     if (mode === 'HOST') {
-        return apiService.uploadTrack(track, file as File, artworkBlob, destinationPath || '');
+        return apiService.uploadTrack(track, file as File, artworkBlob, webkitRelativePath);
     }
-    await dbService.addTrack(track.id, file as File);
+    const newTrack = { ...track, id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}` };
+    await dbService.addTrack(newTrack.id, file as File);
     if (artworkBlob) {
-        await dbService.addArtwork(track.id, artworkBlob);
+        await dbService.addArtwork(newTrack.id, artworkBlob);
     }
-    return track;
+    return newTrack;
 };
 
 export const getTrackSrc = async (track: Track): Promise<string | null> => {

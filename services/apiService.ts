@@ -61,10 +61,12 @@ export const getSharedLibrary = <T>(): Promise<T | null> => {
     return fetch(`/api/library`).then(handleResponse);
 };
 
-export const uploadTrack = async (trackMetadata: Track, file: File, artworkBlob?: Blob, destinationPath?: string): Promise<Track> => {
+export const uploadTrack = async (trackMetadata: Track, file: File, artworkBlob?: Blob, webkitRelativePath?: string): Promise<Track> => {
     const formData = new FormData();
     formData.append('metadata', JSON.stringify(trackMetadata));
-    formData.append('destinationPath', destinationPath || '');
+    if (webkitRelativePath) {
+        formData.append('webkitRelativePath', webkitRelativePath);
+    }
     
     formData.append('audioFile', file);
     if (artworkBlob) {

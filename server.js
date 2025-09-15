@@ -236,6 +236,43 @@ const stopPlaybackLoop = () => {
 
 
 // --- Tree Manipulation Helpers ---
+const findFolderById = (node, folderId) => {
+    if (node.id === folderId) {
+        return node;
+    }
+    for (const child of node.children) {
+        if (child.type === 'folder') {
+            const found = findFolderById(child, folderId);
+            if (found) return found;
+        }
+    }
+    return null;
+};
+
+const findOrCreateFolderPath = (root, folderPath) => {
+    if (!folderPath) {
+        return root.id;
+    }
+    const pathParts = folderPath.split(/[/\\]/).filter(p => p);
+    let currentNode = root;
+
+    for (const part of pathParts) {
+        let childNode = currentNode.children.find(c => c.type === 'folder' && c.name === part);
+        if (!childNode) {
+            console.log(`[Upload] Creating new folder in library state: '${part}' inside '${currentNode.name}'`);
+            childNode = {
+                id: `folder-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+                name: part,
+                type: 'folder',
+                children: []
+            };
+            currentNode.children.push(childNode);
+        }
+        currentNode = childNode;
+    }
+    return currentNode.id;
+};
+
 const addItemToTree = (node, parentId, itemToAdd) => {
     if (node.id === parentId) {
         return { ...node, children: [...node.children, itemToAdd] };
@@ -622,24 +659,47 @@ wss.on('connection', async (ws, req) => {
                             case 'removeFromLibrary': {
                                 const { id } = payload;
                                 const { updatedNode, foundItem } = findAndRemoveItem(sharedMediaLibrary, id);
-                                if(foundItem && !foundItem.type !== 'folder' && foundItem.src) {
+                                if (foundItem && foundItem.type !== 'folder' && foundItem.src) {
                                     try {
                                         const relativePath = foundItem.src.replace(/^\/media\//, '');
                                         const filePath = path.join(mediaDir, relativePath);
-                                        if (fs.existsSync(filePath)) await fsPromises.unlink(filePath);
-
-                                        const trackBaseName = path.basename(foundItem.id, path.extname(foundItem.id));
-                                        const relativeDir = path.dirname(relativePath);
-                                        const artworkDirForTrack = path.join(artworkDir, relativeDir);
-                                        if (fs.existsSync(artworkDirForTrack)) {
-                                            const files = await fsPromises.readdir(artworkDirForTrack);
-                                            const artworkFile = files.find(f => f.startsWith(trackBaseName));
-                                            if (artworkFile) await fsPromises.unlink(path.join(artworkDirForTrack, artworkFile));
+                                        console.log(`[Delete] Attempting to delete audio file: ${filePath}`);
+                                        if (fs.existsSync(filePath)) {
+                                            await fsPromises.unlink(filePath);
+                                            console.log(`[Delete] Successfully deleted audio file: ${filePath}`);
+                                        } else {
+                                            console.warn(`[Delete] Audio file not found at: ${filePath}`);
                                         }
-                                    } catch (e) { console.error(`Failed to delete physical files for track ${id}:`, e); }
+
+                                        if (foundItem.hasEmbeddedArtwork) {
+                                            const trackBaseName = path.basename(foundItem.id, path.extname(foundItem.id));
+                                            const relativeDir = path.dirname(relativePath);
+                                            const artworkDirForTrack = path.join(artworkDir, relativeDir);
+
+                                            if (fs.existsSync(artworkDirForTrack)) {
+                                                const files = await fsPromises.readdir(artworkDirForTrack);
+                                                const artworkFile = files.find(f => f.startsWith(trackBaseName + '.'));
+                                                if (artworkFile) {
+                                                    const artworkPath = path.join(artworkDirForTrack, artworkFile);
+                                                    console.log(`[Delete] Attempting to delete artwork file: ${artworkPath}`);
+                                                    await fsPromises.unlink(artworkPath);
+                                                    console.log(`[Delete] Successfully deleted artwork file: ${artworkPath}`);
+                                                } else {
+                                                    console.warn(`[Delete] Artwork file for base name '${trackBaseName}' not found in ${artworkDirForTrack}`);
+                                                }
+                                            }
+                                        }
+                                    } catch (e) {
+                                        console.error(`[Delete] Failed to delete physical files for track ${id}:`, e);
+                                    }
+                                } else if (foundItem && foundItem.type === 'folder') {
+                                    console.log(`[Delete] Deleting folder '${foundItem.name}' from library.`);
                                 }
-                                db.data.sharedMediaLibrary = updatedNode;
-                                libraryChanged = true;
+
+                                if (foundItem) {
+                                    db.data.sharedMediaLibrary = updatedNode;
+                                    libraryChanged = true;
+                                }
                                 break;
                             }
                             case 'removeMultipleFromLibrary': {
@@ -1275,39 +1335,64 @@ app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { nam
 
     try {
         const metadata = JSON.parse(req.body.metadata);
-        const destinationPath = req.body.destinationPath || '';
+        const webkitRelativePath = req.body.webkitRelativePath || '';
+        const destinationPath = webkitRelativePath ? path.dirname(webkitRelativePath).replace(/\\/g, '/') : '';
 
-        // --- Handle Audio File ---
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const finalAudioFilename = 'track-' + uniqueSuffix + path.extname(audioFile.originalname);
-        
+        // --- File Saving with Conflict Resolution ---
         const finalAudioDir = path.join(mediaDir, destinationPath);
         await fsPromises.mkdir(finalAudioDir, { recursive: true });
-        const finalAudioPath = path.join(finalAudioDir, finalAudioFilename);
+
+        let finalAudioFilename = audioFile.originalname;
+        let counter = 1;
+        const originalNameWithoutExt = path.basename(audioFile.originalname, path.extname(audioFile.originalname));
+        const ext = path.extname(audioFile.originalname);
+        let finalAudioPath = path.join(finalAudioDir, finalAudioFilename);
+
+        while (fs.existsSync(finalAudioPath)) {
+            finalAudioFilename = `${originalNameWithoutExt} (${counter})${ext}`;
+            finalAudioPath = path.join(finalAudioDir, finalAudioFilename);
+            counter++;
+        }
         await fsPromises.writeFile(finalAudioPath, audioFile.buffer);
+        console.log(`[Upload] Saved audio file to: ${finalAudioPath}`);
 
         // --- Handle Artwork File ---
         if (artworkFile) {
             const finalArtworkDir = path.join(artworkDir, destinationPath);
             await fsPromises.mkdir(finalArtworkDir, { recursive: true });
-
+            
             const audioFileBaseName = path.basename(finalAudioFilename, path.extname(finalAudioFilename));
             const newArtworkFileName = audioFileBaseName + path.extname(artworkFile.originalname);
             const finalArtworkPath = path.join(finalArtworkDir, newArtworkFileName);
             
             await fsPromises.writeFile(finalArtworkPath, artworkFile.buffer);
+            console.log(`[Upload] Saved artwork file to: ${finalArtworkPath}`);
         }
 
-        const relativePath = path.join(destinationPath, finalAudioFilename).replace(/\\/g, '/');
+        // --- Update Database ---
+        const finalDestinationFolderId = findOrCreateFolderPath(db.data.sharedMediaLibrary, destinationPath);
+        
+        const relativePathForSrc = path.join(destinationPath, finalAudioFilename).replace(/\\/g, '/');
         const newTrack = {
             ...metadata,
             id: finalAudioFilename,
-            src: `/media/${relativePath}`,
+            src: `/media/${relativePathForSrc}`,
             hasEmbeddedArtwork: !!artworkFile,
             originalFilename: audioFile.originalname,
         };
 
-        res.status(201).json(newTrack);
+        const parentFolder = findFolderById(db.data.sharedMediaLibrary, finalDestinationFolderId);
+        if (parentFolder) {
+            parentFolder.children.push(newTrack);
+        } else {
+            console.error(`[Upload] Could not find parent folder with ID: ${finalDestinationFolderId}. Adding to root.`);
+            db.data.sharedMediaLibrary.children.push(newTrack);
+        }
+        await db.write();
+
+        broadcastLibrary();
+
+        res.status(201).json({ success: true, message: `File ${finalAudioFilename} uploaded.` });
     } catch (e) {
         console.error('Error processing upload:', e);
         res.status(500).json({ message: 'Error processing upload. Check server logs and permissions.' });

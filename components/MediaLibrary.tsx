@@ -9,7 +9,7 @@ import { UploadIcon } from './icons/UploadIcon';
 import { TrashIcon } from './icons/TrashIcon';
 import { FolderIcon } from './icons/FolderIcon';
 import ConfirmationDialog from './ConfirmationDialog';
-import { addTrack } from '../services/dataService';
+import * as dataService from '../services/dataService';
 import { LinkIcon } from './icons/LinkIcon';
 import AddUrlModal from './AddUrlModal';
 import { EyeSlashIcon } from './icons/EyeSlashIcon';
@@ -278,30 +278,6 @@ const addItemToTree = (node: Folder, parentId: string, itemToAdd: LibraryItem): 
     };
 };
 
-const getFolderPath = (root: Folder, folderId: string): string => {
-    if (folderId === 'root' || folderId === root.id) {
-        return '';
-    }
-
-    const findPathRecursive = (currentFolder: Folder, currentPath: string[]): string[] | null => {
-        for (const child of currentFolder.children) {
-            if (child.type === 'folder') {
-                if (child.id === folderId) {
-                    return [...currentPath, child.name];
-                }
-                const foundPath = findPathRecursive(child, [...currentPath, child.name]);
-                if (foundPath) {
-                    return foundPath;
-                }
-            }
-        }
-        return null;
-    };
-
-    const pathParts = findPathRecursive(root, []);
-    return pathParts ? pathParts.join('/') : '';
-};
-
 const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist, onAddTracksToLibrary, onAddUrlTrackToLibrary, onRemoveFromLibrary, onRemoveMultipleFromLibrary, onCreateFolder, onMoveItem, onOpenMetadataSettings, onOpenTrackMetadataEditor, onUpdateTrackTags, onUpdateFolderTags, onPflTrack, pflTrackId, onLibraryUpdate, playoutMode }) => {
     const [path, setPath] = useState<{ id: string; name: string }[]>([{ id: rootFolder.id, name: 'Library' }]);
     const [searchQuery, setSearchQuery] = useState('');
@@ -321,6 +297,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
     const [isImporting, setIsImporting] = useState(false);
     const [importProgress, setImportProgress] = useState({ current: 0, total: 0 });
 
+    const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
     const canModifyLibrary = playoutMode !== 'presenter';
     const currentFolderId = path[path.length - 1].id;
     const currentFolder = useMemo(() => findFolder(rootFolder, currentFolderId) || rootFolder, [rootFolder, currentFolderId]);
@@ -406,96 +383,47 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
-    const processFiles = async (files: (File | { name: string; blob: Blob })[]) => {
+    const processFiles = useCallback(async (files: File[]) => {
         setIsImporting(true);
         setImportProgress({ current: 0, total: files.length });
-        const newTracks: Track[] = [];
-        const destinationPath = getFolderPath(rootFolder, currentFolderId);
 
         for (const [index, file] of files.entries()) {
-            setImportProgress({ current: index + 1, total: files.length });
-            try {
-                const blob = 'blob' in file ? file.blob : file;
-                const fileNameWithExt = file.name;
-                const duration = await getAudioDuration(blob, fileNameWithExt);
-
-                const fileForService = blob instanceof File ? blob : new File([blob], fileNameWithExt, { type: blob.type });
-                const { title, artist, artworkBlob, remoteArtworkUrl } = await extractMetadata(fileForService);
-
-                const trackForService: Track = {
-                    id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-                    title,
-                    artist,
-                    duration,
-                    type: TrackType.SONG,
-                    src: '',
-                    hasEmbeddedArtwork: !!artworkBlob,
-                    remoteArtworkUrl: remoteArtworkUrl ?? undefined,
-                };
-
-                const finalTrack = await addTrack(trackForService, fileForService, artworkBlob, destinationPath);
-                newTracks.push(finalTrack);
-            } catch (error) {
-                console.error("Failed to process file:", file.name, error);
-                alert(`Failed to process file: ${file.name}. Server responded: ${error instanceof Error ? error.message : 'Unknown error'}`);
-            }
-        }
-
-        if (newTracks.length > 0) {
-            onAddTracksToLibrary(newTracks, currentFolderId);
-        }
-        setIsImporting(false);
-    };
-
-    const processFolderImport = useCallback(async (files: File[]) => {
-        setIsImporting(true);
-        const validFiles = files.filter(file => /\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(file.name));
-        setImportProgress({ current: 0, total: validFiles.length });
-
-        // FIX: This function was incomplete. It now processes files from a folder import.
-        // This is a simplified implementation that doesn't handle nested folders.
-        // It adds all valid audio files to the currently selected library folder.
-        const newTracks: Track[] = [];
-        const destinationPath = getFolderPath(rootFolder, currentFolderId);
-
-        for (const [index, file] of validFiles.entries()) {
             setImportProgress({ current: index + 1, total: files.length });
             try {
                 const duration = await getAudioDuration(file, file.name);
                 const { title, artist, artworkBlob, remoteArtworkUrl } = await extractMetadata(file);
 
                 const trackForService: Track = {
-                    id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-                    title,
-                    artist,
-                    duration,
-                    type: TrackType.SONG,
-                    src: '',
-                    hasEmbeddedArtwork: !!artworkBlob,
-                    remoteArtworkUrl: remoteArtworkUrl ?? undefined,
-                    originalFilename: file.name,
+                    id: '', // Server will generate this
+                    title, artist, duration, type: TrackType.SONG, src: '',
+                    hasEmbeddedArtwork: !!artworkBlob, remoteArtworkUrl: remoteArtworkUrl ?? undefined,
                 };
+                
+                const webkitRelativePath = (file as any).webkitRelativePath || '';
+                
+                if (isHostMode) {
+                    await dataService.addTrack(trackForService, file, artworkBlob, webkitRelativePath);
+                } else {
+                    // DEMO mode logic (simplified, does not handle folders)
+                    const finalTrack = await dataService.addTrack(trackForService, file, artworkBlob);
+                    onAddTracksToLibrary([finalTrack], currentFolderId);
+                }
 
-                const finalTrack = await addTrack(trackForService, file, artworkBlob, destinationPath);
-                newTracks.push(finalTrack);
             } catch (error) {
-                console.error("Failed to process file from folder import:", file.name, error);
+                console.error("Failed to process file:", file.name, error);
+                alert(`Failed to upload file: ${file.name}. Server responded: ${error instanceof Error ? error.message : 'Unknown error'}`);
             }
         }
-
-        if (newTracks.length > 0) {
-            onAddTracksToLibrary(newTracks, currentFolderId);
-        }
         setIsImporting(false);
-    }, [onAddTracksToLibrary, rootFolder, currentFolderId]);
+    }, [isHostMode, onAddTracksToLibrary, currentFolderId]);
     
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files) processFiles(Array.from(e.target.files));
-        e.target.value = '';
-    };
-
-    const handleFolderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files) processFolderImport(Array.from(e.target.files));
+        if (e.target.files) {
+             const validFiles = Array.from(e.target.files).filter(file => /\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(file.name));
+             if(validFiles.length > 0) {
+                processFiles(validFiles);
+             }
+        }
         e.target.value = '';
     };
 
@@ -629,7 +557,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
                     </div>}
                 </div>}
                 <input type="file" multiple ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="audio/*" />
-                <input type="file" multiple ref={folderInputRef} onChange={handleFolderChange} className="hidden" {...{ webkitdirectory: "true", directory: "true" } as any} />
+                <input type="file" multiple ref={folderInputRef} onChange={handleFileChange} className="hidden" {...{ webkitdirectory: "true", directory: "true" } as any} />
             </div>
 
             { /* Item List */ }
@@ -706,7 +634,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
                 onConfirm={handleConfirmDelete}
                 title="Delete Item"
             >
-                Are you sure you want to delete "{itemToDelete?.type === 'folder' ? itemToDelete.name : (itemToDelete as Track)?.title}"? This cannot be undone.
+                Are you sure you want to delete "{itemToDelete?.type === 'folder' ? itemToDelete.name : (itemToDelete as Track)?.title}"? This will also remove the file from the server and cannot be undone.
             </ConfirmationDialog>
             <AddUrlModal
                 isOpen={isAddUrlModalOpen}
