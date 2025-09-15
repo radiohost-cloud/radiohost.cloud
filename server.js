@@ -13,6 +13,7 @@ import fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
+import NodeID3 from 'node-id3';
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -63,6 +64,8 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
 
         for (const entry of entries) {
             const entryRelativePath = path.join(relativePath, entry.name).replace(/\\/g, '/');
+            const entryFullPath = path.join(fullPath, entry.name);
+
             if (entry.isDirectory()) {
                 children.push({
                     id: entryRelativePath,
@@ -71,19 +74,40 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
                     children: await scanMediaToTree(entry.name, entryRelativePath),
                 });
             } else if (/\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(entry.name)) {
-                // In a production app, you'd read metadata here (duration, etc.)
-                // For simplicity, we parse from filename.
-                const title = entry.name.replace(/\.[^/.]+$/, "");
-                const artist = 'Unknown';
-                children.push({
-                    id: entryRelativePath,
-                    title,
-                    artist,
-                    duration: 180, // Placeholder duration
-                    type: 'Song',
-                    src: `/media/${entryRelativePath}`,
-                    originalFilename: entry.name,
-                });
+                try {
+                    const tags = NodeID3.read(entryFullPath);
+                    let hasArtwork = false;
+
+                    if (tags && tags.image && tags.image.imageBuffer) {
+                        const artworkFilename = `${path.basename(entry.name, path.extname(entry.name))}.jpg`;
+                        const artworkPath = path.join(artworkDir, artworkFilename);
+                        await fsPromises.writeFile(artworkPath, tags.image.imageBuffer);
+                        hasArtwork = true;
+                    }
+
+                    children.push({
+                        id: entryRelativePath,
+                        title: tags.title || entry.name.replace(/\.[^/.]+$/, ""),
+                        artist: tags.artist || 'Unknown Artist',
+                        duration: tags.duration ? parseFloat(tags.duration) : 180,
+                        type: 'Song', // Default type, could be enhanced
+                        src: `/media/${entryRelativePath}`,
+                        originalFilename: entry.name,
+                        hasEmbeddedArtwork: hasArtwork,
+                    });
+                } catch (tagError) {
+                    console.error(`Error reading ID3 tags for ${entry.name}:`, tagError);
+                    // Add track with basic info if tag reading fails
+                    children.push({
+                        id: entryRelativePath,
+                        title: entry.name.replace(/\.[^/.]+$/, ""),
+                        artist: 'Unknown Artist',
+                        duration: 180, // Placeholder
+                        type: 'Song',
+                        src: `/media/${entryRelativePath}`,
+                        originalFilename: entry.name,
+                    });
+                }
             }
         }
     } catch (error) {

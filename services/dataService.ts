@@ -99,7 +99,8 @@ export const getArtworkUrl = async (track: Track): Promise<string | null> => {
     if (track.hasEmbeddedArtwork) {
         const trackId = track.originalId || track.id;
         if (mode === 'HOST') {
-            return `/api/artwork/${trackId}`;
+            const artworkFilename = `${track.id.substring(0, track.id.lastIndexOf('.'))}.jpg`;
+            return `/api/artwork/${encodeURIComponent(artworkFilename)}`;
         } else { // DEMO mode
             const blob = await dbService.getArtwork(trackId);
             if (blob) {
@@ -116,7 +117,9 @@ export const addTrack = async (track: Track, file: File | Blob, artworkBlob?: Bl
         if (!(file instanceof File)) {
             throw new Error("HOST mode requires a File object for uploads.");
         }
-        return apiService.uploadTrack(track, file, artworkBlob, webkitRelativePath);
+        // In HOST mode, we no longer send metadata. The server will generate it.
+        // We just upload the file and the server watcher will do the rest.
+        return apiService.uploadTrack(file, webkitRelativePath);
     }
     
     // DEMO mode
