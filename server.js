@@ -236,22 +236,7 @@ wss.on('connection', async (ws, req) => {
                 case 'ping':
                     ws.send(JSON.stringify({ type: 'pong' }));
                     break;
-
-                case 'chatMessage':
-                    if (studioClientEmail && studioClientEmail === email) {
-                        const studioMessage = {
-                            from: 'Studio',
-                            text: data.payload.text,
-                            timestamp: Date.now(),
-                        };
-                        browserPlayerClients.forEach(clientWs => {
-                            if (clientWs.readyState === WebSocket.OPEN) {
-                                clientWs.send(JSON.stringify({ type: 'chatMessage', payload: studioMessage }));
-                            }
-                        });
-                    }
-                    break;
-
+                
                 case 'studio-action':
                     if (studioClientEmail && studioClientEmail === email) {
                         const { action, payload } = data.payload;
@@ -280,6 +265,21 @@ wss.on('connection', async (ws, req) => {
                                 if (libraryChanged) broadcastLibrary();
                             });
                         }
+                    }
+                    break;
+
+                case 'chatMessage':
+                    if (studioClientEmail && studioClientEmail === email) {
+                        const studioMessage = {
+                            from: 'Studio',
+                            text: data.payload.text,
+                            timestamp: Date.now(),
+                        };
+                        browserPlayerClients.forEach(clientWs => {
+                            if (clientWs.readyState === WebSocket.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'chatMessage', payload: studioMessage }));
+                            }
+                        });
                     }
                     break;
                 
