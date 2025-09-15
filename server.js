@@ -423,9 +423,10 @@ const startPlayout = () => {
     if (streamConfig && streamConfig.isEnabled) {
         const { username, password, serverUrl, port, mountPoint, bitrate, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
         
-        // FIX: Robustly join the mount point to prevent double slashes.
-        const pathPart = path.posix.join('/', mountPoint || '');
-        const outputUrl = `icecast://${username}:${password}@${serverUrl}:${port}${pathPart}`;
+        // FIX: More robustly construct the Icecast URL to prevent double slashes.
+        const baseUrl = `icecast://${username}:${password}@${serverUrl}:${port}/`;
+        const finalMount = mountPoint ? String(mountPoint).trim().replace(/^\/+/, '') : '';
+        const outputUrl = baseUrl + finalMount;
 
         serverStreamStatus = 'connecting';
         broadcastStreamStatus();
