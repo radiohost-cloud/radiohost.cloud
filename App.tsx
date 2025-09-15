@@ -1926,7 +1926,12 @@ const AppInternal: React.FC = () => {
         if (isHostMode) {
             sendStudioCommand('updateTrackTags', { trackId, tags });
         } else {
-            setMediaLibrary(prev => updateItemInTree(prev, trackId, (track) => ({ ...track, tags: tags.length > 0 ? tags.sort() : undefined })));
+            setMediaLibrary(prev => updateItemInTree(prev, trackId, (item) => {
+                if (item.type !== 'folder') {
+                    return { ...item, tags: tags.length > 0 ? tags.sort() : undefined };
+                }
+                return item;
+            }));
         }
     }, [isHostMode, sendStudioCommand]);
     
@@ -1934,7 +1939,12 @@ const AppInternal: React.FC = () => {
         if (isHostMode) {
             sendStudioCommand('updateFolderTags', { folderId, newTags });
         } else {
-             setMediaLibrary(prev => updateItemInTree(prev, folderId, (folder) => ({ ...folder, tags: newTags.length > 0 ? newTags.sort() : undefined })));
+             setMediaLibrary(prev => updateItemInTree(prev, folderId, (item) => {
+                if (item.type === 'folder') {
+                    return { ...item, tags: newTags.length > 0 ? newTags.sort() : undefined };
+                }
+                return item;
+            }));
         }
     }, [isHostMode, sendStudioCommand]);
 
@@ -2739,6 +2749,52 @@ const AppInternal: React.FC = () => {
             }
         }
     }, []);
+
+    // FIX: This effect synchronizes the playlist with the media library.
+    // When a track's metadata (e.g., tags, title) is updated in the library,
+    // this ensures all instances of that track in the playlist are also updated.
+    useEffect(() => {
+        if (isHostMode && playoutPolicy.playoutMode === 'presenter') return;
+    
+        let needsUpdate = false;
+        const newPlaylist = playlist.map(item => {
+            if ('markerType' in item) {
+                return item;
+            }
+    
+            const trackInPlaylist = item;
+            const libraryTrackId = trackInPlaylist.originalId || trackInPlaylist.id;
+            const libraryTrack = findTrackInTree(mediaLibrary, libraryTrackId);
+    
+            if (libraryTrack) {
+                const areTagsDifferent = JSON.stringify(trackInPlaylist.tags || []) !== JSON.stringify(libraryTrack.tags || []);
+                const areMetadataDifferent = trackInPlaylist.title !== libraryTrack.title ||
+                                           trackInPlaylist.artist !== libraryTrack.artist ||
+                                           trackInPlaylist.type !== libraryTrack.type;
+    
+                if (areTagsDifferent || areMetadataDifferent) {
+                    needsUpdate = true;
+                    // Preserve the unique playlist item ID while updating its content
+                    // from the source of truth (the library).
+                    return {
+                        ...libraryTrack,
+                        id: trackInPlaylist.id,
+                        originalId: libraryTrack.id,
+                        // Keep playlist-specific properties if any
+                        addedBy: trackInPlaylist.addedBy,
+                        vtMix: trackInPlaylist.vtMix,
+                    };
+                }
+            }
+            return trackInPlaylist;
+        });
+    
+        if (needsUpdate) {
+            console.log('[Sync] Media library changes detected. Updating playlist.');
+            setPlaylist(newPlaylist);
+        }
+    }, [mediaLibrary, isHostMode, playoutPolicy.playoutMode]);
+
 
     if (isLoadingSession) {
         return (
