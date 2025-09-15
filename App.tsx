@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -161,9 +162,8 @@ const getProminentColorsAndTextColor = (img: HTMLImageElement): { colors: string
     return { colors: prominentColors, textColor };
 };
 
-// --- Recursive Helper Functions for Immutable Tree Traversal (Find/Get operations) ---
-// Note: All modification logic (add, remove, update) has been moved to the server.
-
+// --- Recursive Helper Functions ---
+// Note: Find/Get operations are universal. Modification logic is now conditional (client-side for DEMO, server-side for HOST).
 const findTrackInTree = (node: Folder, trackId: string): Track | null => {
     for (const child of node.children) {
         if (child.type !== 'folder' && child.id === trackId) {
@@ -196,17 +196,14 @@ const getSuppressionSettings = (track: Track, library: Folder): { enabled: boole
     const path = findTrackAndPath(library, originalId, []);
     if (!path) return null;
 
-    // Find the deepest setting in the hierarchy (most specific) by iterating backwards.
     for (let i = path.length - 1; i >= 0; i--) {
         const folder = path[i];
         if (folder.suppressMetadata?.enabled) {
             return folder.suppressMetadata;
         }
     }
-
     return null;
 };
-
 
 const getAllFolders = (node: Folder): { id: string; name: string }[] => {
     let folders = [{ id: node.id, name: node.name }];
@@ -231,6 +228,65 @@ const getAllTags = (node: Folder): string[] => {
     traverse(node);
     return Array.from(tagSet).sort();
 };
+
+// --- DEMO Mode Immutable Tree Helpers ---
+const addItemToTree = (node: Folder, parentId: string, itemToAdd: LibraryItem): Folder => {
+    if (node.id === parentId) {
+        return { ...node, children: [...node.children, itemToAdd] };
+    }
+    return {
+        ...node,
+        children: node.children.map(child =>
+            child.type === 'folder' ? addItemToTree(child, parentId, itemToAdd) : child
+        ),
+    };
+};
+const addMultipleItemsToTree = (node: Folder, parentId: string, itemsToAdd: LibraryItem[]): Folder => {
+    if (node.id === parentId) {
+        return { ...node, children: [...node.children, ...itemsToAdd] };
+    }
+    return {
+        ...node,
+        children: node.children.map(child =>
+            child.type === 'folder' ? addMultipleItemsToTree(child, parentId, itemsToAdd) : child
+        ),
+    };
+};
+const findAndRemoveItemFromTree = (node: Folder, itemId: string): { updatedNode: Folder, foundItem: LibraryItem | null } => {
+    let foundItem: LibraryItem | null = null;
+    const children = node.children.filter(child => {
+        if (child.id === itemId) {
+            foundItem = child;
+            return false;
+        }
+        return true;
+    });
+    if (foundItem) {
+        return { updatedNode: { ...node, children }, foundItem };
+    }
+    for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        if (child.type === 'folder') {
+            const result = findAndRemoveItemFromTree(child, itemId);
+            if (result.foundItem) {
+                children[i] = result.updatedNode;
+                return { updatedNode: { ...node, children }, foundItem: result.foundItem };
+            }
+        }
+    }
+    return { updatedNode: node, foundItem: null };
+};
+const updateItemInTree = (node: Folder, itemId: string, updateFn: (item: LibraryItem) => LibraryItem): Folder => {
+    return {
+        ...node,
+        children: node.children.map(child => {
+            if (child.id === itemId) return updateFn(child);
+            if (child.type === 'folder') return updateItemInTree(child, itemId, updateFn);
+            return child;
+        }),
+    };
+};
+
 
 type StreamStatus = 'inactive' | 'starting' | 'broadcasting' | 'error' | 'stopping';
 // --- App Component ---
@@ -278,6 +334,7 @@ const AppInternal: React.FC = () => {
     const [isSecureContext, setIsSecureContext] = useState(window.isSecureContext);
 
     const [isAutoModeEnabled, setIsAutoModeEnabled] = useState(false);
+    const [isHostMode, setIsHostMode] = useState(sessionStorage.getItem('appMode') === 'HOST');
 
     // --- Scheduler State ---
     const [isBroadcastEditorOpen, setIsBroadcastEditorOpen] = useState(false);
@@ -712,7 +769,6 @@ const AppInternal: React.FC = () => {
 
     useEffect(() => {
         const fetchUsers = async () => {
-            const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
             if(isHostMode && isStudio){
                 try {
                     const users = await dataService.getAllUsers();
@@ -723,7 +779,7 @@ const AppInternal: React.FC = () => {
             }
         };
         fetchUsers();
-    }, [isStudio]);
+    }, [isStudio, isHostMode]);
 
     useEffect(() => {
         // If the user is no longer a studio admin (e.g., switched to presenter mode)
@@ -767,9 +823,7 @@ const AppInternal: React.FC = () => {
     };
     
     useDebouncedEffect(() => {
-        // In presenter mode, we don't save data, we only receive it.
-        // Also, shared state is managed by the server, so we only save user-specific state.
-        if (playoutPolicy.playoutMode === 'presenter') return;
+        if (isHostMode && playoutPolicy.playoutMode === 'presenter') return;
 
         const dataToSave = {
             mediaLibrary,
@@ -815,7 +869,7 @@ const AppInternal: React.FC = () => {
         isRightColumnCollapsed, isAutoBackupEnabled, isAutoBackupOnStartupEnabled,
         autoBackupInterval, isAutoModeEnabled, isPlaying, currentPlayingItemId,
         currentTrackIndex, stopAfterTrackId, audioBuses, mixerConfig, currentUser,
-        lastAutoBackupTimestamp
+        lastAutoBackupTimestamp, isHostMode
     ], 1000);
     
     useEffect(() => {
@@ -888,66 +942,58 @@ const AppInternal: React.FC = () => {
     }, []);
     
     const sendStudioCommand = useCallback((command: string, payload?: any) => {
-        if (playoutPolicyRef.current.playoutMode !== 'studio' || wsRef.current?.readyState !== WebSocket.OPEN) return;
-        wsRef.current.send(JSON.stringify({
-            type: 'studio-command',
-            payload: { command, payload }
-        }));
-    }, []);
+        if (isHostMode && playoutPolicyRef.current.playoutMode === 'studio' && wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+                type: 'studio-command',
+                payload: { command, payload }
+            }));
+        }
+    }, [isHostMode]);
 
     const handleSetStopAfterTrackId = useCallback((id: string | null) => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-        sendStudioCommand('setStopAfterTrackId', { id });
-    }, [playoutPolicy.playoutMode, sendStudioCommand]);
+        if (isHostMode) {
+            if (playoutPolicy.playoutMode === 'presenter') return;
+            sendStudioCommand('setStopAfterTrackId', { id });
+        } else {
+            setStopAfterTrackId(id);
+        }
+    }, [isHostMode, playoutPolicy.playoutMode, sendStudioCommand]);
 
     const handleNext = useCallback(() => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-        sendStudioCommand('next');
+        if (isHostMode) {
+            if (playoutPolicy.playoutMode === 'presenter') return;
+            sendStudioCommand('next');
+        } else {
+            const nextIndex = findNextPlayableIndex(currentTrackIndexRef.current, 1);
+            if (nextIndex !== -1) {
+                const nextItem = playlistRef.current[nextIndex];
+                setCurrentTrackIndex(nextIndex);
+                setCurrentPlayingItemId(nextItem?.id || null);
+                setTrackProgress(0);
+            } else if (isPlayingRef.current) {
+                setIsPlaying(false);
+            }
+        }
         setActivePlayer(p => p === 'A' ? 'B' : 'A');
-    }, [playoutPolicy.playoutMode, sendStudioCommand]);
+    }, [isHostMode, playoutPolicy.playoutMode, sendStudioCommand, findNextPlayableIndex]);
 
     const handlePrevious = useCallback(() => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-        sendStudioCommand('previous');
+        if (isHostMode) {
+            if (playoutPolicy.playoutMode === 'presenter') return;
+            sendStudioCommand('previous');
+        } else {
+            const prevIndex = findNextPlayableIndex(currentTrackIndexRef.current, -1);
+            if (prevIndex !== -1) {
+                 const prevItem = playlistRef.current[prevIndex];
+                setCurrentTrackIndex(prevIndex);
+                setCurrentPlayingItemId(prevItem?.id || null);
+                setTrackProgress(0);
+            }
+        }
         setActivePlayer(p => p === 'A' ? 'B' : 'A');
-    }, [playoutPolicy.playoutMode, sendStudioCommand]);
+    }, [isHostMode, playoutPolicy.playoutMode, sendStudioCommand, findNextPlayableIndex]);
     
-    const handleTogglePlay = useCallback(async () => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-        if (!audioGraphRef.current.isInitialized) {
-            await initializeAudioGraph();
-        }
-        if (playlistRef.current.length === 0) return;
-
-        const shouldPlay = !isPlayingRef.current;
-        if (shouldPlay) {
-            stopPfl();
-        }
-        sendStudioCommand('togglePlay');
-    }, [stopPfl, playoutPolicy.playoutMode, sendStudioCommand]);
-    
-    const handlePlayTrack = useCallback(async (itemId: string) => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-        if (!audioGraphRef.current.isInitialized) {
-            await initializeAudioGraph();
-        }
-        
-        const targetIndex = playlistRef.current.findIndex(item => item.id === itemId);
-        if (targetIndex === -1) return;
-
-        const newTrack = playlistRef.current[targetIndex];
-        if ('markerType' in newTrack) return;
-
-        stopPfl();
-        sendStudioCommand('playTrack', { itemId });
-        setActivePlayer(p => p === 'A' ? 'B' : 'A');
-    }, [stopPfl, playoutPolicy.playoutMode, sendStudioCommand]);
-    
-    const getTrackSrc = useCallback(async (track: Track): Promise<string | null> => {
-        const trackWithOriginalId = { ...track, id: track.originalId || track.id };
-        return dataService.getTrackSrc(trackWithOriginalId);
-    }, []);
-
+    // FIX: Moved initializeAudioGraph before its usage in handleTogglePlay and handlePlayTrack
     const initializeAudioGraph = useCallback(async () => {
        if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !playerARef.current || !playerBRef.current || !pflAudioRef.current) return;
     
@@ -1054,6 +1100,53 @@ const AppInternal: React.FC = () => {
         finally { setIsAudioEngineInitializing(false); }
     }, [audioBuses, mixerWorkletCode]);
 
+    const handleTogglePlay = useCallback(async () => {
+         if (!audioGraphRef.current.isInitialized) {
+            await initializeAudioGraph();
+        }
+        if (playlistRef.current.length === 0) return;
+
+        if (isHostMode) {
+            if (playoutPolicy.playoutMode === 'presenter') return;
+            if (!isPlayingRef.current) stopPfl();
+            sendStudioCommand('togglePlay');
+        } else {
+            const shouldPlay = !isPlayingRef.current;
+            if (shouldPlay) stopPfl();
+            setIsPlaying(shouldPlay);
+        }
+    }, [stopPfl, playoutPolicy.playoutMode, sendStudioCommand, isHostMode, initializeAudioGraph]);
+    
+    const handlePlayTrack = useCallback(async (itemId: string) => {
+        if (!audioGraphRef.current.isInitialized) {
+            await initializeAudioGraph();
+        }
+        
+        const targetIndex = playlistRef.current.findIndex(item => item.id === itemId);
+        if (targetIndex === -1) return;
+
+        const newTrack = playlistRef.current[targetIndex];
+        if ('markerType' in newTrack) return;
+
+        if (isHostMode) {
+            if (playoutPolicy.playoutMode === 'presenter') return;
+            stopPfl();
+            sendStudioCommand('playTrack', { itemId });
+        } else {
+            stopPfl();
+            setCurrentTrackIndex(targetIndex);
+            setCurrentPlayingItemId(itemId);
+            setTrackProgress(0);
+            setIsPlaying(true);
+        }
+        setActivePlayer(p => p === 'A' ? 'B' : 'A');
+    }, [stopPfl, playoutPolicy.playoutMode, sendStudioCommand, isHostMode, initializeAudioGraph]);
+    
+    const getTrackSrc = useCallback(async (track: Track): Promise<string | null> => {
+        const trackWithOriginalId = { ...track, id: track.originalId || track.id };
+        return dataService.getTrackSrc(trackWithOriginalId);
+    }, []);
+
     useEffect(() => {
         if (activeRightColumnTab === 'stream') {
             initializeAudioGraph();
@@ -1101,7 +1194,8 @@ const AppInternal: React.FC = () => {
              if (isPlaying) stopPfl();
             if (!currentTrack) {
                 if (isPlaying) {
-                     if (isStudio) sendStudioCommand('togglePlay');
+                     if (isHostMode && isStudio) sendStudioCommand('togglePlay');
+                     else if (!isHostMode) setIsPlaying(false);
                 }
                 return;
             }
@@ -1120,7 +1214,7 @@ const AppInternal: React.FC = () => {
                     currentPlayer.load();
                 } else {
                     console.error(`Could not load track: ${currentTrack.title}`);
-                    if (isStudio && !isAutoModeEnabledRef.current) handleNext(); // Only auto-skip in manual mode
+                    if (!isHostMode) handleNext(); // Only auto-skip in DEMO mode
                     return;
                 }
             }
@@ -1130,7 +1224,8 @@ const AppInternal: React.FC = () => {
                     await currentPlayer.play();
                 } catch (e) {
                     console.error("Playback failed:", e);
-                    if (isStudio) sendStudioCommand('togglePlay');
+                    if (isHostMode && isStudio) sendStudioCommand('togglePlay');
+                    else if (!isHostMode) setIsPlaying(false);
                 }
             } else if (!isPlaying && !currentPlayer.paused) {
                 currentPlayer.pause();
@@ -1139,7 +1234,7 @@ const AppInternal: React.FC = () => {
 
         loadAndPlay();
         
-    }, [currentTrack, isPlaying, activePlayer, handleNext, getTrackSrc, stopPfl, isStudio, sendStudioCommand]);
+    }, [currentTrack, isPlaying, activePlayer, handleNext, getTrackSrc, stopPfl, isStudio, sendStudioCommand, isHostMode]);
 
     const timeline = useMemo(() => {
         const timelineMap = new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>();
@@ -1257,21 +1352,23 @@ const AppInternal: React.FC = () => {
             const player = e.target as HTMLAudioElement;
             const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
             if (player !== activePlayerRef.current) return;
-            if (playoutPolicyRef.current.playoutMode === 'presenter' || isAutoModeEnabledRef.current) {
-                return;
+            
+            if (isHostMode) return; // In HOST mode, server handles track changes
+
+            if (isAutoModeEnabledRef.current) { // In DEMO mode, auto-advance if enabled
+                if (!isNaN(player.duration) && player.duration > 2 && player.currentTime < player.duration - 2) {
+                    console.warn(`Ignored premature 'ended' event. CurrentTime: ${player.currentTime.toFixed(2)}, Duration: ${player.duration.toFixed(2)}`);
+                    if (player.paused) player.play().catch(err => console.error("Could not resume stalled player:", err));
+                    return;
+                }
+                handleNext();
             }
-            if (!isNaN(player.duration) && player.duration > 2 && player.currentTime < player.duration - 2) {
-                console.warn(`Ignored premature 'ended' event. CurrentTime: ${player.currentTime.toFixed(2)}, Duration: ${player.duration.toFixed(2)}`);
-                if (player.paused) player.play().catch(err => console.error("Could not resume stalled player:", err));
-                return;
-            }
-            handleNext();
         };
         
         const players = [playerA, playerB];
         players.forEach(p => { if (p) { p.addEventListener('timeupdate', handleTimeUpdate); p.addEventListener('ended', handleEnded); } });
         return () => { players.forEach(p => { if (p) { p.removeEventListener('timeupdate', handleTimeUpdate); p.removeEventListener('ended', handleEnded); } }); };
-    }, [activePlayer, handleNext]);
+    }, [activePlayer, handleNext, isHostMode]);
 
     const triggerHardMarkerFadeAndJump = useCallback(async (nextIndex: number) => {
         if (isCrossfadingRef.current) return;
@@ -1300,16 +1397,24 @@ const AppInternal: React.FC = () => {
                 setPlayoutHistory(prev => [...prev, { trackId: endedItem.originalId || endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
             }
             
-            sendStudioCommand('jumpToTrack', { index: nextIndex });
+            if (isHostMode) {
+                sendStudioCommand('jumpToTrack', { index: nextIndex });
+            } else {
+                setCurrentTrackIndex(nextIndex);
+                const nextItem = playlistRef.current[nextIndex];
+                if (nextItem && !('markerType' in nextItem)) {
+                    setCurrentPlayingItemId(nextItem.id);
+                }
+            }
             setActivePlayer(p => (p === 'A' ? 'B' : 'A'));
     
             isCrossfadingRef.current = false;
         }, FADE_DURATION * 1000);
     
-    }, [activePlayer, setPlayoutHistory, sendStudioCommand]);
+    }, [activePlayer, setPlayoutHistory, sendStudioCommand, isHostMode]);
 
     useEffect(() => {
-        if (!isPlaying || playoutPolicy.playoutMode === 'presenter') return;
+        if (!isPlaying || isHostMode) return; // This logic is client-side only for DEMO mode
     
         const intervalId = setInterval(() => {
             const now = Date.now();
@@ -1341,7 +1446,7 @@ const AppInternal: React.FC = () => {
     
         return () => clearInterval(intervalId);
     
-    }, [isPlaying, findNextPlayableIndex, triggerHardMarkerFadeAndJump, playoutPolicy.playoutMode]);
+    }, [isPlaying, findNextPlayableIndex, triggerHardMarkerFadeAndJump, isHostMode]);
 
     useEffect(() => {
         const graph = audioGraphRef.current;
@@ -1628,9 +1733,18 @@ const AppInternal: React.FC = () => {
     }, []);
 
     const handleInsertTrackInPlaylist = useCallback((track: Track, beforeItemId: string | null) => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-        sendStudioCommand('insertTrack', { track, beforeItemId });
-    }, [sendStudioCommand, playoutPolicy.playoutMode]);
+        if (isHostMode) {
+            if (playoutPolicy.playoutMode === 'presenter') return;
+            sendStudioCommand('insertTrack', { track, beforeItemId });
+        } else {
+             setPlaylist(prev => {
+                const newPlaylist = [...prev];
+                const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, track);
+                return newPlaylist;
+            });
+        }
+    }, [sendStudioCommand, playoutPolicy.playoutMode, isHostMode]);
 
     const handleConfirmValidationAndAddTrack = useCallback(() => {
         if (validationWarning) {
@@ -1687,66 +1801,115 @@ const AppInternal: React.FC = () => {
     }, [validateTrackPlacement, handleInsertTrackInPlaylist]);
 
     const handleInsertVoiceTrack = useCallback(async (voiceTrack: Track, blob: Blob, vtMix: VtMixDetails, beforeItemId: string | null) => {
-        if (playoutPolicyRef.current.playoutMode === 'presenter') {
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-                const reader = new FileReader();
-                reader.readAsDataURL(blob);
-                reader.onloadend = () => {
-                    const payload = { voiceTrack, vtMix, beforeItemId, audioDataUrl: reader.result as string };
-                    wsRef.current?.send(JSON.stringify({ type: 'voiceTrackAdd', payload }));
-                    console.log('[Presenter] Sent new VT to studio.');
-                };
+        if (isHostMode) {
+            if (playoutPolicyRef.current.playoutMode === 'presenter') {
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    const reader = new FileReader();
+                    reader.readAsDataURL(blob);
+                    reader.onloadend = () => {
+                        const payload = { voiceTrack, vtMix, beforeItemId, audioDataUrl: reader.result as string };
+                        wsRef.current?.send(JSON.stringify({ type: 'voiceTrackAdd', payload }));
+                        console.log('[Presenter] Sent new VT to studio.');
+                    };
+                } else {
+                    console.error("WebSocket not connected. Cannot send VT to studio.");
+                }
             } else {
-                console.error("WebSocket not connected. Cannot send VT to studio.");
+                sendStudioCommand('insertVoiceTrack', { voiceTrack, vtMix, beforeItemId, blob });
             }
         } else {
-            sendStudioCommand('insertVoiceTrack', { voiceTrack, vtMix, beforeItemId, blob });
+            const trackWithBlob = { ...voiceTrack, src: URL.createObjectURL(blob) };
+            handleInsertTrackInPlaylist(trackWithBlob, beforeItemId);
         }
-    }, [sendStudioCommand]);
+    }, [sendStudioCommand, isHostMode, handleInsertTrackInPlaylist]);
 
     const handleRemoveFromPlaylist = useCallback((itemIdToRemove: string) => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
         const itemToRemove = playlistRef.current.find(item => item.id === itemIdToRemove);
         if (itemToRemove && !('markerType' in itemToRemove) && itemToRemove.src && itemToRemove.src.startsWith('blob:')) {
             URL.revokeObjectURL(itemToRemove.src);
         }
-        sendStudioCommand('removeFromPlaylist', { itemId: itemIdToRemove });
-    }, [playoutPolicy.playoutMode, sendStudioCommand]);
+
+        if (isHostMode) {
+            if (playoutPolicy.playoutMode === 'presenter') return;
+            sendStudioCommand('removeFromPlaylist', { itemId: itemIdToRemove });
+        } else {
+            setPlaylist(p => p.filter(item => item.id !== itemIdToRemove));
+        }
+    }, [isHostMode, playoutPolicy.playoutMode, sendStudioCommand]);
 
     const handleReorderPlaylist = useCallback((draggedId: string, dropTargetId: string | null) => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-        sendStudioCommand('reorderPlaylist', { draggedId, dropTargetId });
-    }, [playoutPolicy.playoutMode, sendStudioCommand]);
+        if (isHostMode) {
+            if (playoutPolicy.playoutMode === 'presenter') return;
+            sendStudioCommand('reorderPlaylist', { draggedId, dropTargetId });
+        } else {
+            setPlaylist(prev => {
+                const newPlaylist = [...prev];
+                const dragIndex = newPlaylist.findIndex(item => item.id === draggedId);
+                if (dragIndex === -1) return prev;
+                const [draggedItem] = newPlaylist.splice(dragIndex, 1);
+                const dropIndex = dropTargetId ? newPlaylist.findIndex(item => item.id === dropTargetId) : newPlaylist.length;
+                newPlaylist.splice(dropIndex !== -1 ? dropIndex : newPlaylist.length, 0, draggedItem);
+                return newPlaylist;
+            });
+        }
+    }, [isHostMode, playoutPolicy.playoutMode, sendStudioCommand]);
 
 
     const handleClearPlaylist = useCallback(() => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
         playlistRef.current.forEach(item => {
             if (!('markerType' in item) && item.src && item.src.startsWith('blob:')) URL.revokeObjectURL(item.src);
         });
-        sendStudioCommand('clearPlaylist');
-    }, [playoutPolicy.playoutMode, sendStudioCommand]);
-
-    const updateMediaLibrary = useCallback((updateFn: (prev: Folder) => Folder) => {
-        const newLibrary = updateFn(mediaLibraryRef.current);
-        sendStudioCommand('setLibrary', { library: newLibrary });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            if (playoutPolicy.playoutMode === 'presenter') return;
+            sendStudioCommand('clearPlaylist');
+        } else {
+            setPlaylist([]);
+            setIsPlaying(false);
+        }
+    }, [isHostMode, playoutPolicy.playoutMode, sendStudioCommand]);
 
     const handleAddTracksToLibrary = useCallback((tracks: Track[], destinationFolderId: string) => {
-        sendStudioCommand('addTracksToLibrary', { tracks, destinationFolderId });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            sendStudioCommand('addTracksToLibrary', { tracks, destinationFolderId });
+        } else {
+            setMediaLibrary(prev => addMultipleItemsToTree(prev, destinationFolderId, tracks));
+        }
+    }, [isHostMode, sendStudioCommand]);
 
     const handleAddUrlTrackToLibrary = useCallback((track: Track, destinationFolderId: string) => {
-        sendStudioCommand('addUrlTrackToLibrary', { track, destinationFolderId });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            sendStudioCommand('addUrlTrackToLibrary', { track, destinationFolderId });
+        } else {
+             setMediaLibrary(prev => addItemToTree(prev, destinationFolderId, track));
+        }
+    }, [isHostMode, sendStudioCommand]);
     
     const handleRemoveFromLibrary = useCallback(async (id: string) => {
-        sendStudioCommand('removeFromLibrary', { id });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            sendStudioCommand('removeFromLibrary', { id });
+        } else {
+            const item = findTrackInTree(mediaLibrary, id);
+            if (item) await dataService.deleteTrack(item);
+            setMediaLibrary(prev => findAndRemoveItemFromTree(prev, id).updatedNode);
+        }
+    }, [isHostMode, sendStudioCommand, mediaLibrary]);
 
     const handleRemoveMultipleFromLibrary = useCallback(async (ids: string[]) => {
-        sendStudioCommand('removeMultipleFromLibrary', { ids });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            sendStudioCommand('removeMultipleFromLibrary', { ids });
+        } else {
+            const idsSet = new Set(ids);
+            const removeItemsFromTree = (node: Folder, itemIdsToRemove: Set<string>): Folder => {
+                const newChildren = node.children
+                    .filter(child => !itemIdsToRemove.has(child.id))
+                    .map(child =>
+                        child.type === 'folder' ? removeItemsFromTree(child, itemIdsToRemove) : child
+                    );
+                return { ...node, children: newChildren };
+            };
+            setMediaLibrary(prev => removeItemsFromTree(prev, idsSet));
+        }
+    }, [isHostMode, sendStudioCommand]);
 
     const getFolderPath = useCallback((root: Folder, folderId: string): string => {
         if (folderId === 'root' || folderId === root.id) return '';
@@ -1765,36 +1928,72 @@ const AppInternal: React.FC = () => {
     }, []);
 
     const handleCreateFolder = useCallback(async (parentId: string, folderName: string) => {
-        sendStudioCommand('createFolder', { parentId, folderName });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            sendStudioCommand('createFolder', { parentId, folderName });
+        } else {
+            const newFolder: Folder = { id: `folder-${Date.now()}`, name: folderName, type: 'folder', children: [] };
+            setMediaLibrary(prev => addItemToTree(prev, parentId, newFolder));
+        }
+    }, [isHostMode, sendStudioCommand]);
 
     const handleMoveItemInLibrary = useCallback((itemId: string, destinationFolderId: string) => {
-        sendStudioCommand('moveItemInLibrary', { itemId, destinationFolderId });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            sendStudioCommand('moveItemInLibrary', { itemId, destinationFolderId });
+        } else {
+            setMediaLibrary(prev => {
+                const { updatedNode, foundItem } = findAndRemoveItemFromTree(prev, itemId);
+                if (foundItem) {
+                    return addItemToTree(updatedNode, destinationFolderId, foundItem);
+                }
+                return prev;
+            });
+        }
+    }, [isHostMode, sendStudioCommand]);
 
     const handleUpdateFolderMetadataSettings = useCallback((folderId: string, settings: { enabled: boolean; customText?: string; suppressDuplicateWarning?: boolean }) => {
-        sendStudioCommand('updateFolderMetadata', { folderId, settings });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            sendStudioCommand('updateFolderMetadata', { folderId, settings });
+        } else {
+            setMediaLibrary(prev => updateItemInTree(prev, folderId, (folder) => ({ ...folder, suppressMetadata: settings })));
+        }
+    }, [isHostMode, sendStudioCommand]);
 
     const handleUpdateTrackMetadata = useCallback((trackId: string, newMetadata: { title: string; artist: string; type: TrackType; remoteArtworkUrl?: string; }) => {
-        sendStudioCommand('updateTrackMetadata', { trackId, newMetadata });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            sendStudioCommand('updateTrackMetadata', { trackId, newMetadata });
+        } else {
+// FIX: Added a type guard to ensure the item being updated is a Track, resolving a TypeScript error where properties of a Track could be incorrectly applied to a Folder.
+            setMediaLibrary(prev => updateItemInTree(prev, trackId, (item) => {
+                if (item.type !== 'folder') {
+                    return { ...item, ...newMetadata };
+                }
+                return item;
+            }));
+        }
+    }, [isHostMode, sendStudioCommand]);
 
     const handleUpdateTrackTags = useCallback((trackId: string, tags: string[]) => {
-        sendStudioCommand('updateTrackTags', { trackId, tags });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            sendStudioCommand('updateTrackTags', { trackId, tags });
+        } else {
+            setMediaLibrary(prev => updateItemInTree(prev, trackId, (track) => ({ ...track, tags: tags.length > 0 ? tags.sort() : undefined })));
+        }
+    }, [isHostMode, sendStudioCommand]);
     
     const handleUpdateFolderTags = useCallback((folderId: string, newTags: string[]) => {
-        sendStudioCommand('updateFolderTags', { folderId, newTags });
-    }, [sendStudioCommand]);
+        if (isHostMode) {
+            sendStudioCommand('updateFolderTags', { folderId, newTags });
+        } else {
+             setMediaLibrary(prev => updateItemInTree(prev, folderId, (folder) => ({ ...folder, tags: newTags.length > 0 ? newTags.sort() : undefined })));
+        }
+    }, [isHostMode, sendStudioCommand]);
 
     const handleLogin = useCallback((user: User) => {
         setCurrentUser(user);
-        const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
         if (isHostMode && user.role) {
             setPlayoutPolicy(p => ({ ...p, playoutMode: user.role }));
         }
-    }, []);
+    }, [isHostMode]);
     const handleSignup = useCallback((user: User) => { setCurrentUser(user); }, []);
     const handleLogout = useCallback(async () => {
         await dataService.putAppState('currentUserEmail', null);
@@ -1955,8 +2154,8 @@ const AppInternal: React.FC = () => {
         });
     }, []);
 
-    const nextIndex = useMemo(() => findNextPlayableIndex(currentTrackIndex, 1), [playlist, currentTrackIndex, findNextPlayableIndex]);
-    const nextNextIndex = useMemo(() => (nextIndex !== -1 ? findNextPlayableIndex(nextIndex, 1) : -1), [playlist, nextIndex, findNextPlayableIndex]);
+    const nextIndex = useMemo(() => findNextPlayableIndex(currentTrackIndex, 1), [findNextPlayableIndex, currentTrackIndex]);
+    const nextNextIndex = useMemo(() => (nextIndex !== -1 ? findNextPlayableIndex(nextIndex, 1) : -1), [nextIndex, findNextPlayableIndex]);
 
     const nextTrack = useMemo(() => {
         if (nextIndex !== -1 && nextIndex !== currentTrackIndex) {
@@ -2058,10 +2257,12 @@ const AppInternal: React.FC = () => {
     const handleImportData = useCallback((data: any) => {
         try {
             if (data.library) {
-                sendStudioCommand('setLibrary', { library: data.library });
+                 if (isHostMode) sendStudioCommand('setLibrary', { library: data.library });
+                 else setMediaLibrary(data.library);
             }
             if (data.playlist) {
-                sendStudioCommand('setPlaylist', { playlist: data.playlist });
+                if (isHostMode) sendStudioCommand('setPlaylist', { playlist: data.playlist });
+                else setPlaylist(data.playlist);
             }
             if (data.cartwall) {
                 let loadedPages: CartwallPage[] | null = null;
@@ -2097,7 +2298,7 @@ const AppInternal: React.FC = () => {
             console.error("Failed to import data", e);
             alert('There was an error importing the data. Check the console for details.');
         }
-    }, [sendStudioCommand]);
+    }, [sendStudioCommand, isHostMode]);
 
 
     const handleSetAutoBackupFolder = useCallback(async () => {
@@ -2170,12 +2371,29 @@ const AppInternal: React.FC = () => {
     const allTags = useMemo(() => getAllTags(mediaLibrary), [mediaLibrary]);
 
     const handleInsertTimeMarker = useCallback((marker: TimeMarker, beforeItemId: string | null) => {
-        if (isStudio) sendStudioCommand('insertTimeMarker', { marker, beforeItemId });
-    }, [sendStudioCommand, isStudio]);
+        if (isHostMode && isStudio) sendStudioCommand('insertTimeMarker', { marker, beforeItemId });
+        else if (!isHostMode) {
+             setPlaylist(prev => {
+                const newPlaylist = [...prev];
+                const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, marker);
+                return newPlaylist;
+            });
+        }
+    }, [sendStudioCommand, isStudio, isHostMode]);
 
     const handleUpdateTimeMarker = useCallback((markerId: string, updates: Partial<TimeMarker>) => {
-        if (isStudio) sendStudioCommand('updateTimeMarker', { markerId, updates });
-    }, [sendStudioCommand, isStudio]);
+        if (isHostMode && isStudio) sendStudioCommand('updateTimeMarker', { markerId, updates });
+        else if (!isHostMode) {
+// FIX: Added a type guard to ensure the item being updated is a TimeMarker, resolving a TypeScript error where properties of a TimeMarker could be incorrectly applied to a Track.
+            setPlaylist(p => p.map(item => {
+                if (item.id === markerId && item.type === 'marker') {
+                    return { ...item, ...updates };
+                }
+                return item;
+            }));
+        }
+    }, [sendStudioCommand, isStudio, isHostMode]);
     
     const handleClosePwaModal = useCallback(async (dontShowAgain: boolean) => {
         if (dontShowAgain) await dataService.putAppState('hidePwaInstallModal', true);
@@ -2193,16 +2411,15 @@ const AppInternal: React.FC = () => {
     
     const handleToggleAutoMode = useCallback((enabled: boolean) => {
         setIsAutoModeEnabled(enabled);
-        if (isStudio) {
+        if (isHostMode && isStudio) {
             sendStudioCommand('toggleAutoMode', { enabled });
-        } else {
-            // Local fallback for DEMO mode
-            if (enabled) {
-                setPlayoutPolicy(p => ({ ...p, isAutoFillEnabled: true }));
-                if (!isPlayingRef.current && playlistRef.current.length > 0) handleTogglePlay();
+        } else if (!isHostMode) {
+            setPlayoutPolicy(p => ({ ...p, isAutoFillEnabled: enabled }));
+            if (enabled && !isPlayingRef.current && playlistRef.current.length > 0) {
+                handleTogglePlay();
             }
         }
-    }, [isStudio, sendStudioCommand, handleTogglePlay]);
+    }, [isHostMode, isStudio, sendStudioCommand, handleTogglePlay]);
 
     const handleOpenArtworkModal = useCallback((url: string) => {
         setArtworkModalUrl(url);
@@ -2222,27 +2439,50 @@ const AppInternal: React.FC = () => {
     }, []);
 
     const handleSaveBroadcast = useCallback((broadcast: Broadcast) => {
-        if(isStudio) sendStudioCommand('saveBroadcast', { broadcast });
+        if(isHostMode && isStudio) sendStudioCommand('saveBroadcast', { broadcast });
+        else if (!isHostMode) {
+            setBroadcasts(prev => {
+                const index = prev.findIndex(b => b.id === broadcast.id);
+                if (index > -1) {
+                    const newBroadcasts = [...prev];
+                    newBroadcasts[index] = broadcast;
+                    return newBroadcasts;
+                }
+                return [...prev, broadcast];
+            });
+        }
         handleCloseBroadcastEditor();
-    }, [handleCloseBroadcastEditor, sendStudioCommand, isStudio]);
+    }, [handleCloseBroadcastEditor, sendStudioCommand, isStudio, isHostMode]);
 
     const handleDeleteBroadcast = useCallback((broadcastId: string) => {
-        if(isStudio) sendStudioCommand('deleteBroadcast', { broadcastId });
-    }, [sendStudioCommand, isStudio]);
+        if(isHostMode && isStudio) sendStudioCommand('deleteBroadcast', { broadcastId });
+        else if (!isHostMode) {
+            setBroadcasts(prev => prev.filter(b => b.id !== broadcastId));
+        }
+    }, [sendStudioCommand, isStudio, isHostMode]);
 
     const handleManualLoadBroadcast = useCallback((broadcastId: string) => {
-        if (isStudio) sendStudioCommand('loadBroadcast', { broadcastId });
-    }, [isStudio, sendStudioCommand]);
+        if (isHostMode && isStudio) sendStudioCommand('loadBroadcast', { broadcastId });
+        else if (!isHostMode) {
+            const broadcast = broadcastsRef.current.find(b => b.id === broadcastId);
+            if (broadcast) {
+                setPlaylist(broadcast.playlist);
+            }
+        }
+    }, [isStudio, sendStudioCommand, isHostMode]);
 
     const handleVoiceTrackCreate = useCallback(async (voiceTrack: Track, blob: Blob): Promise<Track> => {
         const savedTrack = await dataService.addTrack(voiceTrack, blob);
-        sendStudioCommand('addVoiceTrackToLibrary', { track: savedTrack });
+        if (isHostMode) {
+            sendStudioCommand('addVoiceTrackToLibrary', { track: savedTrack });
+        } else {
+            setMediaLibrary(prev => addItemToTree(prev, 'root', savedTrack));
+        }
         return savedTrack;
-    }, [sendStudioCommand]);
+    }, [sendStudioCommand, isHostMode]);
 
     // --- NEW: WebSocket Logic for HOST mode ---
     useEffect(() => {
-        const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
         if (!isHostMode || !currentUser) {
             setWsStatus('disconnected');
             return;
@@ -2345,11 +2585,11 @@ const AppInternal: React.FC = () => {
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
             ws.close();
         };
-    }, [currentUser, sendStudioCommand, isMobile]);
+    }, [currentUser, sendStudioCommand, isMobile, isHostMode]);
     
     // Effect to clean up resources for departed presenters
     useEffect(() => {
-        if (!isStudio) return;
+        if (!isStudio || !isHostMode) return;
 
         const onlineEmails = new Set(onlinePresenters.map(p => p.email));
         
@@ -2385,14 +2625,14 @@ const AppInternal: React.FC = () => {
                 setMixerConfig(newMixerConfig);
             }
         }
-    }, [onlinePresenters, isStudio, mixerConfig]);
+    }, [onlinePresenters, isStudio, mixerConfig, isHostMode]);
 
 
     useEffect(() => {
-        if (isStudio && wsRef.current?.readyState === WebSocket.OPEN) {
+        if (isStudio && isHostMode && wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'configUpdate', payload: { logoSrc } }));
         }
-    }, [logoSrc, isStudio, wsStatus]);
+    }, [logoSrc, isStudio, wsStatus, isHostMode]);
     
     // --- Public Stream State (lifted from PublicStream.tsx) ---
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -2498,7 +2738,7 @@ const AppInternal: React.FC = () => {
 
     // Effect for metadata updates
     useEffect(() => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && publicStreamStatus === 'broadcasting') {
+        if (isHostMode && wsRef.current && wsRef.current.readyState === WebSocket.OPEN && publicStreamStatus === 'broadcasting') {
             const nextTrackTitle = (isPlayingRef.current && nextTrack)
                 ? `${nextTrack.artist || ''} - ${nextTrack.title || ''}`.replace(/^ - /, '').trim()
                 : null;
@@ -2522,10 +2762,10 @@ const AppInternal: React.FC = () => {
                 lastSentMetadataRef.current = metadataString;
             }
         }
-    }, [displayTrack, isPlaying, loadedArtworkUrl, publicStreamStatus, nextTrack]);
+    }, [displayTrack, isPlaying, loadedArtworkUrl, publicStreamStatus, nextTrack, isHostMode]);
 
     const handleSendChatMessage = useCallback((text: string, from?: string) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
+        if (isHostMode && wsRef.current?.readyState === WebSocket.OPEN) {
             const message: ChatMessage = {
                 from: from || 'Studio',
                 text,
@@ -2539,7 +2779,7 @@ const AppInternal: React.FC = () => {
             // might not echo it back to the studio/presenter client.
             setChatMessages(prev => [...prev.slice(-100), message]);
         }
-    }, []);
+    }, [isHostMode]);
 
     // Cleanup effect
     useEffect(() => {
@@ -2654,7 +2894,7 @@ const AppInternal: React.FC = () => {
                             onUpdateFolderTags={handleUpdateFolderTags}
                             onPflTrack={handlePflTrack}
                             pflTrackId={pflTrackId}
-                            onLibraryUpdate={() => {}}
+                            onLibraryUpdate={setMediaLibrary}
                             playoutMode={playoutPolicy.playoutMode}
                         />
                     </div>
@@ -2697,11 +2937,11 @@ const AppInternal: React.FC = () => {
                                 <nav className="flex justify-around text-center">
                                     <button onClick={() => setActiveRightColumnTab('cartwall')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'cartwall' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Cartwall">Cartwall</button>
                                     {isStudio && <button onClick={() => setActiveRightColumnTab('scheduler')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'scheduler' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Scheduler">Scheduler</button>}
-                                    {isStudio && <button onClick={() => { setActiveRightColumnTab('chat'); setHasUnreadChat(false); }} className={`px-3 py-2 w-full text-sm font-semibold transition-colors relative ${activeRightColumnTab === 'chat' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Chat">{hasUnreadChat && <span className="absolute top-1 right-2 w-2 h-2 bg-red-500 rounded-full"></span>}Chat</button>}
+                                    {isStudio && isHostMode && <button onClick={() => { setActiveRightColumnTab('chat'); setHasUnreadChat(false); }} className={`px-3 py-2 w-full text-sm font-semibold transition-colors relative ${activeRightColumnTab === 'chat' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Chat">{hasUnreadChat && <span className="absolute top-1 right-2 w-2 h-2 bg-red-500 rounded-full"></span>}Chat</button>}
                                     <button onClick={() => setActiveRightColumnTab('lastfm')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'lastfm' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Last.fm Info">Last.fm</button>
                                     {isStudio && <button onClick={() => setActiveRightColumnTab('mixer')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'mixer' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Mixer">Mixer</button>}
-                                    {isStudio && <button onClick={() => setActiveRightColumnTab('users')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'users' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Users">Users</button>}
-                                    {isStudio && <button onClick={() => setActiveRightColumnTab('stream')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'stream' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Stream">Stream</button>}
+                                    {isStudio && isHostMode && <button onClick={() => setActiveRightColumnTab('users')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'users' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Users">Users</button>}
+                                    {isStudio && isHostMode && <button onClick={() => setActiveRightColumnTab('stream')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'stream' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Stream">Stream</button>}
                                     {isStudio && <button onClick={() => setActiveRightColumnTab('settings')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'settings' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Settings">Settings</button>}
                                 </nav>
                             </div>
@@ -2709,12 +2949,12 @@ const AppInternal: React.FC = () => {
                                 <div className="absolute inset-0 overflow-y-auto">
                                     {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(newGrid) => setPlayoutPolicy(p => ({ ...p, cartwallGrid: newGrid }))} audioContext={audioGraphRef.current.context} destinationNode={audioGraphRef.current.sourceGains.cartwall || null} onActivePlayerCountChange={handleActiveCartwallPlayerCountChange} />}
                                     {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
-                                    {isStudio && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
+                                    {isStudio && isHostMode && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
                                     {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} />}
                                     {/* FIX: Corrected typo from `availableOutputDevices` to `availableAudioDevices` to match the state variable name. */}
                                     {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} />}
-                                    {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
-                                    {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
+                                    {isStudio && isHostMode && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
+                                    {isStudio && isHostMode && activeRightColumnTab === 'stream' && <PublicStream 
                                         isPublicStreamEnabled={isPublicStreamEnabled}
                                         publicStreamStatus={publicStreamStatus}
                                         publicStreamError={publicStreamError}

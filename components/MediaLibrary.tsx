@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem } from '../types';
 import { PlusCircleIcon } from './icons/PlusCircleIcon';

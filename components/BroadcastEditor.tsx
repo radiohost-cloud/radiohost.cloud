@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { type Broadcast, type Folder, type SequenceItem, type Track, type TimeMarker, TimeMarkerType, PlayoutPolicy, VtMixDetails, TrackType, RepeatSettings } from '../types';
 import { CloseIcon } from './icons/CloseIcon';
@@ -394,12 +395,13 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                 onAddMarker={(marker) => {
                     if (markerModalState?.existingMarker) {
 // FIX: Correctly map over the playlist to update an existing marker with type safety.
-                         setPlaylist(p => p.map(item => {
-                            if (item.id === markerModalState.existingMarker?.id && 'markerType' in item) {
-                                return { ...item, ...marker };
-                            }
-                            return item;
-                         }));
+                        setPlaylist(p => p.map(item => {
+                           if (item.id === markerModalState.existingMarker?.id && item.type === 'marker') {
+                               const updatedMarker: TimeMarker = { ...item, ...marker };
+                               return updatedMarker;
+                           }
+                           return item;
+                        }));
                     } else {
                         const newMarker = marker as TimeMarker;
                         setPlaylist(prev => {
