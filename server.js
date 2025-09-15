@@ -14,7 +14,6 @@ import { promises as fsPromises } from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 import NodeID3 from 'node-id3';
-import { fetchArtwork } from './services/artworkService.js'; // Assuming fetchArtwork is exported
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -52,6 +51,40 @@ const mediaDir = path.join(__dirname, 'Media');
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 const artworkDir = path.join(__dirname, 'Artwork');
 if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir, { recursive: true });
+
+// --- Artwork Fetching Helper (moved from artworkService.ts) ---
+const fetchArtwork = async (artist, title) => {
+    if (!artist || !title) {
+        return null;
+    }
+    const cleanArtist = artist.toLowerCase().trim();
+    const cleanTitle = title.toLowerCase().trim();
+    const searchTerm = `${artist} ${title}`;
+    const url = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&media=music&limit=5&country=US`;
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            console.error(`iTunes API responded with status: ${response.status}`);
+            return null;
+        }
+        const data = await response.json();
+        if (data.resultCount > 0) {
+            const bestMatch = data.results.find((result) => 
+                result.artistName && result.trackName &&
+                result.artistName.toLowerCase().includes(cleanArtist) &&
+                result.trackName.toLowerCase().includes(cleanTitle)
+            );
+            const result = bestMatch || data.results[0];
+            if (result && result.artworkUrl100) {
+                return result.artworkUrl100.replace('100x100', '600x600');
+            }
+        }
+        return null;
+    } catch (error) {
+        console.error("Error fetching artwork from iTunes API:", error);
+        return null;
+    }
+};
 
 
 // --- NEW: Filesystem-based Media Library Logic ---
