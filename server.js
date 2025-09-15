@@ -483,7 +483,9 @@ wss.on('connection', async (ws, req) => {
                             case 'createFolder': {
                                 const { parentId, folderName } = payload;
                                 if (!folderName) break;
-                                const fullPath = path.join(mediaDir, parentId, folderName);
+                                // FIX: Treat 'root' as the base media directory, not a subdirectory.
+                                const basePath = parentId === 'root' ? mediaDir : path.join(mediaDir, parentId);
+                                const fullPath = path.join(basePath, folderName);
                                 try {
                                     if (!fs.existsSync(fullPath)) {
                                         await fsPromises.mkdir(fullPath, { recursive: true });
@@ -499,7 +501,9 @@ wss.on('connection', async (ws, req) => {
                                 const { itemId, destinationFolderId } = payload;
                                 if (!itemId || !destinationFolderId) break;
                                 const sourcePath = path.join(mediaDir, itemId);
-                                const destPath = path.join(mediaDir, destinationFolderId, path.basename(itemId));
+                                // FIX: Treat 'root' as the base media directory for the destination.
+                                const destDir = destinationFolderId === 'root' ? mediaDir : path.join(mediaDir, destinationFolderId);
+                                const destPath = path.join(destDir, path.basename(itemId));
                                 try {
                                     await fsPromises.rename(sourcePath, destPath);
                                     console.log(`[FS] Moved item from ${sourcePath} to ${destPath}`);
