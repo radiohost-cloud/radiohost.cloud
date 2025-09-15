@@ -1,6 +1,6 @@
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
-// To run: `npm install express cors multer lowdb ws` then `node server.js`
+// To run: `npm install express cors multer lowdb ws node-id3` then `node server.js`
 
 import express from 'express';
 import cors from 'cors';
@@ -14,6 +14,7 @@ import { promises as fsPromises } from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 import NodeID3 from 'node-id3';
+import { fetchArtwork } from './services/artworkService.js'; // Assuming fetchArtwork is exported
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -54,8 +55,53 @@ if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir, { recursive: true });
 
 
 // --- NEW: Filesystem-based Media Library Logic ---
+const createTrackObject = async (entryFullPath, entryRelativePath, entryName, durationFromClient) => {
+    try {
+        const tags = NodeID3.read(entryFullPath);
+        let hasArtwork = false;
+        let remoteArtworkUrl = null;
 
-// Scans the /Media directory and builds a JSON tree representing the library.
+        if (tags && tags.image && tags.image.imageBuffer) {
+            const artworkFilename = `${path.basename(entryName, path.extname(entryName))}.jpg`;
+            const artworkPath = path.join(artworkDir, artworkFilename);
+            await fsPromises.writeFile(artworkPath, tags.image.imageBuffer);
+            hasArtwork = true;
+        }
+
+        const title = tags.title || entryName.replace(/\.[^/.]+$/, "");
+        const artist = tags.artist || 'Unknown Artist';
+
+        if (!hasArtwork) {
+            remoteArtworkUrl = await fetchArtwork(artist, title);
+        }
+        
+        const durationInSeconds = durationFromClient ?? (tags.length ? parseFloat(tags.length) / 1000 : 180);
+
+        return {
+            id: entryRelativePath,
+            title: title,
+            artist: artist,
+            duration: durationInSeconds,
+            type: 'Song',
+            src: `/media/${encodeURIComponent(entryRelativePath)}`,
+            originalFilename: entryName,
+            hasEmbeddedArtwork: hasArtwork,
+            remoteArtworkUrl: remoteArtworkUrl,
+        };
+    } catch (tagError) {
+        console.error(`Error processing metadata for ${entryName}:`, tagError);
+        return {
+            id: entryRelativePath,
+            title: entryName.replace(/\.[^/.]+$/, ""),
+            artist: 'Unknown Artist',
+            duration: durationFromClient || 180,
+            type: 'Song',
+            src: `/media/${encodeURIComponent(entryRelativePath)}`,
+            originalFilename: entryName,
+        };
+    }
+};
+
 const scanMediaToTree = async (dirPath, relativePath = '') => {
     const fullPath = path.join(mediaDir, relativePath);
     const children = [];
@@ -74,44 +120,8 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
                     children: await scanMediaToTree(entry.name, entryRelativePath),
                 });
             } else if (/\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(entry.name)) {
-                try {
-                    const tags = NodeID3.read(entryFullPath);
-                    let hasArtwork = false;
-
-                    if (tags && tags.image && tags.image.imageBuffer) {
-                        const artworkFilename = `${path.basename(entry.name, path.extname(entry.name))}.jpg`;
-                        const artworkPath = path.join(artworkDir, artworkFilename);
-                        await fsPromises.writeFile(artworkPath, tags.image.imageBuffer);
-                        hasArtwork = true;
-                    }
-                    
-                    // FIX: Correctly read duration from 'length' tag (TLEN) and convert from ms to seconds.
-                    // The node-id3 library puts the TLEN value in a 'length' property in milliseconds.
-                    const durationInSeconds = tags.length ? parseFloat(tags.length) / 1000 : 180;
-
-                    children.push({
-                        id: entryRelativePath,
-                        title: tags.title || entry.name.replace(/\.[^/.]+$/, ""),
-                        artist: tags.artist || 'Unknown Artist',
-                        duration: durationInSeconds,
-                        type: 'Song', // Default type, could be enhanced
-                        src: `/media/${entryRelativePath}`,
-                        originalFilename: entry.name,
-                        hasEmbeddedArtwork: hasArtwork,
-                    });
-                } catch (tagError) {
-                    console.error(`Error reading ID3 tags for ${entry.name}:`, tagError);
-                    // Add track with basic info if tag reading fails
-                    children.push({
-                        id: entryRelativePath,
-                        title: entry.name.replace(/\.[^/.]+$/, ""),
-                        artist: 'Unknown Artist',
-                        duration: 180, // Placeholder
-                        type: 'Song',
-                        src: `/media/${entryRelativePath}`,
-                        originalFilename: entry.name,
-                    });
-                }
+                const trackObject = await createTrackObject(entryFullPath, entryRelativePath, entry.name);
+                children.push(trackObject);
             }
         }
     } catch (error) {
@@ -123,8 +133,16 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
 let libraryState = { id: 'root', name: 'Media Library', type: 'folder', children: [] };
 let watchTimeout = null;
 
-// Re-scans the entire library and broadcasts the new state to all clients.
-// Debounced to prevent rapid firing during large file operations.
+const broadcastLibraryUpdate = () => {
+    const message = JSON.stringify({ type: 'library-update', payload: libraryState });
+    clients.forEach((ws) => {
+        if (ws.readyState === ws.OPEN) {
+            ws.send(message);
+        }
+    });
+    console.log('[WebSocket] Library update broadcasted to all clients.');
+};
+
 const refreshAndBroadcastLibrary = () => {
     clearTimeout(watchTimeout);
     watchTimeout = setTimeout(async () => {
@@ -132,18 +150,11 @@ const refreshAndBroadcastLibrary = () => {
         try {
             const newChildren = await scanMediaToTree(mediaDir);
             libraryState.children = newChildren;
-            
-            const message = JSON.stringify({ type: 'library-update', payload: libraryState });
-            clients.forEach((ws, email) => {
-                if (ws.readyState === ws.OPEN) {
-                    ws.send(message);
-                }
-            });
-            console.log('[File Watcher] Library update broadcasted to all clients.');
+            broadcastLibraryUpdate();
         } catch (error) {
             console.error('[File Watcher] Failed to refresh and broadcast library:', error);
         }
-    }, 500); // 500ms debounce window
+    }, 2000); // Increased debounce to handle multiple changes
 };
 
 // Initialize and start the file watcher.
@@ -840,7 +851,12 @@ app.use(cors());
 app.use(express.json());
 app.set('trust proxy', 1);
 
-app.use('/media', express.static(mediaDir));
+app.use('/media', express.static(mediaDir, {
+    setHeaders: (res, path) => {
+        res.setHeader('Accept-Ranges', 'bytes');
+    }
+}));
+app.use('/artwork', express.static(artworkDir));
 
 const getPlayerPageHTML = (stationName) => `
 <!DOCTYPE html>
@@ -1246,34 +1262,53 @@ app.post('/api/folder', async (req, res) => {
     }
 });
 
-app.post('/api/upload', multer({ storage: multer.memoryStorage() }).single('audioFile'), async (req, res) => {
+const upload = multer({ storage: multer.memoryStorage() });
+app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ message: 'No audio file uploaded.' });
     }
     
     try {
-        const webkitRelativePath = req.body.webkitRelativePath || '';
+        const { webkitRelativePath = '', duration } = req.body;
         const destinationDir = path.dirname(webkitRelativePath);
         const finalDir = path.join(mediaDir, destinationDir);
-        
         await fsPromises.mkdir(finalDir, { recursive: true });
 
-        let finalFilename = req.file.originalname;
-        let finalPath = path.join(finalDir, finalFilename);
-        let counter = 1;
-        const ext = path.extname(finalFilename);
-        const basename = path.basename(finalFilename, ext);
-        
-        while (fs.existsSync(finalPath)) {
-            finalFilename = `${basename} (${counter})${ext}`;
-            finalPath = path.join(finalDir, finalFilename);
-            counter++;
-        }
-
+        const finalPath = path.join(finalDir, req.file.originalname);
         await fsPromises.writeFile(finalPath, req.file.buffer);
         console.log(`[Upload] Saved file to: ${finalPath}`);
-        // Watcher will handle broadcasting the library update.
-        res.status(201).json({ success: true, message: `File ${finalFilename} uploaded.` });
+
+        if (duration && !isNaN(parseFloat(duration))) {
+            const durationInMs = Math.round(parseFloat(duration) * 1000).toString();
+            const success = NodeID3.update({ TLEN: durationInMs }, finalPath);
+            if (success) {
+                console.log(`[Upload] Successfully wrote duration (${duration}s) to ID3 tag for ${req.file.originalname}`);
+            } else {
+                console.warn(`[Upload] Could not write duration tag for ${req.file.originalname}`);
+            }
+        }
+        
+        // Optimistic update: process this one file and broadcast immediately
+        const relativePath = path.relative(mediaDir, finalPath).replace(/\\/g, '/');
+        const newTrack = await createTrackObject(finalPath, relativePath, req.file.originalname, parseFloat(duration));
+
+        // Find parent folder in the in-memory tree and add the new track
+        let parentNode = libraryState;
+        if(destinationDir) {
+            const pathParts = destinationDir.split('/');
+            for(const part of pathParts) {
+                let foundNode = parentNode.children.find(c => c.type === 'folder' && c.name === part);
+                if(foundNode) {
+                    parentNode = foundNode;
+                }
+            }
+        }
+        parentNode.children.push(newTrack);
+        
+        broadcastLibraryUpdate(); // Send instant update
+
+        res.status(201).json({ success: true, message: `File ${req.file.originalname} uploaded.` });
+
     } catch (e) {
         console.error('Error processing upload:', e);
         res.status(500).json({ message: 'Error processing upload. Check server logs and permissions.' });
@@ -1282,7 +1317,6 @@ app.post('/api/upload', multer({ storage: multer.memoryStorage() }).single('audi
 
 
 app.post('/api/track/delete', async (req, res) => {
-    // Note: The 'id' of a library item is its relative path.
     const { id } = req.body;
     if (!id) {
         return res.status(400).json({ message: 'Track ID (relative path) is required.' });
@@ -1296,41 +1330,25 @@ app.post('/api/track/delete', async (req, res) => {
         } else {
              res.status(404).json({ message: 'Item not found on disk.' });
         }
-        // Watcher will handle broadcasting the library update.
     } catch (error) {
         console.error("Error deleting item:", error);
         res.status(500).json({ message: 'Error deleting item. Check server logs and permissions.' });
     }
 });
 
-const findArtworkRecursive = async (dir, baseName) => {
-    const files = await fsPromises.readdir(dir, { withFileTypes: true });
-    for (const file of files) {
-        const fullPath = path.join(dir, file.name);
-        if (file.isDirectory()) {
-            const result = await findArtworkRecursive(fullPath, baseName);
-            if (result) return result;
-        } else if (file.name.startsWith(baseName)) {
-            return fullPath;
-        }
-    }
-    return null;
-};
-
 app.get('/api/artwork/:id', async (req, res) => {
     try {
-        const trackId = req.params.id;
-        const trackBaseName = path.basename(trackId, path.extname(trackId));
-        const filePath = await findArtworkRecursive(artworkDir, trackBaseName);
+        const artworkFilename = decodeURIComponent(req.params.id);
+        const filePath = path.join(artworkDir, artworkFilename);
 
-        if (filePath) {
+        if (fs.existsSync(filePath)) {
             res.sendFile(filePath);
         } else {
             res.status(404).send('Artwork not found');
         }
     } catch (err) {
-        console.error("Error searching for artwork:", err);
-        res.status(500).send('Error searching for artwork');
+        console.error("Error serving artwork:", err);
+        res.status(500).send('Error serving artwork');
     }
 });
 
@@ -1433,6 +1451,7 @@ if (isDirectRun) {
         if (req.path.startsWith('/api/') ||
             req.path.startsWith('/stream') ||
             req.path.startsWith('/media/') ||
+            req.path.startsWith('/artwork/') ||
             req.path.startsWith('/socket') ||
             path.extname(req.path)) {
             return next();

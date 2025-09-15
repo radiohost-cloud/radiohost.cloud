@@ -56,10 +56,13 @@ export const putUserData = (email: string, data: any) => {
     }).then(handleResponse);
 };
 
-export const uploadTrack = async (file: File, webkitRelativePath?: string): Promise<Track> => {
+export const uploadTrack = async (file: File, webkitRelativePath?: string, duration?: number): Promise<Track> => {
     const formData = new FormData();
     formData.append('webkitRelativePath', webkitRelativePath || file.name);
     formData.append('audioFile', file);
+    if (duration) {
+        formData.append('duration', duration.toString());
+    }
 
     const response = await fetch('/api/upload', {
         method: 'POST',

@@ -111,15 +111,14 @@ export const getArtworkUrl = async (track: Track): Promise<string | null> => {
     return null;
 };
 
-export const addTrack = async (track: Track, file: File | Blob, artworkBlob?: Blob, webkitRelativePath?: string): Promise<Track> => {
+export const addTrack = async (track: Partial<Track>, file: File | Blob, artworkBlob?: Blob, webkitRelativePath?: string): Promise<Track> => {
     const mode = getMode();
     if (mode === 'HOST') {
         if (!(file instanceof File)) {
             throw new Error("HOST mode requires a File object for uploads.");
         }
-        // In HOST mode, we no longer send metadata. The server will generate it.
-        // We just upload the file and the server watcher will do the rest.
-        return apiService.uploadTrack(file, webkitRelativePath);
+        // In HOST mode, we send the client-calculated duration to the server.
+        return apiService.uploadTrack(file, webkitRelativePath, track.duration);
     }
     
     // DEMO mode
@@ -129,7 +128,7 @@ export const addTrack = async (track: Track, file: File | Blob, artworkBlob?: Bl
     await dbService.addTrack(trackId, fileObject);
     
     const newTrack: Track = {
-        ...track,
+        ...(track as Track),
         id: trackId,
         src: '', // In DEMO mode, src is generated on-demand
         type: track.type || TrackType.LOCAL_FILE,
