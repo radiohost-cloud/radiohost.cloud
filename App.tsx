@@ -1,4 +1,3 @@
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -330,7 +329,6 @@ const AppInternal: React.FC = () => {
     const [isArtworkModalOpen, setIsArtworkModalOpen] = useState(false);
     const [artworkModalUrl, setArtworkModalUrl] = useState<string | null>(null);
     const [loadedArtworkUrl, setLoadedArtworkUrl] = useState<string | null>(null);
-    const [validationWarning, setValidationWarning] = useState<{ track: Track; beforeItemId: string | null; message: string; } | null>(null);
     const [isSecureContext, setIsSecureContext] = useState(window.isSecureContext);
 
     const [isAutoModeEnabled, setIsAutoModeEnabled] = useState(false);
@@ -1752,60 +1750,6 @@ const AppInternal: React.FC = () => {
         }
     }, [sendStudioCommand, playoutPolicy.playoutMode, isHostMode]);
 
-    const handleConfirmValidationAndAddTrack = useCallback(() => {
-        if (validationWarning) {
-            handleInsertTrackInPlaylist(validationWarning.track, validationWarning.beforeItemId);
-            setValidationWarning(null);
-        }
-    }, [validationWarning, handleInsertTrackInPlaylist]);
-
-    const validateTrackPlacement = useCallback((trackToAdd: Track, beforeItemId: string | null): { isValid: boolean, message: string } => {
-        if (trackToAdd.type !== TrackType.SONG || !trackToAdd.artist) return { isValid: true, message: '' };
-
-        const { artistSeparation, titleSeparation } = playoutPolicyRef.current;
-        const artistSeparationMs = artistSeparation * 60 * 1000;
-        const titleSeparationMs = titleSeparation * 60 * 1000;
-
-        const currentPlaylist = playlistRef.current;
-        const insertIndex = beforeItemId ? currentPlaylist.findIndex(item => item.id === beforeItemId) : currentPlaylist.length;
-
-        let estimatedStartTime: number;
-        if (insertIndex > 0) {
-            const prevItem = currentPlaylist[insertIndex - 1];
-            const prevTimelineData = timelineRef.current.get(prevItem.id);
-            estimatedStartTime = prevTimelineData ? prevTimelineData.endTime.getTime() : Date.now();
-        } else {
-             estimatedStartTime = Date.now();
-        }
-        
-        const checkPoints: { track: { artist?: string; title: string }, time: number }[] = playoutHistoryRef.current.map(h => ({ track: h, time: h.playedAt }));
-        currentPlaylist.forEach(item => {
-            if (!('markerType' in item)) {
-                const timelineData = timelineRef.current.get(item.id);
-                if (timelineData) checkPoints.push({ track: item, time: timelineData.startTime.getTime() });
-            }
-        });
-
-        for (const point of checkPoints) {
-            const timeDiff = Math.abs(estimatedStartTime - point.time);
-            if (point.track.artist && point.track.artist === trackToAdd.artist && timeDiff < artistSeparationMs) {
-                const minutesAgo = Math.round(timeDiff / 60000);
-                return { isValid: false, message: `Artist separation violation. "${trackToAdd.artist}" was played ${minutesAgo} minute${minutesAgo !== 1 ? 's' : ''} ago (policy: ${artistSeparation} min).` };
-            }
-            if (point.track.title === trackToAdd.title && timeDiff < titleSeparationMs) {
-                 const minutesAgo = Math.round(timeDiff / 60000);
-                return { isValid: false, message: `Title separation violation. "${trackToAdd.title}" was played ${minutesAgo} minute${minutesAgo !== 1 ? 's' : ''} ago (policy: ${titleSeparation} min).` };
-            }
-        }
-        return { isValid: true, message: '' };
-    }, []);
-
-    const handleAttemptToAddTrack = useCallback((track: Track, beforeItemId: string | null) => {
-        const validation = validateTrackPlacement(track, beforeItemId);
-        if (validation.isValid) handleInsertTrackInPlaylist(track, beforeItemId);
-        else setValidationWarning({ track, beforeItemId, message: validation.message });
-    }, [validateTrackPlacement, handleInsertTrackInPlaylist]);
-
     const handleInsertVoiceTrack = useCallback(async (voiceTrack: Track, blob: Blob, vtMix: VtMixDetails, beforeItemId: string | null) => {
         if (isHostMode) {
             if (playoutPolicyRef.current.playoutMode === 'presenter') {
@@ -2887,7 +2831,7 @@ const AppInternal: React.FC = () => {
                     <div style={{ flexBasis: `${displayedColumnWidths[0]}%` }} className={`flex-shrink-0 h-full overflow-hidden transition-all duration-300 ease-in-out ${!isLibraryCollapsed && 'border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900'}`}>
                         <MediaLibrary
                             rootFolder={mediaLibrary}
-                            onAddToPlaylist={(track) => handleAttemptToAddTrack(track, null)}
+                            onAddToPlaylist={(track) => handleInsertTrackInPlaylist(track, null)}
                             onAddTracksToLibrary={handleAddTracksToLibrary}
                             onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
                             onRemoveFromLibrary={handleRemoveFromLibrary}
@@ -2915,7 +2859,7 @@ const AppInternal: React.FC = () => {
                             onRemove={handleRemoveFromPlaylist}
                             onReorder={handleReorderPlaylist}
                             onPlayTrack={handlePlayTrack}
-                            onInsertTrack={handleAttemptToAddTrack}
+                            onInsertTrack={handleInsertTrackInPlaylist}
                             isPlaying={isPlaying}
                             stopAfterTrackId={stopAfterTrackId}
                             onSetStopAfterTrackId={handleSetStopAfterTrackId}
@@ -3042,16 +2986,6 @@ const AppInternal: React.FC = () => {
                 artworkUrl={artworkModalUrl}
                 onClose={handleCloseArtworkModal}
             />
-             <ConfirmationDialog
-                isOpen={!!validationWarning}
-                onClose={() => setValidationWarning(null)}
-                onConfirm={handleConfirmValidationAndAddTrack}
-                title="Playout Policy Warning"
-                confirmText="Add Anyway"
-                confirmButtonClass="bg-yellow-600 hover:bg-yellow-500 text-black"
-            >
-                {validationWarning?.message}
-            </ConfirmationDialog>
             <BroadcastEditor
                 isOpen={isBroadcastEditorOpen}
                 onClose={handleCloseBroadcastEditor}
