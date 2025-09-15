@@ -1339,13 +1339,6 @@ const AppInternal: React.FC = () => {
         const playerA = playerARef.current;
         const playerB = playerBRef.current;
 
-        const handleTimeUpdate = (e: Event) => {
-            const player = e.target as HTMLAudioElement;
-            const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
-            if (player !== activePlayerRef.current) return;
-            setTrackProgress(player.currentTime);
-        };
-
         const handleEnded = (e: Event) => {
             const player = e.target as HTMLAudioElement;
             const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
@@ -1364,9 +1357,38 @@ const AppInternal: React.FC = () => {
         };
         
         const players = [playerA, playerB];
-        players.forEach(p => { if (p) { p.addEventListener('timeupdate', handleTimeUpdate); p.addEventListener('ended', handleEnded); } });
-        return () => { players.forEach(p => { if (p) { p.removeEventListener('timeupdate', handleTimeUpdate); p.removeEventListener('ended', handleEnded); } }); };
+        players.forEach(p => { if (p) { p.addEventListener('ended', handleEnded); } });
+        return () => { players.forEach(p => { if (p) { p.removeEventListener('ended', handleEnded); } }); };
     }, [activePlayer, handleNext, isHostMode]);
+
+    // Smooth progress bar update using requestAnimationFrame
+    useEffect(() => {
+        let animationFrameId: number | null = null;
+
+        const updateProgress = () => {
+            const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
+            const currentPlayer = activePlayerRef.current;
+
+            if (currentPlayer && !currentPlayer.paused) {
+                setTrackProgress(currentPlayer.currentTime);
+                animationFrameId = requestAnimationFrame(updateProgress);
+            }
+        };
+
+        if (isPlaying) {
+            animationFrameId = requestAnimationFrame(updateProgress);
+        } else {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+        }
+
+        return () => {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+        };
+    }, [isPlaying, activePlayer]);
 
     const triggerHardMarkerFadeAndJump = useCallback(async (nextIndex: number) => {
         if (isCrossfadingRef.current) return;
@@ -1912,7 +1934,6 @@ const AppInternal: React.FC = () => {
         if (isHostMode) {
             sendStudioCommand('updateTrackMetadata', { trackId, newMetadata });
         } else {
-// FIX: Added a type guard to ensure the item being updated is a Track, resolving a TypeScript error where properties of a Track could be incorrectly applied to a Folder.
             setMediaLibrary(prev => updateItemInTree(prev, trackId, (item) => {
                 if (item.type !== 'folder') {
                     return { ...item, ...newMetadata };
@@ -2345,9 +2366,8 @@ const AppInternal: React.FC = () => {
     const handleUpdateTimeMarker = useCallback((markerId: string, updates: Partial<TimeMarker>) => {
         if (isHostMode && isStudio) sendStudioCommand('updateTimeMarker', { markerId, updates });
         else if (!isHostMode) {
-// FIX: Added a type guard to ensure the item being updated is a TimeMarker, resolving a TypeScript error where properties of a TimeMarker could be incorrectly applied to a Track.
             setPlaylist(p => p.map(item => {
-                if (item.id === markerId && item.type === 'marker') {
+                if (item.id === markerId && 'markerType' in item) {
                     return { ...item, ...updates };
                 }
                 return item;
@@ -2957,7 +2977,6 @@ const AppInternal: React.FC = () => {
                                     {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
                                     {isStudio && isHostMode && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
                                     {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} />}
-                                    {/* FIX: Corrected typo from `availableOutputDevices` to `availableAudioDevices` to match the state variable name. */}
                                     {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} />}
                                     {isStudio && isHostMode && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
                                     {isStudio && isHostMode && activeRightColumnTab === 'stream' && <PublicStream 

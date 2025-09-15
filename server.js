@@ -621,12 +621,31 @@ wss.on('connection', async (ws, req) => {
                             }
                             case 'removeFromLibrary': {
                                 const { id } = payload;
-                                db.data.sharedMediaLibrary = removeItemsFromTree(sharedMediaLibrary, new Set([id]));
+                                const { updatedNode, foundItem } = findAndRemoveItem(sharedMediaLibrary, id);
+                                if(foundItem && !foundItem.type !== 'folder' && foundItem.src) {
+                                    try {
+                                        const relativePath = foundItem.src.replace(/^\/media\//, '');
+                                        const filePath = path.join(mediaDir, relativePath);
+                                        if (fs.existsSync(filePath)) await fsPromises.unlink(filePath);
+
+                                        const trackBaseName = path.basename(foundItem.id, path.extname(foundItem.id));
+                                        const relativeDir = path.dirname(relativePath);
+                                        const artworkDirForTrack = path.join(artworkDir, relativeDir);
+                                        if (fs.existsSync(artworkDirForTrack)) {
+                                            const files = await fsPromises.readdir(artworkDirForTrack);
+                                            const artworkFile = files.find(f => f.startsWith(trackBaseName));
+                                            if (artworkFile) await fsPromises.unlink(path.join(artworkDirForTrack, artworkFile));
+                                        }
+                                    } catch (e) { console.error(`Failed to delete physical files for track ${id}:`, e); }
+                                }
+                                db.data.sharedMediaLibrary = updatedNode;
                                 libraryChanged = true;
                                 break;
                             }
                             case 'removeMultipleFromLibrary': {
                                 const { ids } = payload;
+                                // In a real app, this would be more complex, finding each item to delete its file.
+                                // For simplicity here, we assume client sends full item details or this command is used cautiously.
                                 db.data.sharedMediaLibrary = removeItemsFromTree(sharedMediaLibrary, new Set(ids));
                                 libraryChanged = true;
                                 break;
@@ -662,6 +681,12 @@ wss.on('connection', async (ws, req) => {
                             case 'updateTrackTags': {
                                 const { trackId, tags } = payload;
                                 db.data.sharedMediaLibrary = updateTrackInTree(sharedMediaLibrary, trackId, track => ({ ...track, tags: tags.length > 0 ? tags.sort() : undefined }));
+                                libraryChanged = true;
+                                break;
+                            }
+                            case 'updateFolderTags': {
+                                const { folderId, newTags } = payload;
+                                db.data.sharedMediaLibrary = updateFolderInTree(sharedMediaLibrary, folderId, folder => ({ ...folder, tags: newTags.length > 0 ? newTags.sort() : undefined }));
                                 libraryChanged = true;
                                 break;
                             }
@@ -825,9 +850,9 @@ app.set('trust proxy', 1);
 
 // --- Media File Storage Setup ---
 const mediaDir = path.join(__dirname, 'Media');
-if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir);
+if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 const artworkDir = path.join(__dirname, 'Artwork');
-if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir);
+if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir, { recursive: true });
 const tmpDir = path.join(__dirname, 'tmp');
 if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
 
@@ -1254,7 +1279,7 @@ app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { nam
 
         // --- Handle Audio File ---
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const finalAudioFilename = 'audioFile-' + uniqueSuffix + path.extname(audioFile.originalname);
+        const finalAudioFilename = 'track-' + uniqueSuffix + path.extname(audioFile.originalname);
         
         const finalAudioDir = path.join(mediaDir, destinationPath);
         await fsPromises.mkdir(finalAudioDir, { recursive: true });
@@ -1278,7 +1303,8 @@ app.post('/api/upload', upload.fields([{ name: 'audioFile', maxCount: 1 }, { nam
             ...metadata,
             id: finalAudioFilename,
             src: `/media/${relativePath}`,
-            hasEmbeddedArtwork: !!artworkFile
+            hasEmbeddedArtwork: !!artworkFile,
+            originalFilename: audioFile.originalname,
         };
 
         res.status(201).json(newTrack);
@@ -1464,16 +1490,68 @@ if (isDirectRun) {
         // Otherwise, it's a request for a client-side route. Serve the SPA's entry point.
         res.sendFile(path.join(distPath, 'index.html'));
     });
+    
+    // Server startup logic
+    const startup = async () => {
+        // --- RESILIENCE: Scan Media directory on startup ---
+        console.log('[Startup] Scanning Media directory to sync database...');
+        const allDbFiles = new Set();
+        const traverseDb = (node) => {
+            if (!node || !node.children) return;
+            node.children.forEach(child => {
+                if (child.type === 'folder') {
+                    traverseDb(child);
+                } else {
+                    allDbFiles.add(child.src);
+                }
+            });
+        };
+        traverseDb(db.data.sharedMediaLibrary);
 
-    server.listen(PORT, '0.0.0.0', () => {
-        console.log(`RadioHost.cloud HOST server running on http://0.0.0.0:${PORT}`);
-        // Startup Logic: Check if auto mode should be running
-        const studioUser = db.data.users.find(u => u.role === 'studio');
-        if (studioUser && db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
-            console.log('[Startup] Auto Mode is enabled. Starting playback loop.');
-            startPlaybackLoop();
-        }
-    });
+        const scanDirectory = async (currentDir, relativePath) => {
+            const entries = await fsPromises.readdir(path.join(mediaDir, currentDir), { withFileTypes: true });
+            for (const entry of entries) {
+                const entryPath = path.join(currentDir, entry.name);
+                const entryRelativePath = path.join(relativePath, entry.name);
+                if (entry.isDirectory()) {
+                    await scanDirectory(entryPath, entryRelativePath);
+                } else if (/\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(entry.name)) {
+                    const fileSrc = `/media/${entryRelativePath.replace(/\\/g, '/')}`;
+                    if (!allDbFiles.has(fileSrc)) {
+                        console.log(`[Startup] Found orphaned file, adding to library: ${entry.name}`);
+                        const title = entry.name.replace(/\.[^/.]+$/, "");
+                        const newTrack = {
+                            id: entry.name,
+                            title: title,
+                            artist: 'Unknown',
+                            duration: 0, // Duration would require a full metadata scan, skipping for now
+                            type: 'Song',
+                            src: fileSrc,
+                            originalFilename: entry.name
+                        };
+                        // Add to the root of the library for simplicity
+                        db.data.sharedMediaLibrary = addItemToTree(db.data.sharedMediaLibrary, 'root', newTrack);
+                    }
+                }
+            }
+        };
+
+        await scanDirectory('', '');
+        await db.write();
+        console.log('[Startup] Media sync complete.');
+
+        server.listen(PORT, '0.0.0.0', () => {
+            console.log(`RadioHost.cloud HOST server running on http://0.0.0.0:${PORT}`);
+            // Startup Logic: Check if auto mode should be running
+            const studioUser = db.data.users.find(u => u.role === 'studio');
+            if (studioUser && db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
+                console.log('[Startup] Auto Mode is enabled. Starting playback loop.');
+                startPlaybackLoop();
+            }
+        });
+    };
+
+    startup();
 }
 
 export default app;

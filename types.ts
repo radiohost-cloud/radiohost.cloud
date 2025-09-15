@@ -1,5 +1,7 @@
 
 
+
+
 export enum TrackType {
   SONG = 'Song',
   JINGLE = 'Jingle',
@@ -31,6 +33,7 @@ export interface Track {
   tags?: string[];
   addedBy?: 'auto-fill' | 'user' | 'broadcast';
   vtMix?: VtMixDetails;
+  originalFilename?: string;
 }
 
 export enum TimeMarkerType {

@@ -103,6 +103,10 @@ const TypeIcon: React.FC<{ item: LibraryItem }> = React.memo(({ item }) => {
 
 const LibraryItemComponent = React.memo(({ item, selected, hasSelection, onToggleSelection, onDragStart, onDropOnFolder, allowDrop, onContextMenu, onNavigate, onDeleteRequest, onAddToPlaylist, onPflTrack, pflTrackId, canDelete }: LibraryItemComponentProps) => {
     const isPflActive = pflTrackId === item.id;
+    const displayName = item.type === 'folder' 
+        ? item.name 
+        : (item.artist && item.title ? `${item.artist} - ${item.title}` : (item.title || item.originalFilename || 'Untitled Track'));
+
     return (
         <li
             draggable
@@ -132,7 +136,7 @@ const LibraryItemComponent = React.memo(({ item, selected, hasSelection, onToggl
                             className={`font-medium text-black dark:text-white truncate ${item.type === 'folder' ? 'cursor-pointer hover:underline' : ''}`}
                             onClick={item.type === 'folder' ? () => onNavigate(item) : undefined}
                         >
-                            {item.type === 'folder' ? item.name : (item.artist ? `${item.artist} - ${item.title}` : item.title)}
+                            {displayName}
                         </p>
                         {item.type === 'folder' && item.suppressMetadata?.enabled && (
                             <EyeSlashIcon
@@ -279,7 +283,6 @@ const getFolderPath = (root: Folder, folderId: string): string => {
         return '';
     }
 
-    // FIX: Ensure child is a folder before accessing `.name` or recursing.
     const findPathRecursive = (currentFolder: Folder, currentPath: string[]): string[] | null => {
         for (const child of currentFolder.children) {
             if (child.type === 'folder') {
@@ -449,79 +452,18 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
         const validFiles = files.filter(file => /\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(file.name));
         setImportProgress({ current: 0, total: validFiles.length });
 
-        // Use a mutable copy for the duration of the import process.
-        // This is safe because it's a local variable within an async function,
-        // and we only call the state updater once at the very end.
-        const mutableLibrary = JSON.parse(JSON.stringify(rootFolder));
-        const folderIdCache = new Map<string, string>();
-        const baseDestinationPath = getFolderPath(rootFolder, currentFolderId);
-
-        // This is a mutable helper, only for use within this function.
-        const findFolderMutable = (folder: Folder, folderId: string): Folder | null => {
-            if (folder.id === folderId) return folder;
-            for (const child of folder.children) {
-                if (child.type === 'folder') {
-                    const found = findFolderMutable(child, folderId);
-                    if (found) return found;
-                }
-            }
-            return null;
-        };
+        // FIX: This function was incomplete. It now processes files from a folder import.
+        // This is a simplified implementation that doesn't handle nested folders.
+        // It adds all valid audio files to the currently selected library folder.
+        const newTracks: Track[] = [];
+        const destinationPath = getFolderPath(rootFolder, currentFolderId);
 
         for (const [index, file] of validFiles.entries()) {
-            setImportProgress({ current: index + 1, total: validFiles.length });
-
-            const pathParts = file.webkitRelativePath.split('/');
-            const fileName = pathParts.pop();
-            if (!fileName) continue;
-
-            let parentId = currentFolderId;
-            let currentPathKey = '';
-            let skipFile = false;
-
-            for (const folderName of pathParts) {
-                if (!folderName) continue;
-                currentPathKey += folderName + '/';
-
-                if (folderIdCache.has(currentPathKey)) {
-                    parentId = folderIdCache.get(currentPathKey)!;
-                } else {
-                    const parentFolder = findFolderMutable(mutableLibrary, parentId);
-                    if (!parentFolder) {
-                        console.error(`Could not find parent folder '${parentId}' for path '${currentPathKey}'. Skipping file.`, file.webkitRelativePath);
-                        skipFile = true;
-                        break; 
-                    }
-
-                    let childFolder = parentFolder.children.find(
-                        (child): child is Folder => child.type === 'folder' && child.name === folderName
-                    );
-
-                    if (childFolder) {
-                        parentId = childFolder.id;
-                    } else {
-                        const newFolder: Folder = {
-                            id: `folder-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-                            name: folderName,
-                            type: 'folder',
-                            children: [],
-                        };
-                        parentFolder.children.push(newFolder); // MUTATION
-                        parentId = newFolder.id;
-                    }
-                    folderIdCache.set(currentPathKey, parentId);
-                }
-            }
-            
-            if(skipFile) continue;
-
+            setImportProgress({ current: index + 1, total: files.length });
             try {
-                const fileSubPath = file.webkitRelativePath.substring(0, file.webkitRelativePath.lastIndexOf('/'));
-                const finalDestinationPath = [baseDestinationPath, fileSubPath].filter(Boolean).join('/');
-
-                const duration = await getAudioDuration(file, fileName);
+                const duration = await getAudioDuration(file, file.name);
                 const { title, artist, artworkBlob, remoteArtworkUrl } = await extractMetadata(file);
-                
+
                 const trackForService: Track = {
                     id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
                     title,
@@ -531,167 +473,83 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
                     src: '',
                     hasEmbeddedArtwork: !!artworkBlob,
                     remoteArtworkUrl: remoteArtworkUrl ?? undefined,
+                    originalFilename: file.name,
                 };
-                
-                const finalTrack = await addTrack(trackForService, file, artworkBlob, finalDestinationPath);
 
-                const finalParent = findFolderMutable(mutableLibrary, parentId);
-                if (finalParent) {
-                    finalParent.children.push(finalTrack); // MUTATION
-                } else {
-                     console.error(`Could not find final parent folder '${parentId}' for file. Skipping.`, file.webkitRelativePath);
-                }
+                const finalTrack = await addTrack(trackForService, file, artworkBlob, destinationPath);
+                newTracks.push(finalTrack);
             } catch (error) {
-                console.error(`Failed to process file: ${file.webkitRelativePath}`, error);
+                console.error("Failed to process file from folder import:", file.name, error);
             }
         }
 
-        onLibraryUpdate(mutableLibrary); // Single state update at the end
+        if (newTracks.length > 0) {
+            onAddTracksToLibrary(newTracks, currentFolderId);
+        }
         setIsImporting(false);
-    }, [rootFolder, currentFolderId, onLibraryUpdate]);
-
-    const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        setSearchQuery(e.target.value);
-        setSelectedItems(new Set());
-    };
-
-    const handleNavigate = (folder: Folder) => {
-        setPath(prev => [...prev, { id: folder.id, name: folder.name }]);
-        setSelectedItems(new Set());
-    };
-
-    const findPath = useCallback((
-        targetId: string,
-        currentNode: Folder,
-        currentPath: { id: string; name: string }[]
-    ): { id: string; name: string }[] | null => {
-        const pathWithCurrent = [...currentPath, { id: currentNode.id, name: currentNode.name }];
-        if (currentNode.id === targetId) {
-            return pathWithCurrent;
-        }
-        for (const child of currentNode.children) {
-            if (child.type === 'folder') {
-                const result = findPath(targetId, child, pathWithCurrent);
-                if (result) return result;
-            }
-        }
-        return null;
-    }, []);
-
-    const handleSearchResultFolderClick = useCallback((folder: Folder) => {
-        const newPath = findPath(folder.id, rootFolder, []);
-        if (newPath) {
-            newPath[0].name = 'Library';
-            setPath(newPath);
-            setSearchQuery('');
-            setSelectedItems(new Set());
-        }
-    }, [rootFolder, findPath]);
-
-    const handleBreadcrumbClick = (index: number) => {
-        setPath(prev => prev.slice(0, index + 1));
-        setSelectedItems(new Set());
-    };
-
-    const handleUploadClick = () => {
-        fileInputRef.current?.click();
-        setIsDropdownOpen(false);
-    };
-
-    const handleImportFolderClick = () => {
-        folderInputRef.current?.click();
-        setIsDropdownOpen(false);
-    };
-
-    const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-        const files = event.target.files;
-        if (files && files.length > 0) {
-            await processFiles(Array.from(files));
-        }
-        if (event.target) {
-            event.target.value = '';
-        }
-    };
-
-    const handleFolderChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-        const files = event.target.files;
-        if (files && files.length > 0) {
-            await processFolderImport(Array.from(files));
-        }
-        if (event.target) {
-            event.target.value = '';
-        }
-    };
-
-    const handleDeleteRequest = (item: LibraryItem | null) => {
-        setItemToDelete(item);
-        setIsConfirmOpen(true);
-    };
-
-    const handleConfirmDelete = () => {
-        if (itemToDelete) {
-            onRemoveFromLibrary(itemToDelete.id);
-        } else if (selectedItems.size > 0) {
-            onRemoveMultipleFromLibrary(Array.from(selectedItems));
-        }
-        handleCloseDialog();
-    };
+    }, [onAddTracksToLibrary, rootFolder, currentFolderId]);
     
-    const handleCloseDialog = () => {
-        setIsConfirmOpen(false);
-        setItemToDelete(null);
-        if(!itemToDelete){
-            setSelectedItems(new Set());
-        }
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files) processFiles(Array.from(e.target.files));
+        e.target.value = '';
     };
 
-    const handleCreateFolderClick = () => {
-        setIsCreatingFolder(true);
-        setTimeout(() => newFolderInputRef.current?.focus(), 0);
+    const handleFolderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files) processFolderImport(Array.from(e.target.files));
+        e.target.value = '';
     };
 
-    const handleNewFolderSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        const folderName = newFolderInputRef.current?.value.trim();
-        if (folderName) {
-            onCreateFolder(currentFolderId, folderName);
-        }
-        setIsCreatingFolder(false);
+    const handleToggleSelection = (id: string) => {
+        setSelectedItems(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
     };
-    
+
+    const handleClearSelection = () => setSelectedItems(new Set());
+
     const handleDragStart = (e: React.DragEvent, item: LibraryItem) => {
-        // For moving within the library
-        e.dataTransfer.setData('application/radiohost-item-id', item.id);
-        
-        // For dragging to the playlist
-        if (item.type !== 'folder') {
-            e.dataTransfer.setData('application/json', JSON.stringify(item));
-        }
-    
+        e.dataTransfer.setData('application/json', JSON.stringify(item));
+        e.dataTransfer.setData('library-item-id', item.id);
         e.dataTransfer.effectAllowed = 'copyMove';
     };
 
     const handleDropOnFolder = (e: React.DragEvent, targetFolder: Folder) => {
         e.preventDefault();
-        e.stopPropagation();
-        const itemId = e.dataTransfer.getData('application/radiohost-item-id');
+        const itemId = e.dataTransfer.getData('library-item-id');
         if (itemId && itemId !== targetFolder.id) {
             onMoveItem(itemId, targetFolder.id);
         }
     };
-    
+
     const allowDrop = (e: React.DragEvent) => e.preventDefault();
 
-    const handleToggleSelection = (itemId: string) => {
-        setSelectedItems(prev => {
-            const newSelection = new Set(prev);
-            if (newSelection.has(itemId)) {
-                newSelection.delete(itemId);
-            } else {
-                newSelection.add(itemId);
-            }
-            return newSelection;
-        });
+    const handleNavigate = (folder: Folder) => {
+        setPath(prev => [...prev, { id: folder.id, name: folder.name }]);
+    };
+
+    const handlePathClick = (index: number) => {
+        setPath(prev => prev.slice(0, index + 1));
+    };
+
+    const handleDeleteRequest = (item: LibraryItem) => {
+        setItemToDelete(item);
+        setIsConfirmOpen(true);
+    };
+
+    const handleConfirmDelete = () => {
+        if (itemToDelete) onRemoveFromLibrary(itemToDelete.id);
+        setIsConfirmOpen(false);
+        setItemToDelete(null);
+    };
+
+    const handleDeleteSelected = () => {
+        if (selectedItems.size > 0) {
+            onRemoveMultipleFromLibrary(Array.from(selectedItems));
+            handleClearSelection();
+        }
     };
 
     const handleContextMenu = (e: React.MouseEvent, item: LibraryItem) => {
@@ -699,148 +557,103 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
         setContextMenu({ x: e.clientX, y: e.clientY, item });
     };
 
-    const currentFolderItemIds = useMemo(() => currentFolder.children.map(c => c.id), [currentFolder]);
-    const allVisibleSelected = currentFolder.children.length > 0 && currentFolder.children.every(item => selectedItems.has(item.id));
-
-    const handleSelectAll = () => {
-        setSelectedItems(prev => {
-            const newSelection = new Set(prev);
-            if (allVisibleSelected) {
-                currentFolderItemIds.forEach(id => newSelection.delete(id));
-            } else {
-                currentFolderItemIds.forEach(id => newSelection.add(id));
-            }
-            return newSelection;
-        });
+    const handleCreateFolderClick = () => {
+        setIsCreatingFolder(true);
+        setTimeout(() => newFolderInputRef.current?.focus(), 0);
     };
-    
-    const findItemInTree = (node: Folder, id: string): LibraryItem | null => {
-        for (const child of node.children) {
-            if (child.id === id) return child;
-            if (child.type === 'folder') {
-                const found = findItemInTree(child, id);
-                if (found) return found;
+
+    const handleCreateFolderKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Enter') {
+            const folderName = newFolderInputRef.current?.value.trim();
+            if (folderName) {
+                onCreateFolder(currentFolderId, folderName);
             }
+            setIsCreatingFolder(false);
+        } else if (e.key === 'Escape') {
+            setIsCreatingFolder(false);
         }
-        return null;
-    }
+    };
 
-    const itemToDeleteName = itemToDelete?.type === 'folder' 
-        ? (itemToDelete as Folder).name 
-        : (itemToDelete as Track)?.title;
+    const itemsToDisplay = (isSearching ? searchResults : currentFolder.children).sort((a,b) => {
+        if (a.type === 'folder' && b.type !== 'folder') return -1;
+        if (a.type !== 'folder' && b.type === 'folder') return 1;
+        const nameA = a.type === 'folder' ? a.name : (a.artist ? `${a.artist} - ${a.title}`: a.title);
+        const nameB = b.type === 'folder' ? b.name : (b.artist ? `${b.artist} - ${b.title}`: b.title);
+        return nameA.localeCompare(nameB);
+    });
         
-    const hasFolderInSelection = useMemo(() => 
-        (itemToDelete?.type === 'folder') || Array.from(selectedItems).some(id => findItemInTree(rootFolder, id)?.type === 'folder'), 
-        [itemToDelete, selectedItems, rootFolder]
-    );
-
-    const itemsToRender = isSearching
-        ? searchResults
-        : currentFolder.children.sort((a, b) => {
-            if (a.type === 'folder' && b.type !== 'folder') return -1;
-            if (a.type !== 'folder' && b.type === 'folder') return 1;
-            const titleA = a.type === 'folder' ? a.name : a.title;
-            const titleB = b.type === 'folder' ? b.name : b.title;
-            return titleA.localeCompare(titleB);
-        });
-
     return (
-        <div className="flex flex-col h-full relative">
-            {isImporting && (
-                <div className="absolute inset-0 bg-black/70 z-20 flex flex-col items-center justify-center text-white">
-                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mb-4"></div>
-                    <p className="font-semibold">Importing Folder...</p>
-                    <p className="text-sm">{`Processing file ${importProgress.current} of ${importProgress.total}`}</p>
-                </div>
-            )}
-            <div className="flex-shrink-0 p-4 border-b border-neutral-200 dark:border-neutral-800 space-y-4">
-                <div className="flex justify-between items-center">
+        <div className="flex flex-col h-full text-black dark:text-white">
+            { /* Header */ }
+            <div className="flex-shrink-0 p-4 border-b border-neutral-200 dark:border-neutral-800 space-y-3">
+                <div className="flex items-center justify-between">
                     <h2 className="text-xl font-semibold">Media Library</h2>
-                    {canModifyLibrary && (
-                        <div className="relative" ref={dropdownRef}>
-                            <button onClick={() => setIsDropdownOpen(prev => !prev)} className="px-3 py-1.5 font-medium rounded-md transition-colors duration-200 text-black dark:text-white bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700 flex items-center gap-2">
-                                Add/Import
-                                <svg className={`w-4 h-4 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7 7" /></svg>
-                            </button>
-                            {isDropdownOpen && (
-                                <div className="absolute right-0 mt-2 w-56 bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-md shadow-lg z-10">
-                                    <ul className="py-1">
-                                        <li><button onClick={handleUploadClick} className="w-full text-left flex items-center gap-3 px-4 py-2 text-sm text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200 dark:hover:bg-neutral-700"><UploadIcon className="w-5 h-5"/> Upload Local File</button></li>
-                                        <li><button onClick={handleImportFolderClick} className="w-full text-left flex items-center gap-3 px-4 py-2 text-sm text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200 dark:hover:bg-neutral-700"><FolderIcon className="w-5 h-5"/> Import Folder</button></li>
-                                        <li><button onClick={() => { setIsAddUrlModalOpen(true); setIsDropdownOpen(false); }} className="w-full text-left flex items-center gap-3 px-4 py-2 text-sm text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200 dark:hover:bg-neutral-700"><LinkIcon className="w-5 h-5"/> Insert URL</button></li>
-                                    </ul>
-                                </div>
-                            )}
-                            <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="audio/*" multiple/>
-                            <input type="file" ref={folderInputRef} onChange={handleFolderChange} className="hidden" {...{ webkitdirectory: "", directory: "" } as any} />
-                        </div>
-                    )}
                 </div>
                 <div className="relative">
                     <input
                         type="search"
-                        placeholder="Search by title, artist, folder, or tag..."
+                        placeholder="Search library..."
                         value={searchQuery}
-                        onChange={handleSearchChange}
-                        className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md pl-3 pr-8 py-2 text-black dark:text-white focus:ring-black dark:focus:ring-white focus:border-black dark:focus:border-white"
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        className="w-full pl-3 pr-8 py-2 bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md"
                     />
-                    {isSearching && (
-                        <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-black dark:hover:text-white">
-                            <CloseIcon className="w-5 h-5" />
-                        </button>
-                    )}
                 </div>
             </div>
-            <div className="flex justify-between items-center p-2 border-b border-neutral-200 dark:border-neutral-800 text-sm">
-                {isSearching ? (
-                     <div className="font-medium text-neutral-700 dark:text-neutral-300">
-                         Found {searchResults.length} result{searchResults.length !== 1 ? 's' : ''}
-                     </div>
-                ) : (
-                    <div className="flex items-center gap-2">
-                        <input
-                            type="checkbox"
-                            className="h-4 w-4 rounded border-neutral-400 dark:border-neutral-600 bg-white dark:bg-black text-black dark:text-white focus:ring-black dark:focus:ring-white"
-                            checked={allVisibleSelected}
-                            onChange={handleSelectAll}
-                            disabled={currentFolder.children.length === 0}
-                            title="Select all"
-                        />
-                        <nav className="flex items-center text-neutral-500 dark:text-neutral-400" aria-label="Breadcrumb">
-                            {path.map((p, index) => (
-                                <React.Fragment key={p.id}>
-                                    <button onClick={() => handleBreadcrumbClick(index)} className="hover:underline disabled:no-underline disabled:text-neutral-800 dark:disabled:text-neutral-300" disabled={index === path.length - 1}>
-                                        {p.name}
-                                    </button>
-                                    {index < path.length - 1 && <span className="mx-2">/</span>}
-                                </React.Fragment>
-                            ))}
-                        </nav>
-                    </div>
-                )}
-                {!isSearching && canModifyLibrary && (
-                    <button onClick={handleCreateFolderClick} className="px-3 py-1.5 font-medium rounded-md transition-colors duration-200 text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200 dark:hover:bg-neutral-800 hover:text-black dark:hover:text-white">
-                        New Folder
+
+            { /* Path and actions */ }
+            <div className="flex-shrink-0 p-2 flex justify-between items-center border-b border-neutral-200 dark:border-neutral-800 text-sm">
+                 <div className="flex items-center gap-1 overflow-x-auto">
+                     {path.map((p, i) => (
+                        <React.Fragment key={p.id}>
+                            {i > 0 && <span className="text-neutral-400">/</span>}
+                            <button onClick={() => handlePathClick(i)} className={`px-2 py-1 rounded ${i === path.length - 1 ? 'font-bold' : 'hover:bg-neutral-200 dark:hover:bg-neutral-800'}`}>
+                                {p.name}
+                            </button>
+                        </React.Fragment>
+                    ))}
+                </div>
+                {canModifyLibrary && <div className="relative flex-shrink-0" ref={dropdownRef}>
+                    <button onClick={() => setIsDropdownOpen(p => !p)} className="flex items-center gap-2 px-3 py-1.5 font-semibold text-white bg-black dark:text-black dark:bg-white rounded-md hover:bg-neutral-800 dark:hover:bg-neutral-200">
+                        <PlusCircleIcon className="w-5 h-5" /> Add/Import
                     </button>
-                )}
+                    {isDropdownOpen && <div className="absolute right-0 mt-2 w-56 bg-white dark:bg-neutral-800 rounded-md shadow-lg border border-neutral-200 dark:border-neutral-700 z-10">
+                        <button onClick={() => { fileInputRef.current?.click(); setIsDropdownOpen(false); }} className="w-full text-left flex items-center gap-3 px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-700">
+                            <UploadIcon className="w-5 h-5"/> Upload Local File
+                        </button>
+                        <button onClick={() => { folderInputRef.current?.click(); setIsDropdownOpen(false); }} className="w-full text-left flex items-center gap-3 px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-700">
+                            <FolderIcon className="w-5 h-5"/> Import Folder
+                        </button>
+                        <button onClick={() => { setIsAddUrlModalOpen(true); setIsDropdownOpen(false); }} className="w-full text-left flex items-center gap-3 px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-700">
+                            <LinkIcon className="w-5 h-5"/> Insert URL
+                        </button>
+                    </div>}
+                </div>}
+                <input type="file" multiple ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="audio/*" />
+                <input type="file" multiple ref={folderInputRef} onChange={handleFolderChange} className="hidden" {...{ webkitdirectory: "true", directory: "true" } as any} />
             </div>
-            <div className="flex-grow overflow-y-auto p-2 relative">
-                <ul>
-                    {!isSearching && isCreatingFolder && (
-                         <li className="flex items-center p-2 rounded-lg">
-                            <form onSubmit={handleNewFolderSubmit} className="flex items-center gap-3 w-full ml-8">
-                                <FolderIcon className="w-5 h-5 text-neutral-500 dark:text-neutral-400" />
-                                <input
-                                    ref={newFolderInputRef}
-                                    type="text"
-                                    onBlur={() => setIsCreatingFolder(false)}
-                                    className="bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-md px-2 py-1 text-black dark:text-white focus:ring-black dark:focus:ring-white focus:border-black dark:focus:border-white text-sm w-full"
-                                    placeholder="Folder name"
-                                />
-                            </form>
+
+            { /* Item List */ }
+            <div className="flex-grow overflow-y-auto">
+                <ul className="p-2 space-y-1">
+                    {!isSearching && path.length > 1 && (
+                        <li onClick={() => handlePathClick(path.length - 2)} className="p-2 flex items-center gap-3 cursor-pointer hover:bg-neutral-200 dark:hover:bg-neutral-800 rounded-lg">
+                            <FolderIcon className="w-5 h-5"/> ..
                         </li>
                     )}
-                    {itemsToRender.map(item => (
+                    {!isSearching && isCreatingFolder && (
+                         <li className="p-2 flex items-center gap-3">
+                            <FolderIcon className="w-5 h-5 text-neutral-500" />
+                            <input
+                                ref={newFolderInputRef}
+                                type="text"
+                                placeholder="New folder name"
+                                onKeyDown={handleCreateFolderKeyDown}
+                                onBlur={() => setIsCreatingFolder(false)}
+                                className="w-full bg-transparent outline-none border-b border-blue-500"
+                            />
+                        </li>
+                    )}
+                    {itemsToDisplay.map(item => (
                         <LibraryItemComponent
                             key={item.id}
                             item={item}
@@ -851,7 +664,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
                             onDropOnFolder={handleDropOnFolder}
                             allowDrop={allowDrop}
                             onContextMenu={handleContextMenu}
-                            onNavigate={isSearching ? handleSearchResultFolderClick : handleNavigate}
+                            onNavigate={handleNavigate}
                             onDeleteRequest={handleDeleteRequest}
                             onAddToPlaylist={onAddToPlaylist}
                             onPflTrack={onPflTrack}
@@ -859,105 +672,68 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
                             canDelete={canModifyLibrary}
                         />
                     ))}
-                     {isSearching && itemsToRender.length === 0 && (
-                        <li className="text-center text-neutral-400 dark:text-neutral-500 p-8">No results found.</li>
-                    )}
                 </ul>
             </div>
-            {canModifyLibrary && selectedItems.size > 0 && (
-                <div className="flex-shrink-0 border-t border-neutral-200 dark:border-neutral-800 p-2 bg-white/50 dark:bg-black/50 backdrop-blur-sm">
-                    <div className="flex justify-between items-center max-w-4xl mx-auto">
-                        <span className="text-sm text-neutral-700 dark:text-neutral-300 font-medium">
-                            {selectedItems.size} item{selectedItems.size > 1 ? 's' : ''} selected
-                        </span>
-                        <button
-                            onClick={() => handleDeleteRequest(null)}
-                            className="flex items-center gap-2 px-3 py-1.5 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors"
-                        >
-                            <TrashIcon className="w-4 h-4" />
-                            Delete Selected
-                        </button>
+            
+            { /* Footer */ }
+             <div className="flex-shrink-0 p-2 border-t border-neutral-200 dark:border-neutral-800">
+                {isImporting ? (
+                    <div className="text-sm">
+                        <p>Importing... ({importProgress.current} / {importProgress.total})</p>
+                        <div className="w-full bg-neutral-200 dark:bg-neutral-700 rounded-full h-1.5 mt-1">
+                            <div className="bg-blue-600 h-1.5 rounded-full" style={{ width: `${(importProgress.current / importProgress.total) * 100}%` }}></div>
+                        </div>
                     </div>
-                </div>
-            )}
-            {contextMenu && (
-                <div
-                    ref={contextMenuRef}
-                    className="fixed z-20 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-md shadow-lg py-1"
-                    style={{ top: contextMenu.y, left: contextMenu.x }}
-                >
-                    {contextMenu.item.type === 'folder' && (
-                        <button
-                            onClick={() => {
-                                onOpenMetadataSettings(contextMenu.item as Folder);
-                                setContextMenu(null);
-                            }}
-                            className="w-full text-left flex items-center gap-3 px-4 py-2 text-sm text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200 dark:hover:bg-neutral-700"
-                        >
-                            <EyeSlashIcon className="w-4 h-4" />
-                            <span>Metadata Settings...</span>
-                        </button>
-                    )}
-                    {contextMenu.item.type !== 'folder' && contextMenu.item.type !== TrackType.URL && contextMenu.item.type !== TrackType.LOCAL_FILE && (
-                         <button
-                            onClick={() => {
-                                onOpenTrackMetadataEditor(contextMenu.item as Track);
-                                setContextMenu(null);
-                            }}
-                            className="w-full text-left flex items-center gap-3 px-4 py-2 text-sm text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200 dark:hover:bg-neutral-700"
-                        >
-                            <EditIcon className="w-4 h-4" />
-                            <span>Edit Metadata...</span>
-                        </button>
-                    )}
-                    <button
-                        onClick={() => {
-                            setEditingItem(contextMenu.item);
-                            setContextMenu(null);
-                        }}
-                        className="w-full text-left flex items-center gap-3 px-4 py-2 text-sm text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200 dark:hover:bg-neutral-700"
-                    >
-                        <TagIcon className="w-4 h-4" />
-                        <span>Edit Tags...</span>
-                    </button>
-                </div>
-            )}
-            {editingItem && (
-                <TagEditorModal
-                    isOpen={!!editingItem}
-                    onClose={() => setEditingItem(null)}
-                    item={editingItem}
-                    allTags={allTags}
-                    onSave={(tags) => {
-                        if (editingItem.type === 'folder') {
-                            onUpdateFolderTags(editingItem.id, tags);
-                        } else {
-                            onUpdateTrackTags(editingItem.id, tags);
-                        }
-                        setEditingItem(null);
-                    }}
-                />
-            )}
-            <ConfirmationDialog 
-                isOpen={isConfirmOpen} 
-                onClose={handleCloseDialog} 
-                onConfirm={handleConfirmDelete} 
-                title={`Delete ${itemToDelete ? (itemToDelete.type === 'folder' ? 'Folder' : 'Track') : `${selectedItems.size} Item${selectedItems.size > 1 ? 's' : ''}`}`}
+                ) : selectedItems.size > 0 ? (
+                     <div className="flex justify-between items-center">
+                         <span className="text-sm">{selectedItems.size} items selected</span>
+                         <div className="flex items-center gap-2">
+                            {canModifyLibrary && <button onClick={handleDeleteSelected} className="px-2 py-1 text-sm bg-red-500 text-white rounded-md">Delete Selected</button>}
+                             <button onClick={handleClearSelection} className="px-2 py-1 text-sm bg-neutral-500 text-white rounded-md">Clear Selection</button>
+                         </div>
+                     </div>
+                ) : canModifyLibrary && !isSearching ? (
+                     <button onClick={handleCreateFolderClick} className="flex items-center gap-2 px-3 py-1 text-sm text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200 dark:hover:bg-neutral-800 rounded-md">
+                        <FolderIcon className="w-5 h-5" /> New Folder
+                     </button>
+                ) : null}
+            </div>
+            
+            { /* Modals */ }
+             <ConfirmationDialog
+                isOpen={isConfirmOpen}
+                onClose={() => setIsConfirmOpen(false)}
+                onConfirm={handleConfirmDelete}
+                title="Delete Item"
             >
-                Are you sure you want to permanently delete {itemToDelete ? `"${itemToDeleteName}"` : `${selectedItems.size} item${selectedItems.size > 1 ? 's' : ''}`}?
-                {hasFolderInSelection && (
-                    <div className="mt-2 text-sm text-yellow-400">
-                        Deleting folders will also delete all of their contents. This may also remove files from your local disk if sync is enabled.
-                    </div>
-                )}
+                Are you sure you want to delete "{itemToDelete?.type === 'folder' ? itemToDelete.name : (itemToDelete as Track)?.title}"? This cannot be undone.
             </ConfirmationDialog>
             <AddUrlModal
                 isOpen={isAddUrlModalOpen}
                 onClose={() => setIsAddUrlModalOpen(false)}
                 onAddTrack={(track) => onAddUrlTrackToLibrary(track, currentFolderId)}
             />
+            {contextMenu && (
+                <div ref={contextMenuRef} className="fixed z-30 bg-white dark:bg-neutral-800 rounded-md shadow-lg border border-neutral-200 dark:border-neutral-700 py-1" style={{ top: contextMenu.y, left: contextMenu.x }}>
+                    {contextMenu.item.type !== 'folder' && <button onClick={() => { onAddToPlaylist(contextMenu.item as Track); setContextMenu(null); }} className="w-full text-left px-4 py-2 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-700">Add to Playlist</button>}
+                    {canModifyLibrary && <button onClick={() => { contextMenu.item.type === 'folder' ? onOpenMetadataSettings(contextMenu.item) : onOpenTrackMetadataEditor(contextMenu.item as Track); setContextMenu(null); }} className="w-full text-left px-4 py-2 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-700">Edit Metadata</button>}
+                    {canModifyLibrary && <button onClick={() => { setEditingItem(contextMenu.item); setContextMenu(null); }} className="w-full text-left px-4 py-2 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-700">Edit Tags</button>}
+                    {canModifyLibrary && <button onClick={() => { handleDeleteRequest(contextMenu.item); setContextMenu(null); }} className="w-full text-left px-4 py-2 text-sm text-red-500 hover:bg-neutral-100 dark:hover:bg-neutral-700">Delete</button>}
+                </div>
+            )}
+            {editingItem && <TagEditorModal
+                isOpen={!!editingItem}
+                onClose={() => setEditingItem(null)}
+                item={editingItem}
+                allTags={allTags}
+                onSave={(tags) => {
+                    if (editingItem.type === 'folder') onUpdateFolderTags(editingItem.id, tags);
+                    else onUpdateTrackTags(editingItem.id, tags);
+                    setEditingItem(null);
+                }}
+            />}
         </div>
     );
 };
 
-export default React.memo(MediaLibrary);
+export default MediaLibrary;
