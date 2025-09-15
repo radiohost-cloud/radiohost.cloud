@@ -2465,7 +2465,8 @@ const AppInternal: React.FC = () => {
                 if (playerState) {
                     if (playerState.currentTrackIndex !== undefined && playerState.currentTrackIndex !== currentTrackIndexRef.current) setCurrentTrackIndex(playerState.currentTrackIndex);
                     if (playerState.isPlaying !== undefined && playerState.isPlaying !== isPlayingRef.current) setIsPlaying(playerState.isPlaying);
-                    if (playerState.trackProgress !== undefined && playerState.trackProgress !== trackProgressRef.current) setTrackProgress(playerState.trackProgress);
+                    // The client now handles progress smoothly with requestAnimationFrame, so we ignore server progress updates.
+                    // if (playerState.trackProgress !== undefined && playerState.trackProgress !== trackProgressRef.current) setTrackProgress(playerState.trackProgress);
                     if (playerState.currentPlayingItemId !== undefined && playerState.currentPlayingItemId !== currentPlayingItemIdRef.current) setCurrentPlayingItemId(playerState.currentPlayingItemId);
                     if (playerState.stopAfterTrackId !== undefined && playerState.stopAfterTrackId !== stopAfterTrackIdRef.current) setStopAfterTrackId(playerState.stopAfterTrackId);
                 }

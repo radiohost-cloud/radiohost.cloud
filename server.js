@@ -84,12 +84,16 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
                         await fsPromises.writeFile(artworkPath, tags.image.imageBuffer);
                         hasArtwork = true;
                     }
+                    
+                    // FIX: Correctly read duration from 'length' tag (TLEN) and convert from ms to seconds.
+                    // The node-id3 library puts the TLEN value in a 'length' property in milliseconds.
+                    const durationInSeconds = tags.length ? parseFloat(tags.length) / 1000 : 180;
 
                     children.push({
                         id: entryRelativePath,
                         title: tags.title || entry.name.replace(/\.[^/.]+$/, ""),
                         artist: tags.artist || 'Unknown Artist',
-                        duration: tags.duration ? parseFloat(tags.duration) : 180,
+                        duration: durationInSeconds,
                         type: 'Song', // Default type, could be enhanced
                         src: `/media/${entryRelativePath}`,
                         originalFilename: entry.name,
