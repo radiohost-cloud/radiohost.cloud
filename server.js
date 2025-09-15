@@ -1,4 +1,3 @@
-
 import express from 'express';
 import http from 'http';
 import path from 'path';
@@ -282,13 +281,68 @@ const getOnlinePresenters = () => {
         .map(({ password, ...user }) => user);
 };
 
+// --- Library Tree Helpers ---
+const findAndRemoveItemInTree = (node, itemId) => {
+    if (!node.children) return null;
+    let foundItem = null;
+    node.children = node.children.filter(child => {
+        if (child.id === itemId) {
+            foundItem = child;
+            return false;
+        }
+        return true;
+    });
+
+    if (foundItem) return foundItem;
+
+    for (const child of node.children) {
+        if (child.type === 'folder') {
+            foundItem = findAndRemoveItemInTree(child, itemId);
+            if (foundItem) return foundItem;
+        }
+    }
+    return null;
+};
+
+const findAndUpdateItemInTree = (node, itemId, updateFn) => {
+    if (node.id === itemId) {
+        Object.assign(node, updateFn(node));
+        return true;
+    }
+    if (node.children) {
+        for (const child of node.children) {
+            if (findAndUpdateItemInTree(child, itemId, updateFn)) {
+                return true;
+            }
+        }
+    }
+    return false;
+};
+
+const findAndAdd = (node, parentId, item) => {
+    if (node.id === parentId && node.type === 'folder') {
+        if (!node.children) node.children = [];
+        node.children.push(item);
+        return true;
+    }
+    if (node.children) {
+        for (const child of node.children) {
+            if (child.type === 'folder' && findAndAdd(child, parentId, item)) {
+                return true;
+            }
+        }
+    }
+    return false;
+};
+
+
 wss.on('connection', async (ws, req) => {
     const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
     const email = parsedUrl.searchParams.get('email');
     const user = db.data.users.find(u => u.email === email);
 
     if (!user) {
-        console.log('[WebSocket] Connection rejected: unknown user.');
+        console.log(`[WebSocket] Connection rejected: unknown user for email '${email}'.`);
         ws.close();
         return;
     }
@@ -319,9 +373,11 @@ wss.on('connection', async (ws, req) => {
                     break;
                 case 'studio-command': {
                     if (clients.get(email)?.role !== 'studio') return;
+                    
                     const { command, payload } = data.payload;
-                    // Update state in DB and then broadcast
                     let stateChanged = false;
+                    let libraryChanged = false;
+
                     switch (command) {
                         case 'togglePlay': db.data.playerState.isPlaying = !db.data.playerState.isPlaying; stateChanged = true; break;
                         case 'next': db.data.playerState.currentTrackIndex = (db.data.playerState.currentTrackIndex + 1) % db.data.playlist.length; db.data.playerState.trackProgress = 0; stateChanged = true; break;
@@ -339,7 +395,6 @@ wss.on('connection', async (ws, req) => {
                         }
                         case 'setStopAfterTrackId': db.data.playerState.stopAfterTrackId = payload.id; stateChanged = true; break;
                         case 'clearPlaylist': db.data.playlist = []; db.data.playerState = defaultData.playerState; stateChanged = true; break;
-                        // Playlist modifications
                         case 'setPlaylist': db.data.playlist = payload.playlist; stateChanged = true; break;
                         case 'insertTrack': {
                             const { track, beforeItemId } = payload;
@@ -363,7 +418,6 @@ wss.on('connection', async (ws, req) => {
                             stateChanged = true;
                             break;
                         }
-                         // Broadcast schedule modifications
                         case 'saveBroadcast': {
                             const index = db.data.broadcasts.findIndex(b => b.id === payload.broadcast.id);
                             if (index > -1) db.data.broadcasts[index] = payload.broadcast;
@@ -385,13 +439,70 @@ wss.on('connection', async (ws, req) => {
                             }
                             break;
                         }
+                         // Library Commands
+                        case 'addUrlTrackToLibrary': {
+                            if (findAndAdd(db.data.mediaLibrary, payload.destinationFolderId, payload.track)) {
+                                libraryChanged = true;
+                            }
+                            break;
+                        }
+                        case 'createFolder': {
+                            const newFolder = { id: `folder-${uuidv4()}`, name: payload.folderName, type: 'folder', children: [] };
+                            if (findAndAdd(db.data.mediaLibrary, payload.parentId, newFolder)) {
+                                libraryChanged = true;
+                            }
+                            break;
+                        }
+                        case 'removeFromLibrary': {
+                            const item = findAndRemoveItemInTree(db.data.mediaLibrary, payload.id);
+                            if (item) libraryChanged = true;
+                            // Note: This doesn't delete the physical file, scan will re-add it.
+                            break;
+                        }
+                        case 'moveItemInLibrary': {
+                            const item = findAndRemoveItemInTree(db.data.mediaLibrary, payload.itemId);
+                            if (item && findAndAdd(db.data.mediaLibrary, payload.destinationFolderId, item)) {
+                                libraryChanged = true;
+                            }
+                            break;
+                        }
+                        case 'updateFolderMetadata': {
+                            if (findAndUpdateItemInTree(db.data.mediaLibrary, payload.folderId, folder => ({ ...folder, suppressMetadata: payload.settings }))) {
+                                libraryChanged = true;
+                            }
+                            break;
+                        }
+                        case 'updateTrackMetadata': {
+                            if (findAndUpdateItemInTree(db.data.mediaLibrary, payload.trackId, track => ({ ...track, ...payload.newMetadata }))) {
+                                libraryChanged = true;
+                            }
+                            break;
+                        }
+                        case 'updateTrackTags': {
+                            if (findAndUpdateItemInTree(db.data.mediaLibrary, payload.trackId, item => ({ ...item, tags: payload.tags.length > 0 ? payload.tags.sort() : undefined }))) {
+                                libraryChanged = true;
+                            }
+                            break;
+                        }
+                        case 'updateFolderTags': {
+                            if (findAndUpdateItemInTree(db.data.mediaLibrary, payload.folderId, item => ({ ...item, tags: payload.newTags.length > 0 ? payload.newTags.sort() : undefined }))) {
+                                libraryChanged = true;
+                            }
+                            break;
+                        }
                     }
-                    if (stateChanged) {
+
+                    if (stateChanged || libraryChanged) {
                         await db.write();
-                        broadcastMessage({
-                            type: 'state-update',
-                            payload: { playlist: db.data.playlist, playerState: db.data.playerState, broadcasts: db.data.broadcasts }
-                        });
+                        if (stateChanged) {
+                            broadcastMessage({
+                                type: 'state-update',
+                                payload: { playlist: db.data.playlist, playerState: db.data.playerState, broadcasts: db.data.broadcasts }
+                            });
+                        }
+                        if (libraryChanged) {
+                            broadcastMessage({ type: 'library-update', payload: db.data.mediaLibrary });
+                        }
                     }
                     break;
                 }

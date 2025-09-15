@@ -1,5 +1,3 @@
-
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -612,13 +610,32 @@ const AppInternal: React.FC = () => {
             let loggedInUser: User | null = null;
 
             if (savedUserEmail) {
-                const user = await dataService.getUser(savedUserEmail);
+                let user: User | null = null;
+                if (savedAppMode === 'HOST') {
+                    try {
+                        const serverUsers = await dataService.getAllUsers();
+                        const serverUser = serverUsers.find(u => u.email === savedUserEmail);
+                        if (serverUser) {
+                            user = { ...serverUser }; // Create a copy
+                            if (savedPlayoutMode) {
+                                user.role = savedPlayoutMode;
+                            }
+                        }
+                    } catch (e) {
+                        console.error("Failed to verify user session with server. Forcing logout.", e);
+                        user = null;
+                    }
+                } else {
+                    user = await dataService.getUser(savedUserEmail);
+                }
+
                 if (user) {
                     loggedInUser = { email: user.email, nickname: user.nickname || user.email.split('@')[0], role: user.role };
                     initialUserData = await dataService.getUserData(savedUserEmail);
                 } else {
-                    // User in session but not in DB? Clear session.
+                    // User in session but not in DB (local or remote)? Clear session.
                     await dataService.putAppState('currentUserEmail', null);
+                    sessionStorage.removeItem('playoutMode');
                 }
             }
             
