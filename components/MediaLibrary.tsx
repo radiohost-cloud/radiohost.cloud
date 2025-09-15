@@ -7,7 +7,7 @@ import { HeadphoneIcon } from './icons/HeadphoneIcon';
 import AddUrlModal from './AddUrlModal';
 import { LinkIcon } from './icons/LinkIcon';
 import { UploadIcon } from './icons/UploadIcon';
-import { PlusCircleIcon } from './icons/PlusCircleIcon';
+import { PlusIcon } from './icons/PlusIcon';
 import { EditIcon } from './icons/EditIcon';
 import { TagIcon } from './icons/TagIcon';
 import { TrashIcon } from './icons/TrashIcon';
@@ -18,6 +18,7 @@ interface MediaLibraryProps {
     rootFolder: Folder;
     onAddToPlaylist: (track: Track) => void;
     onAddUrlTrackToLibrary?: (track: Track, destinationFolderId: string) => void;
+    onUploadFiles?: (files: FileList, destinationFolderId: string) => void;
     onRemoveFromLibrary?: (id: string) => void;
     onCreateFolder?: (parentId: string, folderName: string) => void;
     onMoveItem?: (itemId: string, destinationFolderId: string) => void;
@@ -100,8 +101,10 @@ const MediaLibrary: React.FC<MediaLibraryProps> = (props) => {
     const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: LibraryItem } | null>(null);
     const [isAddUrlModalOpen, setIsAddUrlModalOpen] = useState(false);
     const [tagEditorState, setTagEditorState] = useState<{ item: Track | Folder, allTags: string[] } | null>(null);
+    const [isAddMenuOpen, setIsAddMenuOpen] = useState(false);
 
     const contextMenuRef = useRef<HTMLDivElement>(null);
+    const addMenuRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const handleToggleFolder = (folderId: string) => {
@@ -127,6 +130,9 @@ const MediaLibrary: React.FC<MediaLibraryProps> = (props) => {
         const handleClickOutside = (e: MouseEvent) => {
             if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
                 setContextMenu(null);
+            }
+            if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node)) {
+                setIsAddMenuOpen(false);
             }
         };
         document.addEventListener('mousedown', handleClickOutside);
@@ -157,15 +163,6 @@ const MediaLibrary: React.FC<MediaLibraryProps> = (props) => {
             return { ...node, children };
         }
         return null;
-    };
-
-    const handleCreateFolder = () => {
-        const parentId = contextMenu?.item.type === 'folder' ? contextMenu.item.id : 'root';
-        const folderName = prompt('Enter new folder name:', 'New Folder');
-        if (folderName && props.onCreateFolder) {
-            props.onCreateFolder(parentId, folderName);
-        }
-        setContextMenu(null);
     };
 
     const handleRemoveItem = () => {
@@ -235,6 +232,13 @@ const MediaLibrary: React.FC<MediaLibraryProps> = (props) => {
 
     const displayedTree = useMemo(() => filterTree(rootFolder, searchTerm), [rootFolder, searchTerm]);
 
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files.length > 0) {
+            props.onUploadFiles?.(e.target.files, 'root');
+        }
+        e.target.value = ''; // Reset to allow re-uploading same file
+    };
+
     return (
         <div className="flex flex-col h-full">
             <div className="p-2 flex-shrink-0 border-b border-neutral-200 dark:border-neutral-800">
@@ -247,27 +251,35 @@ const MediaLibrary: React.FC<MediaLibraryProps> = (props) => {
                 />
             </div>
              <div className="p-2 flex-shrink-0 border-b border-neutral-200 dark:border-neutral-800 flex items-center gap-2">
-                <button
-                    disabled={playoutMode === 'presenter'}
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-semibold rounded-md bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700 disabled:opacity-50"
-                >
-                   <UploadIcon className="w-4 h-4" /> Import Files
-                </button>
-                <input type="file" ref={fileInputRef} multiple className="hidden" onChange={() => alert("File import handler not implemented in this stub.")} />
+                <div className="relative" ref={addMenuRef}>
+                    <button
+                        disabled={playoutMode === 'presenter'}
+                        onClick={() => setIsAddMenuOpen(p => !p)}
+                        className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-semibold rounded-md bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700 disabled:opacity-50"
+                        aria-haspopup="true"
+                        aria-expanded={isAddMenuOpen}
+                    >
+                       <PlusIcon className="w-4 h-4" /> Add Media
+                    </button>
+                    {isAddMenuOpen && (
+                        <div className="absolute top-full mt-1 w-48 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-md shadow-lg z-20 py-1" role="menu">
+                            <button onClick={() => { fileInputRef.current?.click(); setIsAddMenuOpen(false); }} className="w-full text-left px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center gap-2 text-sm text-black dark:text-white" role="menuitem">
+                                <UploadIcon className="w-4 h-4" /> Import Files
+                            </button>
+                            <button onClick={() => { setIsAddUrlModalOpen(true); setIsAddMenuOpen(false); }} className="w-full text-left px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center gap-2 text-sm text-black dark:text-white" role="menuitem">
+                                <LinkIcon className="w-4 h-4" /> Add URL
+                            </button>
+                        </div>
+                    )}
+                </div>
+                <input type="file" ref={fileInputRef} multiple className="hidden" accept="audio/*" onChange={handleFileChange} />
+
                 <button
                     disabled={playoutMode === 'presenter'}
                     onClick={() => props.onCreateFolder?.('root', 'New Folder')}
                     className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-semibold rounded-md bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700 disabled:opacity-50"
                 >
-                    <PlusCircleIcon className="w-4 h-4"/> New Folder
-                </button>
-                <button
-                    disabled={playoutMode === 'presenter'}
-                    onClick={() => setIsAddUrlModalOpen(true)}
-                    className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-semibold rounded-md bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700 disabled:opacity-50"
-                >
-                    <LinkIcon className="w-4 h-4" /> Add URL
+                    <FolderIcon className="w-4 h-4"/> New Folder
                 </button>
             </div>
             <div className="flex-grow p-2 overflow-y-auto">
@@ -281,10 +293,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = (props) => {
                     style={{ top: contextMenu.y, left: contextMenu.x }}
                 >
                     {contextMenu.item.type === 'folder' ? (
-                        <>
-                            <button onClick={handleCreateFolder} className="w-full text-left px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center gap-2"><PlusCircleIcon className="w-4 h-4" /> New Folder Here</button>
-                            <button onClick={() => props.onOpenMetadataSettings?.(contextMenu.item as Folder)} className="w-full text-left px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center gap-2"><EyeSlashIcon className="w-4 h-4"/> Metadata Settings</button>
-                        </>
+                        <button onClick={() => props.onOpenMetadataSettings?.(contextMenu.item as Folder)} className="w-full text-left px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center gap-2"><EyeSlashIcon className="w-4 h-4"/> Metadata Settings</button>
                     ) : (
                         <button onClick={() => props.onOpenTrackMetadataEditor?.(contextMenu.item as Track)} className="w-full text-left px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center gap-2"><EditIcon className="w-4 h-4" /> Edit Metadata</button>
                     )}

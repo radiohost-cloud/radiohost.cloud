@@ -1,4 +1,5 @@
 
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -290,6 +291,13 @@ const updateItemInTree = (node: Folder, itemId: string, updateFn: (item: Library
 
 type StreamStatus = 'inactive' | 'starting' | 'broadcasting' | 'error' | 'stopping';
 // --- App Component ---
+
+// Allow TypeScript to recognize jsmediatags from the global scope (loaded via script in index.html)
+declare global {
+  interface Window {
+    jsmediatags: any;
+  }
+}
 
 const AppInternal: React.FC = () => {
     const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
@@ -1849,6 +1857,67 @@ const AppInternal: React.FC = () => {
         }
     }, [isHostMode, sendStudioCommand]);
     
+    const handleUploadFiles = useCallback(async (files: FileList, destinationFolderId: string) => {
+        if (isHostMode) {
+            alert('File uploads via the browser are not supported in HOST mode. Please add files directly to the server\'s Media folder, and the library will update automatically.');
+            return;
+        }
+        
+        // DEMO Mode
+        const newTracks: Track[] = [];
+        for (const file of Array.from(files)) {
+            const trackId = `local-${file.name}-${Date.now()}`;
+            const track: Track = {
+                id: trackId,
+                title: file.name.replace(/\.[^/.]+$/, ""),
+                artist: 'Unknown Artist',
+                duration: 0,
+                type: TrackType.LOCAL_FILE,
+                src: '',
+                originalFilename: file.name
+            };
+
+            try {
+                const duration = await new Promise<number>((resolve, reject) => {
+                    const audio = document.createElement('audio');
+                    audio.preload = 'metadata';
+                    audio.onloadedmetadata = () => {
+                        resolve(audio.duration);
+                        URL.revokeObjectURL(audio.src);
+                    };
+                    audio.onerror = reject;
+                    audio.src = URL.createObjectURL(file);
+                });
+                track.duration = duration;
+
+                if (window.jsmediatags) {
+                    await new Promise<void>((resolve) => {
+                        window.jsmediatags.read(file, {
+                            onSuccess: (tag: any) => {
+                                if (tag.tags.title) track.title = tag.tags.title;
+                                if (tag.tags.artist) track.artist = tag.tags.artist;
+                                resolve();
+                            },
+                            onError: (error: any) => {
+                                console.warn('Could not read ID3 tags for', file.name, error);
+                                resolve();
+                            }
+                        });
+                    });
+                }
+                
+                await dataService.addTrack(track, file);
+                newTracks.push(track);
+            } catch (error) {
+                console.error("Error processing file:", file.name, error);
+            }
+        }
+        if (newTracks.length > 0) {
+            setMediaLibrary(prev => addMultipleItemsToTree(prev, destinationFolderId, newTracks));
+        }
+    }, [isHostMode]);
+
+
     const handleRemoveFromLibrary = useCallback(async (id: string) => {
         if (isHostMode) {
             sendStudioCommand('removeFromLibrary', { id });
@@ -2873,6 +2942,7 @@ const AppInternal: React.FC = () => {
                             rootFolder={mediaLibrary}
                             onAddToPlaylist={(track) => handleInsertTrackInPlaylist(track, null)}
                             onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
+                            onUploadFiles={handleUploadFiles}
                             onRemoveFromLibrary={handleRemoveFromLibrary}
                             onCreateFolder={handleCreateFolder}
                             onMoveItem={handleMoveItemInLibrary}
