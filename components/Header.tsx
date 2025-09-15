@@ -1,4 +1,5 @@
 
+
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { UserIcon } from './icons/UserIcon';
 import { LogoutIcon } from './icons/LogoutIcon';
@@ -44,7 +45,6 @@ interface HeaderProps {
     headerHeight: number;
     onPlayTrack: (trackId: string) => void;
     onEject: (trackId: string) => void;
-    mainPlayerAnalyser: AnalyserNode | null;
     playoutMode: 'studio' | 'presenter' | undefined;
     wsStatus: 'connecting' | 'connected' | 'disconnected';
 }
@@ -98,9 +98,8 @@ const Deck: React.FC<{
     isPlaying?: boolean;
     onPlayTrack: (trackId: string) => void;
     onEject: (trackId: string) => void;
-    analyserNode?: AnalyserNode | null;
     playoutMode: 'studio' | 'presenter' | undefined;
-}> = ({ track, artworkUrl, label, isCurrent, progress, onArtworkClick, onTogglePlay, onNext, onPrevious, isPlaying, onPlayTrack, onEject, analyserNode, playoutMode }) => {
+}> = ({ track, artworkUrl, label, isCurrent, progress, onArtworkClick, onTogglePlay, onNext, onPrevious, isPlaying, onPlayTrack, onEject, playoutMode }) => {
     
     const progressPercentage = (track?.duration && progress) ? (progress / track.duration) * 100 : 0;
     const isThisTrackPlaying = !!(isCurrent && isPlaying);
@@ -156,12 +155,6 @@ const Deck: React.FC<{
                 )}
             </div>
 
-            {isThisTrackPlaying && analyserNode && (
-                <div className="absolute top-4 bottom-4 right-2 w-6 z-20 pointer-events-none">
-                    <VUMeter analyserNode={analyserNode} />
-                </div>
-            )}
-
             <div className="relative p-4 pr-12 z-10 space-y-2">
                 <span className={`text-xs font-bold uppercase tracking-widest ${isCurrent ? 'text-green-400' : 'text-white/60'}`}>{label}</span>
                 <div className="space-y-1">
@@ -196,7 +189,7 @@ const Deck: React.FC<{
 const Header: React.FC<HeaderProps> = ({ 
     currentUser, onLogout, currentTrack, nextTrack, nextNextTrack, onNext, onPrevious, isPlaying, onTogglePlay, isPresenterLive = false, progress,
     logoSrc, onLogoChange, onLogoReset, headerGradient, headerTextColor, onOpenHelp, isAutoModeEnabled, onToggleAutoMode, onArtworkClick, onArtworkLoaded, headerHeight,
-    onPlayTrack, onEject, mainPlayerAnalyser, playoutMode, wsStatus
+    onPlayTrack, onEject, playoutMode, wsStatus
 }) => {
     
     const [isLogoConfirmOpen, setIsLogoConfirmOpen] = useState(false);
@@ -355,7 +348,6 @@ const Header: React.FC<HeaderProps> = ({
                         isPlaying={isPlaying}
                         onPlayTrack={onPlayTrack}
                         onEject={onEject}
-                        analyserNode={mainPlayerAnalyser}
                         playoutMode={playoutMode}
                     />
                     <Deck 

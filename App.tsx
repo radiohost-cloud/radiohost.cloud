@@ -67,12 +67,11 @@ const defaultPlayoutPolicy: PlayoutPolicy = {
     autoFillSourceId: null,
     autoFillTargetDuration: 60, // minutes
     voiceTrackEditorPreviewDuration: 5, // 5 seconds default
-    // FIX: Add default streamingConfig to PlayoutPolicy
     streamingConfig: {
         isEnabled: false,
-        serverUrl: 'http://localhost',
+        serverUrl: 'localhost',
         port: 8000,
-        mountPoint: '/live',
+        mountPoint: 'live',
         username: 'source',
         password: 'yourpassword',
         bitrate: 128,
@@ -400,7 +399,6 @@ const AppInternal: React.FC = () => {
     const pflAudioUrlRef = useRef<string | null>(null);
     
     const remoteStudioRef = useRef<any>(null);
-    const isCrossfadingRef = useRef(false);
     const nowPlayingFileHandleRef = useRef<FileSystemFileHandle | null>(null);
     const autoBackupFolderHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
     const audioBufferRef = useRef<Map<string, Blob>>(new Map());
@@ -410,9 +408,7 @@ const AppInternal: React.FC = () => {
     const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
     const [audioLevels, setAudioLevels] = useState<Partial<Record<AudioSourceId | AudioBusId, number>>>({});
     const [isAudioEngineInitializing, setIsAudioEngineInitializing] = useState(false);
-    const [mainBusStream, setMainBusStream] = useState<MediaStream | null>(null);
 
-    const mainBusAudioRef = useRef<HTMLAudioElement>(null);
     const monitorBusAudioRef = useRef<HTMLAudioElement>(null);
 
     // Refs to provide stable functions to useEffects
@@ -459,6 +455,11 @@ const AppInternal: React.FC = () => {
     // --- NEW: Chat State ---
     const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
     const [hasUnreadChat, setHasUnreadChat] = useState(false);
+    
+    // --- NEW: Server Stream Status State ---
+    const [serverStreamStatus, setServerStreamStatus] = useState<string>('inactive');
+    const [serverStreamError, setServerStreamError] = useState<string | null>(null);
+
 
     type AdvancedAudioGraph = {
         context: AudioContext | null;
@@ -907,23 +908,8 @@ const AppInternal: React.FC = () => {
                 analysers[bus.id]!.fftSize = 256;
 
                 if (bus.id === 'main') {
-                    const compressor = context.createDynamicsCompressor();
-                    const eqBass = context.createBiquadFilter();
-                    const eqMid = context.createBiquadFilter();
-                    const eqTreble = context.createBiquadFilter();
-
-                    eqBass.type = 'lowshelf'; eqBass.frequency.value = 120;
-                    eqMid.type = 'peaking'; eqMid.frequency.value = 1000; eqMid.Q.value = 1;
-                    eqTreble.type = 'highshelf'; eqTreble.frequency.value = 8000;
-                    
-                    analysers[bus.id]!.connect(compressor);
-                    compressor.connect(eqBass);
-                    eqBass.connect(eqMid);
-                    eqMid.connect(eqTreble);
-                    eqTreble.connect(busGains[bus.id]!);
-
-                    audioGraphRef.current.mainBusCompressor = compressor;
-                    audioGraphRef.current.mainBusEq = { bass: eqBass, mid: eqMid, treble: eqTreble };
+                    // Main bus is now virtual, it has no destination.
+                    // We can keep the processing nodes for consistency if needed, but they won't be audible.
                 } else {
                     analysers[bus.id]!.connect(busGains[bus.id]!);
                 }
@@ -952,11 +938,9 @@ const AppInternal: React.FC = () => {
             audioGraphRef.current = {
                 ...audioGraphRef.current, sourceGains, routingGains, duckingGains, busGains, busDestinations, analysers, isInitialized: true,
             };
-
-            if(mainBusAudioRef.current && busDestinations.main) mainBusAudioRef.current.srcObject = busDestinations.main.stream;
+            
             if(monitorBusAudioRef.current && busDestinations.monitor) monitorBusAudioRef.current.srcObject = busDestinations.monitor.stream;
 
-            setMainBusStream(busDestinations.main?.stream ?? null);
 
             if (context.state === 'suspended') await context.resume();
 
@@ -965,15 +949,11 @@ const AppInternal: React.FC = () => {
     }, [audioBuses]);
 
     const handleTogglePlay = useCallback(async () => {
-        if (playlistRef.current.length === 0) return;
-        if (playoutPolicy.playoutMode === 'presenter') return;
-        if (!isPlayingRef.current) stopPfl();
+        if (playlistRef.current.length === 0 || playoutPolicy.playoutMode === 'presenter') return;
         sendStudioCommand('togglePlay');
-    }, [stopPfl, playoutPolicy.playoutMode, sendStudioCommand]);
+    }, [playoutPolicy.playoutMode, sendStudioCommand]);
     
     const handlePlayTrack = useCallback(async (itemId: string) => {
-        const targetIndex = playlistRef.current.findIndex(item => item.id === itemId);
-        if (targetIndex === -1) return;
         if (playoutPolicy.playoutMode === 'presenter') return;
         stopPfl();
         sendStudioCommand('playTrack', { itemId });
@@ -1117,20 +1097,6 @@ const AppInternal: React.FC = () => {
         return timelineMap;
     }, [playlist, currentPlayingItemId, trackProgress, isPlaying, currentTrackIndex]);
     timelineRef.current = timeline;
-
-    const triggerHardMarkerFadeAndJump = useCallback(async (nextIndex: number) => {
-        if (isCrossfadingRef.current) return;
-        isCrossfadingRef.current = true;
-    
-        const graph = audioGraphRef.current;
-        if (!graph.context) {
-            isCrossfadingRef.current = false;
-            return;
-        }
-            
-        sendStudioCommand('jumpToTrack', { index: nextIndex });
-    
-    }, [sendStudioCommand]);
 
     useEffect(() => {
         const graph = audioGraphRef.current;
@@ -1276,13 +1242,15 @@ const AppInternal: React.FC = () => {
     }, [mixerConfig, audioBuses]);
     
     useEffect(() => {
-        const busPlayers = { main: mainBusAudioRef.current, monitor: monitorBusAudioRef.current };
+        const busPlayers = { monitor: monitorBusAudioRef.current };
         audioBuses.forEach(bus => {
-            const player = busPlayers[bus.id];
-            if (player && typeof (player as any).setSinkId === 'function') {
-                (player as any).setSinkId(bus.outputDeviceId).catch((e: Error) => {
-                    if (e.name !== "NotAllowedError") console.error(`Failed to set sinkId for ${bus.name}`, e);
-                });
+            if (bus.id === 'monitor') {
+                const player = busPlayers[bus.id];
+                if (player && typeof (player as any).setSinkId === 'function') {
+                    (player as any).setSinkId(bus.outputDeviceId).catch((e: Error) => {
+                        if (e.name !== "NotAllowedError") console.error(`Failed to set sinkId for ${bus.name}`, e);
+                    });
+                }
             }
         });
     }, [audioBuses]);
@@ -1836,6 +1804,9 @@ const AppInternal: React.FC = () => {
                 if (JSON.stringify(data.payload) !== JSON.stringify(mediaLibraryRef.current)) {
                     setMediaLibrary(data.payload);
                 }
+            } else if (data.type === 'stream-status-update') {
+                setServerStreamStatus(data.payload.status);
+                setServerStreamError(data.payload.error || null);
             } else if (data.type === 'webrtc-signal') {
                 setRtcSignal(data);
             } else if (data.type === 'chatMessage') {
@@ -1933,136 +1904,7 @@ const AppInternal: React.FC = () => {
         }
     }, [logoSrc, isStudio, wsStatus]);
     
-    // --- Public Stream State (lifted from PublicStream.tsx) ---
-    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const lastSentMetadataRef = useRef<string | null>(null);
-
-    const availableFormats = useMemo(() => {
-        if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined' || !isSecureContext) return [];
-        const formats = [
-            { id: 'opus', name: 'Opus (High Quality)', mimeType: 'audio/webm; codecs=opus', bitrates: [64000, 96000, 128000, 192000, 256000] },
-            { id: 'aac', name: 'AAC (High Compatibility)', mimeType: 'audio/mp4; codecs=mp4a.40.2', bitrates: [64000, 96000, 128000, 192000, 256000] },
-            { id: 'mp3', name: 'MP3 (Universal)', mimeType: 'audio/mpeg', bitrates: [64000, 96000, 128000, 192000, 256000, 320000] },
-        ];
-        return formats.filter(f => MediaRecorder.isTypeSupported(f.mimeType));
-    }, [isSecureContext]);
-
-    const [isPublicStreamEnabled, setIsPublicStreamEnabled] = useState(false);
-    const [publicStreamStatus, setPublicStreamStatus] = useState<StreamStatus>('inactive');
-    const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
-    const [publicStreamCodec, setPublicStreamCodec] = useState(availableFormats[0]?.id || '');
-    const [publicStreamBitrate, setPublicStreamBitrate] = useState(128000);
     
-    // --- Public Stream Logic ---
-
-    const stopPublicStream = useCallback(() => {
-        setPublicStreamStatus('stopping');
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-            mediaRecorderRef.current.stop();
-        }
-        mediaRecorderRef.current = null;
-        setPublicStreamStatus('inactive');
-    }, []);
-
-    const startPublicStream = useCallback(async () => {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !mainBusStream) {
-            setPublicStreamError("Connection or audio stream not available.");
-            setPublicStreamStatus('error');
-            return;
-        }
-
-        setPublicStreamStatus('starting');
-        setPublicStreamError(null);
-
-        try {
-            const selectedFormat = availableFormats.find(f => f.id === publicStreamCodec);
-            if (!selectedFormat) {
-                throw new Error("Selected codec is not supported by your browser.");
-            }
-            const mimeType = selectedFormat.mimeType;
-            
-            wsRef.current.send(JSON.stringify({ type: 'streamConfigUpdate', payload: { mimeType } }));
-
-            const recorder = new MediaRecorder(mainBusStream, { mimeType, audioBitsPerSecond: publicStreamBitrate });
-            mediaRecorderRef.current = recorder;
-
-            recorder.ondataavailable = async (event) => {
-                if (event.data.size > 0 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                    const MSG_TYPE_PUBLIC_STREAM_CHUNK = 1;
-                    const arrayBuffer = await event.data.arrayBuffer();
-                    const messageBuffer = new ArrayBuffer(arrayBuffer.byteLength + 1);
-                    const view = new Uint8Array(messageBuffer);
-                    view[0] = MSG_TYPE_PUBLIC_STREAM_CHUNK;
-                    view.set(new Uint8Array(arrayBuffer), 1);
-                    wsRef.current.send(messageBuffer);
-                }
-            };
-            
-            recorder.onstop = () => {
-                 console.log("MediaRecorder stopped.");
-                 setPublicStreamStatus('inactive');
-            };
-
-            recorder.onerror = (event) => {
-                console.error("MediaRecorder error:", event);
-                setPublicStreamError("An error occurred during media recording.");
-                setPublicStreamStatus('error');
-                stopPublicStream();
-            };
-
-            recorder.start(1000); 
-            setPublicStreamStatus('broadcasting');
-
-        } catch (err) {
-            console.error("Failed to start public stream:", err);
-            setPublicStreamError(err instanceof Error ? err.message : "An unknown error occurred.");
-            setPublicStreamStatus('error');
-            stopPublicStream();
-        }
-    }, [wsRef, mainBusStream, availableFormats, publicStreamCodec, publicStreamBitrate, stopPublicStream]);
-    
-    const handleTogglePublicStream = (enabled: boolean) => {
-        setIsPublicStreamEnabled(enabled);
-        if (enabled) {
-            startPublicStream();
-        } else {
-            stopPublicStream();
-        }
-    };
-
-    const handlePublicStreamConfigChange = ({ codec, bitrate }: { codec: string, bitrate: number }) => {
-        setPublicStreamCodec(codec);
-        setPublicStreamBitrate(bitrate);
-    };
-
-    // Effect for metadata updates
-    useEffect(() => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && publicStreamStatus === 'broadcasting') {
-            const nextTrackTitle = (isPlayingRef.current && nextTrack)
-                ? `${nextTrack.artist || ''} - ${nextTrack.title || ''}`.replace(/^ - /, '').trim()
-                : null;
-    
-            const metadataHeader = playoutPolicyRef.current.streamingConfig.metadataHeader;
-            const trackTitle = isPlayingRef.current ? (displayTrack?.title || '...') : 'Silence';
-            const finalTitle = metadataHeader && metadataHeader.trim() !== ''
-                ? `${metadataHeader.trim()}: ${trackTitle}`
-                : trackTitle;
-
-            const metadataPayload = {
-                title: finalTitle,
-                artist: isPlayingRef.current ? (displayTrack?.artist || 'RadioHost.cloud') : 'RadioHost.cloud',
-                artworkUrl: isPlayingRef.current ? loadedArtworkUrl : null,
-                nextTrackTitle: nextTrackTitle
-            };
-            const metadataString = JSON.stringify(metadataPayload);
-
-            if (metadataString !== lastSentMetadataRef.current) {
-                wsRef.current.send(JSON.stringify({ type: 'metadataUpdate', payload: metadataPayload }));
-                lastSentMetadataRef.current = metadataString;
-            }
-        }
-    }, [displayTrack, isPlaying, loadedArtworkUrl, publicStreamStatus, nextTrack]);
-
     const handleSendChatMessage = useCallback((text: string, from?: string) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
             const message: ChatMessage = {
@@ -2075,15 +1917,6 @@ const AppInternal: React.FC = () => {
                 payload: message
             }));
             setChatMessages(prev => [...prev.slice(-100), message]);
-        }
-    }, []);
-
-    // Cleanup effect
-    useEffect(() => {
-        return () => {
-            if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-                mediaRecorderRef.current.stop();
-            }
         }
     }, []);
 
@@ -2204,7 +2037,6 @@ const AppInternal: React.FC = () => {
                         nextNextTrack={nextNextTrack}
                         onPlayTrack={handlePlayTrack}
                         onEject={handleRemoveFromPlaylist}
-                        mainPlayerAnalyser={audioGraphRef.current.analysers?.mainPlayer || null}
                         playoutMode={playoutPolicy.playoutMode}
                         wsStatus={wsStatus}
                     />
@@ -2288,21 +2120,14 @@ const AppInternal: React.FC = () => {
                                     {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} />}
                                     {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
                                     {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
-                                        isPublicStreamEnabled={isPublicStreamEnabled}
-                                        publicStreamStatus={publicStreamStatus}
-                                        publicStreamError={publicStreamError}
-                                        publicStreamCodec={publicStreamCodec}
-                                        publicStreamBitrate={publicStreamBitrate}
-                                        onTogglePublicStream={handleTogglePublicStream}
-                                        onConfigChange={handlePublicStreamConfigChange}
-                                        availableFormats={availableFormats}
+                                        policy={playoutPolicy}
+                                        onUpdatePolicy={setPlayoutPolicy}
+                                        serverStreamStatus={serverStreamStatus}
+                                        serverStreamError={serverStreamError}
                                         isAudioEngineReady={audioGraphRef.current.isInitialized} 
                                         isAudioEngineInitializing={isAudioEngineInitializing}
                                         isSecureContext={isSecureContext}
-                                        policy={playoutPolicy}
-                                        onUpdatePolicy={setPlayoutPolicy}
                                     />}
-                                    {/* FIX: Add missing props isAutoBackupOnStartupEnabled and onSetIsAutoBackupOnStartupEnabled to Settings component */}
                                     {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isNowPlayingExportEnabled={isNowPlayingExportEnabled} onSetIsNowPlayingExportEnabled={setIsNowPlayingExportEnabled} onSetNowPlayingFile={handleSetNowPlayingFile} nowPlayingFileName={nowPlayingFileName} metadataFormat={metadataFormat} onSetMetadataFormat={setMetadataFormat} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} onSetAutoBackupFolder={handleSetAutoBackupFolder} autoBackupFolderPath={autoBackupFolderPath} allFolders={allFolders} allTags={allTags} />}
                                 </div>
                             </div>
@@ -2381,7 +2206,6 @@ const AppInternal: React.FC = () => {
             />
             
             <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
-            <audio ref={mainBusAudioRef} autoPlay></audio>
             <audio ref={monitorBusAudioRef} autoPlay></audio>
         </div>
     );

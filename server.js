@@ -26,19 +26,6 @@ const wss = new WebSocketServer({ noServer: true });
 
 const PORT = process.env.PORT || 3000;
 
-// --- Icecast Configuration ---
-const icecastConfig = {
-    serverUrl: 'localhost',
-    port: 8000,
-    mountPoint: 'live',
-    username: 'source',
-    password: 'yourpassword',
-    bitrate: '128k',
-    codec: 'libmp3lame',
-    format: 'mp3',
-    contentType: 'audio/mpeg'
-};
-
 // --- Database Setup (using lowdb for simplicity) ---
 const file = path.join(__dirname, 'db.json');
 const adapter = new JSONFile(file);
@@ -195,7 +182,7 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
                     name: entry.name,
                     type: 'folder',
                     children: await scanMediaToTree(entry.name, entryRelativePath),
-                    tags: folderMetadata.tags || [],
+                    ...folderMetadata
                 });
             } else if (/\.(mp3|wav|ogg|flac|aac|m4a|webm)$/i.test(entry.name)) {
                 const trackObject = await createTrackObject(entryFullPath, entryRelativePath, entry.name);
@@ -333,6 +320,19 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
 
 // --- Autonomous FFmpeg Playout Engine ---
 let currentFfmpegCommand = null;
+let serverStreamStatus = 'inactive'; // 'inactive', 'connecting', 'streaming', 'error'
+let serverStreamError = null;
+
+const broadcastStreamStatus = () => {
+    if (!studioClientEmail) return;
+    const studioWs = clients.get(studioClientEmail);
+    if (studioWs && studioWs.readyState === WebSocket.OPEN) {
+        studioWs.send(JSON.stringify({
+            type: 'stream-status-update',
+            payload: { status: serverStreamStatus, error: serverStreamError }
+        }));
+    }
+};
 
 const stopPlayout = () => {
     if (currentFfmpegCommand) {
@@ -405,23 +405,54 @@ const startPlayout = () => {
         advanceTrackAndPlay(true);
         return;
     }
-
-    const outputUrl = `icecast://${icecastConfig.username}:${icecastConfig.password}@${icecastConfig.serverUrl}:${icecastConfig.port}/${icecastConfig.mountPoint}`;
+    
+    const studioData = db.data.userdata[studioClientEmail];
+    const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
 
     const command = ffmpeg(trackPath)
-        .inputOptions('-re') // Read input at native frame rate
-        .audioCodec(icecastConfig.codec)
-        .audioBitrate(icecastConfig.bitrate)
-        .format(icecastConfig.format)
-        .outputOptions('-content_type', icecastConfig.contentType)
+        .inputOptions('-re'); // Read input at native frame rate
+
+    if (streamConfig && streamConfig.isEnabled) {
+        const { username, password, serverUrl, port, mountPoint, bitrate, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
+        const outputUrl = `icecast://${username}:${password}@${serverUrl}:${port}/${mountPoint}`;
+        
+        serverStreamStatus = 'connecting';
+        broadcastStreamStatus();
+
+        command
+            .audioCodec('libmp3lame')
+            .audioBitrate(bitrate || 128)
+            .format('mp3')
+            .outputOptions([
+                '-content_type', 'audio/mpeg',
+                '-ice_name', stationName || 'RadioHost.cloud',
+                '-ice_genre', stationGenre || 'Various',
+                '-ice_url', stationUrl || 'https://radiohost.cloud',
+                '-ice_description', stationDescription || 'Powered by RadioHost.cloud',
+            ])
+            .save(outputUrl);
+    } else {
+        // Not streaming, output to null sink to keep timing
+        command.output('-f', 'null', '-');
+        serverStreamStatus = 'inactive';
+        broadcastStreamStatus();
+    }
+        
+    command
         .on('start', (commandLine) => {
             console.log('[FFMPEG] Spawned: ' + commandLine);
             sharedPlayerState.isPlaying = true;
             sharedPlayerState.trackProgress = 0;
+            if (streamConfig && streamConfig.isEnabled) {
+                serverStreamStatus = 'broadcasting';
+                serverStreamError = null;
+                broadcastStreamStatus();
+            }
             db.write();
             broadcastState();
         })
         .on('progress', (progress) => {
+            if (!progress.timemark) return;
             const parts = progress.timemark.split(':');
             const seconds = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
             const flooredSeconds = Math.floor(seconds);
@@ -433,7 +464,6 @@ const startPlayout = () => {
         .on('end', () => {
             console.log(`[FFMPEG] Track finished: ${track.title}`);
             currentFfmpegCommand = null;
-            // Only advance if auto mode is on
             const studioData = db.data.userdata[studioClientEmail];
             if (studioData?.settings?.isAutoModeEnabled) {
                 advanceTrackAndPlay(false);
@@ -444,19 +474,22 @@ const startPlayout = () => {
             }
         })
         .on('error', (err, stdout, stderr) => {
-            // 'end' is sometimes not called on kill, so we check the error message
             if (!err.message.includes('SIGTERM')) {
                  console.error(`[FFMPEG] Error playing ${track.title}:`, err.message);
+                 if (streamConfig && streamConfig.isEnabled) {
+                    serverStreamStatus = 'error';
+                    serverStreamError = err.message;
+                    broadcastStreamStatus();
+                 }
             }
-            if (currentFfmpegCommand) { // Check if it was killed by us
+            if (currentFfmpegCommand) { 
                 currentFfmpegCommand = null;
-                const studioData = db.data.userdata[studioClientEmail];
+                 const studioData = db.data.userdata[studioClientEmail];
                 if (studioData?.settings?.isAutoModeEnabled) {
                      advanceTrackAndPlay(false);
                 }
             }
-        })
-        .save(outputUrl);
+        });
         
     currentFfmpegCommand = command;
 };
@@ -536,6 +569,7 @@ wss.on('connection', async (ws, req) => {
 
     if (user.role === 'studio') {
         studioClientEmail = email;
+        broadcastStreamStatus();
     } else if (user.role === 'presenter') {
         presenterEmails.add(email);
     }
@@ -595,56 +629,19 @@ wss.on('connection', async (ws, req) => {
                             case 'updateFolderTags': {
                                 const { folderId, newTags } = payload;
                                 if (!folderId || !newTags) break;
-
-                                const findFolderInTree = (node, id) => {
-                                    if (node.id === id) return node;
-                                    if (node.type === 'folder') {
-                                        for (const child of node.children) {
-                                            const found = findFolderInTree(child, id);
-                                            if (found) return found;
-                                        }
-                                    }
-                                    return null;
-                                };
-                                
-                                const targetFolderNode = findFolderInTree(libraryState, folderId);
-
-                                if (targetFolderNode) {
-                                    const updateQueue = [];
-                                    const traverse = (item) => {
-                                        updateQueue.push(item);
-                                        if (item.type === 'folder') {
-                                            item.children.forEach(traverse);
-                                        }
-                                    };
-                                    traverse(targetFolderNode);
-
-                                    for (const item of updateQueue) {
-                                        if (item.type === 'folder') {
-                                            if (!db.data.folderMetadata) db.data.folderMetadata = {};
-                                            db.data.folderMetadata[item.id] = {
-                                                ...(db.data.folderMetadata[item.id] || {}),
-                                                tags: newTags,
-                                            };
-                                        } else { // track
-                                            const fullPath = path.join(mediaDir, item.id);
-                                            if (fs.existsSync(fullPath)) {
-                                                NodeID3.update({
-                                                    userDefinedText: [{
-                                                        description: "RH_TAGS",
-                                                        value: newTags.join(', ')
-                                                    }]
-                                                }, fullPath);
-                                            }
-                                        }
-                                    }
-
-                                    await db.write();
-                                    console.log(`[Tags] Recursively updated tags for folder ${folderId} and its contents.`);
-                                    refreshAndBroadcastLibrary();
-                                } else {
-                                    console.warn(`[Tags] Could not find folder with ID ${folderId} to update tags.`);
-                                }
+                                if (!db.data.folderMetadata) db.data.folderMetadata = {};
+                                db.data.folderMetadata[folderId] = { ...(db.data.folderMetadata[folderId] || {}), tags: newTags };
+                                await db.write();
+                                refreshAndBroadcastLibrary();
+                                break;
+                            }
+                            case 'updateFolderMetadata': {
+                                const { folderId, settings } = payload;
+                                if (!folderId || !settings) break;
+                                if (!db.data.folderMetadata) db.data.folderMetadata = {};
+                                db.data.folderMetadata[folderId] = { ...(db.data.folderMetadata[folderId] || {}), suppressMetadata: settings };
+                                await db.write();
+                                refreshAndBroadcastLibrary();
                                 break;
                             }
                             case 'updateTrackTags': {
@@ -658,6 +655,20 @@ wss.on('connection', async (ws, req) => {
                                 }, fullPath);
                                 if (success) {
                                     console.log(`[Tags] Updated tags for ${trackId}`);
+                                    refreshAndBroadcastLibrary();
+                                }
+                                break;
+                            }
+                             case 'updateTrackMetadata': {
+                                const { trackId, newMetadata } = payload;
+                                const fullPath = path.join(mediaDir, trackId);
+                                const success = NodeID3.update({
+                                    title: newMetadata.title,
+                                    artist: newMetadata.artist,
+                                }, fullPath);
+                                // Note: TrackType is not an ID3 tag, so we can't save it directly. This would require a DB mapping.
+                                if (success) {
+                                    console.log(`[Metadata] Updated metadata for ${trackId}`);
                                     refreshAndBroadcastLibrary();
                                 }
                                 break;
@@ -861,6 +872,31 @@ wss.on('connection', async (ws, req) => {
                                 sharedPlayerState.trackProgress = 0;
                                 sharedPlayerState.stopAfterTrackId = null;
                                 stateChanged = true;
+                                break;
+                            }
+                             case 'saveBroadcast': {
+                                const { broadcast } = payload;
+                                if (!broadcast) break;
+                                const studioData = db.data.userdata[studioClientEmail];
+                                if (studioData) {
+                                    if (!studioData.broadcasts) studioData.broadcasts = [];
+                                    const index = studioData.broadcasts.findIndex(b => b.id === broadcast.id);
+                                    if (index > -1) {
+                                        studioData.broadcasts[index] = broadcast;
+                                    } else {
+                                        studioData.broadcasts.push(broadcast);
+                                    }
+                                    stateChanged = true;
+                                }
+                                break;
+                            }
+                            case 'deleteBroadcast': {
+                                const { broadcastId } = payload;
+                                const studioData = db.data.userdata[studioClientEmail];
+                                if (studioData && studioData.broadcasts) {
+                                    studioData.broadcasts = studioData.broadcasts.filter(b => b.id !== broadcastId);
+                                    stateChanged = true;
+                                }
                                 break;
                             }
                         }
@@ -1408,8 +1444,19 @@ app.get('/api/userdata/:email', (req, res) => {
 
 app.post('/api/userdata/:email', async (req, res) => {
     const { email } = req.params;
+    const oldConfig = db.data.userdata[email]?.settings?.playoutPolicy?.streamingConfig;
+    
     db.data.userdata[email] = req.body;
     await db.write();
+
+    const newConfig = req.body?.settings?.playoutPolicy?.streamingConfig;
+    if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
+        console.log('[Config] Streaming config changed. Restarting playout if active.');
+        if (db.data.sharedPlayerState.isPlaying) {
+            startPlayout();
+        }
+    }
+
     res.json({ success: true });
 });
 
