@@ -64,7 +64,38 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use('/media', express.static(MEDIA_DIR));
 app.use('/artwork', express.static(ARTWORK_DIR));
-const upload = multer({ dest: 'uploads/' });
+
+// --- Multer Setup for File Uploads ---
+const storage = multer.diskStorage({
+    destination: async function (req, file, cb) {
+        const { destinationFolderId } = req.body;
+        let relativePath = '';
+        if (destinationFolderId && destinationFolderId !== 'root') {
+            // Sanitize by removing the 'folder-' prefix and ensuring no traversal
+            relativePath = destinationFolderId.replace(/^folder-/, '');
+        }
+
+        const finalPath = path.resolve(path.join(MEDIA_DIR, relativePath));
+
+        // Security check to prevent directory traversal
+        if (!finalPath.startsWith(path.resolve(MEDIA_DIR))) {
+            return cb(new Error('Invalid path specified for upload.'), '');
+        }
+        
+        try {
+            await fs.mkdir(finalPath, { recursive: true });
+            cb(null, finalPath);
+        } catch (error) {
+            cb(error, '');
+        }
+    },
+    filename: function (req, file, cb) {
+        // Use original filename, multer sanitizes it to some extent
+        cb(null, file.originalname);
+    }
+});
+const upload = multer({ storage: storage });
+
 
 // --- Media Library Scanner ---
 let isScanning = false;
@@ -202,6 +233,13 @@ app.put('/api/users/:email/role', async (req, res) => {
     await db.write();
     const { password, ...userWithoutPassword } = user;
     res.json(userWithoutPassword);
+});
+
+// New endpoint for handling file uploads
+app.post('/api/upload', upload.array('files'), (req, res) => {
+    // By the time we get here, multer has already saved the files.
+    // The filesystem watcher will automatically trigger a library rescan.
+    res.status(200).json({ message: 'Files uploaded successfully. Library will refresh shortly.' });
 });
 
 

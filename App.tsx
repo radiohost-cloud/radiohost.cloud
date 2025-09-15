@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -1079,6 +1080,7 @@ const AppInternal: React.FC = () => {
                     analysers[bus.id]!.connect(compressor);
                     compressor.connect(eqBass);
                     eqBass.connect(eqMid);
+                    // FIX: `treble` was not defined. The correct variable name is `eqTreble`.
                     eqMid.connect(eqTreble);
                     eqTreble.connect(busGains[bus.id]!);
 
@@ -1876,7 +1878,26 @@ const AppInternal: React.FC = () => {
     
     const handleUploadFiles = useCallback(async (files: FileList, destinationFolderId: string) => {
         if (isHostMode) {
-            alert('File uploads via the browser are not supported in HOST mode. Please add files directly to the server\'s Media folder, and the library will update automatically.');
+            const formData = new FormData();
+            formData.append('destinationFolderId', destinationFolderId);
+            Array.from(files).forEach(file => {
+                formData.append('files', file, file.name);
+            });
+
+            try {
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData,
+                });
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.message || 'Upload failed');
+                }
+                console.log('Files uploaded successfully. Library will refresh.');
+            } catch (error) {
+                console.error("Upload error:", error);
+                alert(`Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            }
             return;
         }
         
