@@ -45,6 +45,14 @@ const defaultData = {
 const db = new Low(adapter, defaultData);
 await db.read();
 
+// FIX: Ensure db.data is initialized with default structure if file is empty or partial
+db.data ||= { ...defaultData };
+for (const key of Object.keys(defaultData)) {
+    if (db.data[key] === undefined) {
+        db.data[key] = defaultData[key];
+    }
+}
+
 
 // --- Media File Storage Setup ---
 const mediaDir = path.join(__dirname, 'Media');
