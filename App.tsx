@@ -2513,8 +2513,12 @@ const AppInternal: React.FC = () => {
 
     // --- NEW: WebSocket Logic for HOST mode ---
     useEffect(() => {
-        if (!isHostMode || !currentUser) {
+        if (!isHostMode || !currentUser || !currentUser.email) {
             setWsStatus('disconnected');
+            if (wsRef.current) {
+                wsRef.current.close();
+                wsRef.current = null;
+            }
             return;
         }
 
