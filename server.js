@@ -322,6 +322,7 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
 let currentFfmpegCommand = null;
 let serverStreamStatus = 'inactive'; // 'inactive', 'connecting', 'streaming', 'error'
 let serverStreamError = null;
+let playoutHistory = []; // { trackId, playedAt }
 
 const broadcastStreamStatus = () => {
     if (!studioClientEmail) return;
@@ -398,6 +399,10 @@ const startPlayout = () => {
         advanceTrackAndPlay(true);
         return;
     }
+    
+    // Add to playout history
+    const trackIdForHistory = track.originalId || track.id;
+    playoutHistory.push({ trackId: trackIdForHistory, artist: track.artist, title: track.title, playedAt: Date.now() });
 
     const trackPath = path.join(mediaDir, track.id);
     if (!fs.existsSync(trackPath)) {
