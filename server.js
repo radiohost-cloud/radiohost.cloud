@@ -171,7 +171,7 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
                     children: await scanMediaToTree(entry.name, entryRelativePath),
                     tags: folderMetadata.tags || [],
                 });
-            } else if (/\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(entry.name)) {
+            } else if (/\.(mp3|wav|ogg|flac|aac|m4a|webm)$/i.test(entry.name)) {
                 const trackObject = await createTrackObject(entryFullPath, entryRelativePath, entry.name);
                 children.push(trackObject);
             }
@@ -891,15 +891,13 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'voiceTrackAdd':
-                    if (studioClientEmail) {
+                    if (studioClientEmail && clients.has(studioClientEmail)) {
+                        const { voiceTrack, beforeItemId } = data.payload;
+                        console.log(`[WebSocket] Forwarding VT from ${email} to studio.`);
                         const studioWs = clients.get(studioClientEmail);
                         if (studioWs && studioWs.readyState === ws.OPEN) {
-                           console.log(`[WebSocket] Forwarding VT from ${email} to studio.`);
-                            studioWs.send(JSON.stringify({
-                                type: 'voiceTrackAdd',
-                                payload: data.payload,
-                                sender: email,
-                            }));
+                            // The studio command handler will add this to the playlist
+                            studioWs.send(JSON.stringify({ type: 'voiceTrackAdd', payload: { voiceTrack, beforeItemId }, sender: email }));
                         }
                     } else {
                         console.log(`[WebSocket] Received VT from ${email}, but no studio is connected.`);

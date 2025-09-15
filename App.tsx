@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -163,6 +164,21 @@ const getProminentColorsAndTextColor = (img: HTMLImageElement): { colors: string
 
 // --- Recursive Helper Functions ---
 // Note: Find/Get operations are universal. Modification logic is now conditional (client-side for DEMO, server-side for HOST).
+// FIX: Added a helper function to find a folder within the library tree by its ID.
+// The original code was incorrectly using findTrackInTree, which only returns tracks, not folders.
+const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
+    if (node.id === folderId) {
+        return node;
+    }
+    for (const child of node.children) {
+        if (child.type === 'folder') {
+            const found = findFolderInTree(child, folderId);
+            if (found) return found;
+        }
+    }
+    return null;
+};
+
 const findTrackInTree = (node: Folder, trackId: string): Track | null => {
     for (const child of node.children) {
         if (child.type !== 'folder' && child.id === trackId) {
@@ -1801,28 +1817,90 @@ const AppInternal: React.FC = () => {
         }
     }, [sendStudioCommand, playoutPolicy.playoutMode, isHostMode]);
 
-    const handleInsertVoiceTrack = useCallback(async (voiceTrack: Track, blob: Blob, vtMix: VtMixDetails, beforeItemId: string | null) => {
-        if (isHostMode) {
-            if (playoutPolicyRef.current.playoutMode === 'presenter') {
-                if (wsRef.current?.readyState === WebSocket.OPEN) {
-                    const reader = new FileReader();
-                    reader.readAsDataURL(blob);
-                    reader.onloadend = () => {
-                        const payload = { voiceTrack, vtMix, beforeItemId, audioDataUrl: reader.result as string };
-                        wsRef.current?.send(JSON.stringify({ type: 'voiceTrackAdd', payload }));
-                        console.log('[Presenter] Sent new VT to studio.');
-                    };
+    const findOrCreateFolderByPath = useCallback(async (pathParts: string[]) => {
+        let currentFolderId = 'root';
+        let currentLibrary = mediaLibraryRef.current;
+    
+        for (const part of pathParts) {
+            // FIX: Replaced `findTrackInTree` with `findFolderInTree` to correctly locate the parent folder.
+            // This resolves a type error and a runtime crash caused by attempting to cast a Track to a Folder.
+            const parent = findFolderInTree(currentLibrary, currentFolderId);
+            if (!parent) {
+                console.error(`[VT] Could not find parent folder with id: ${currentFolderId}`);
+                return { finalFolderId: currentFolderId, updatedRoot: currentLibrary };
+            }
+
+            let childFolder = parent.children.find(c => c.type === 'folder' && c.name === part) as Folder | undefined;
+    
+            if (!childFolder) {
+                console.log(`[VT] Folder '${part}' not found, creating...`);
+                if (isHostMode) {
+                    await sendStudioCommand('createFolder', { parentId: currentFolderId, folderName: part });
+                    // On host, we can't get the new ID immediately. We'll have to rely on the path.
+                    // This is a simplification; a robust solution would await a response.
+                    currentFolderId = `${currentFolderId === 'root' ? '' : currentFolderId + '/'}${part}`;
                 } else {
-                    console.error("WebSocket not connected. Cannot send VT to studio.");
+                    const newFolder: Folder = { id: `folder-${Date.now()}-${Math.random().toString(16).slice(2)}`, name: part, type: 'folder', children: [] };
+                    const updatedLibrary = addItemToTree(currentLibrary, currentFolderId, newFolder);
+                    setMediaLibrary(updatedLibrary);
+                    currentLibrary = updatedLibrary;
+                    currentFolderId = newFolder.id;
                 }
             } else {
-                sendStudioCommand('insertVoiceTrack', { voiceTrack, vtMix, beforeItemId, blob });
+                currentFolderId = childFolder.id;
             }
-        } else {
-            const trackWithBlob = { ...voiceTrack, src: URL.createObjectURL(blob) };
-            handleInsertTrackInPlaylist(trackWithBlob, beforeItemId);
         }
-    }, [sendStudioCommand, isHostMode, handleInsertTrackInPlaylist]);
+        return { finalFolderId: currentFolderId, updatedRoot: currentLibrary };
+    }, [isHostMode, sendStudioCommand]);
+
+    const handleInsertVoiceTrack = useCallback(async (voiceTrack: Track, blob: Blob, vtMix: VtMixDetails, beforeItemId: string | null) => {
+        const userNickname = currentUserRef.current?.nickname || 'User';
+        const vtFolderName = playoutPolicy.playoutMode === 'studio' ? 'Studio' : userNickname;
+        const folderPathParts = ['Voicetracks', vtFolderName];
+    
+        if (isHostMode) {
+            const relativePath = `${folderPathParts.join('/')}/${voiceTrack.title}.webm`;
+            try {
+                const savedTrack = await dataService.addTrack(voiceTrack, blob, undefined, relativePath);
+                const trackWithMix = { ...savedTrack, vtMix };
+    
+                if (playoutPolicy.playoutMode === 'presenter') {
+                    if (wsRef.current?.readyState === WebSocket.OPEN) {
+                        const payload = { voiceTrack: trackWithMix, beforeItemId };
+                        wsRef.current?.send(JSON.stringify({ type: 'voiceTrackAdd', payload }));
+                        console.log('[Presenter] Sent new VT to studio.');
+                    } else {
+                        console.error("WebSocket not connected. Cannot send VT to studio.");
+                    }
+                } else { // Studio in HOST mode
+                    sendStudioCommand('insertTrack', { track: trackWithMix, beforeItemId });
+                }
+            } catch(error) {
+                console.error("Failed to upload VT:", error);
+                alert("Failed to upload Voice Track to the server.");
+            }
+        } else { // DEMO mode
+            const { updatedRoot, finalFolderId } = await findOrCreateFolderByPath(folderPathParts);
+            const savedTrack = await dataService.addTrack(voiceTrack, blob);
+            
+            let finalLibrary = addItemToTree(updatedRoot, finalFolderId, savedTrack);
+            setMediaLibrary(finalLibrary);
+
+            const newPlaylistItem: Track = {
+                ...savedTrack,
+                vtMix,
+                id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+                originalId: savedTrack.id,
+            };
+    
+            setPlaylist(prev => {
+                const newPlaylist = [...prev];
+                const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, newPlaylistItem);
+                return newPlaylist;
+            });
+        }
+    }, [isHostMode, playoutPolicy.playoutMode, sendStudioCommand, findOrCreateFolderByPath]);
 
     const handleRemoveFromPlaylist = useCallback((itemIdToRemove: string) => {
         const itemToRemove = playlistRef.current.find(item => item.id === itemIdToRemove);
@@ -2436,15 +2514,21 @@ const AppInternal: React.FC = () => {
     }, [isStudio, sendStudioCommand, isHostMode]);
 
     const handleVoiceTrackCreate = useCallback(async (voiceTrack: Track, blob: Blob): Promise<Track> => {
-        const savedTrack = await dataService.addTrack(voiceTrack, blob);
+        const userNickname = currentUserRef.current?.nickname || 'User';
+        const vtFolderName = playoutPolicy.playoutMode === 'studio' ? 'Studio' : userNickname;
+        const folderPathParts = ['Voicetracks', vtFolderName];
+    
         if (isHostMode) {
-            // In the new filesystem model, adding a VT is just a file upload.
-            // The watcher will handle the library update. We don't need a special command.
+            const relativePath = `${folderPathParts.join('/')}/${voiceTrack.title}.webm`;
+            return dataService.addTrack(voiceTrack, blob, undefined, relativePath);
         } else {
-            setMediaLibrary(prev => addItemToTree(prev, 'root', savedTrack));
+            const { updatedRoot, finalFolderId } = await findOrCreateFolderByPath(folderPathParts);
+            const savedTrack = await dataService.addTrack(voiceTrack, blob);
+            let finalLibrary = addItemToTree(updatedRoot, finalFolderId, savedTrack);
+            setMediaLibrary(finalLibrary);
+            return savedTrack;
         }
-        return savedTrack;
-    }, [isHostMode]);
+    }, [isHostMode, playoutPolicy.playoutMode, findOrCreateFolderByPath]);
 
     // --- NEW: WebSocket Logic for HOST mode ---
     useEffect(() => {
@@ -2506,14 +2590,9 @@ const AppInternal: React.FC = () => {
                     setHasUnreadChat(true);
                 }
             } else if (playoutPolicyRef.current.playoutMode === 'studio' && data.type === 'voiceTrackAdd') {
-                const { voiceTrack, vtMix, beforeItemId, audioDataUrl } = data.payload;
-                fetch(audioDataUrl)
-                    .then(res => res.blob())
-                    .then(blob => {
-                        console.log('[Studio] Received and adding new VT from presenter.');
-                        sendStudioCommand('insertVoiceTrack', { voiceTrack, vtMix, beforeItemId, blob });
-                    })
-                    .catch(err => console.error("Failed to process incoming VT blob:", err));
+                const { voiceTrack, beforeItemId } = data.payload;
+                console.log('[Studio] Received and adding new VT from presenter.');
+                sendStudioCommand('insertTrack', { track: voiceTrack, beforeItemId });
             } else if (data.type === 'presenter-on-air-request') {
                 if (playoutPolicyRef.current.playoutMode === 'studio') {
                     const { presenterEmail, onAir } = data.payload;
