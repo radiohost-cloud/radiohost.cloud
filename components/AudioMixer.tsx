@@ -6,6 +6,7 @@ import { HeadphoneIcon } from './icons/HeadphoneIcon';
 import SignalIndicator from './SignalIndicator';
 import { Toggle } from './Toggle';
 import { GridIcon } from './icons/GridIcon';
+import { UsersIcon } from './icons/UsersIcon';
 
 interface AudioMixerProps {
     mixerConfig: MixerConfig;
@@ -18,12 +19,24 @@ interface AudioMixerProps {
     audioLevels: Partial<Record<AudioSourceId | AudioBusId, number>>;
 }
 
-const SOURCE_META: Record<AudioSourceId, { name: string; icon: React.ReactNode }> = {
+const SOURCE_META: Partial<Record<AudioSourceId, { name: string; icon: React.ReactNode }>> = {
     mainPlayer: { name: "Player", icon: <MusicNoteIcon className="w-5 h-5" /> },
     mic: { name: "Microphone", icon: <MicrophoneIcon className="w-5 h-5" /> },
     pfl: { name: "PFL", icon: <HeadphoneIcon className="w-5 h-5" /> },
     cartwall: { name: "Cartwall", icon: <GridIcon className="w-5 h-5" /> },
 };
+
+const getSourceMeta = (sourceId: AudioSourceId) => {
+    if (SOURCE_META[sourceId]) {
+        return SOURCE_META[sourceId];
+    }
+    if (sourceId.startsWith('remote_')) {
+        const presenterName = sourceId.replace('remote_', '').split('@')[0];
+        return { name: `Remote: ${presenterName}`, icon: <UsersIcon className="w-5 h-5" /> };
+    }
+    return { name: 'Unknown Source', icon: <div className="w-5 h-5" /> };
+};
+
 
 const NORMALIZATION_PRESETS: Record<string, { name: string, target: number | null }> = {
   custom: { name: 'Custom', target: null },
@@ -129,43 +142,46 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
                 <div className="mt-2 space-y-4">
                     {Object.entries(mixerConfig)
                         .filter(([id]) => id !== 'pfl') // PFL is managed internally
-                        .map(([sourceId, config]) => (
-                        <div key={sourceId} className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                            <div className="flex items-center justify-between mb-2">
-                                <div className="flex items-center gap-2 text-sm font-medium text-black dark:text-white">
-                                    {SOURCE_META[sourceId as AudioSourceId].icon}
-                                    <span>{SOURCE_META[sourceId as AudioSourceId].name}</span>
-                                    <SignalIndicator level={audioLevels[sourceId as AudioSourceId] || 0} />
+                        .map(([sourceId, config]) => {
+                            const meta = getSourceMeta(sourceId as AudioSourceId);
+                            return (
+                                <div key={sourceId} className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2 text-sm font-medium text-black dark:text-white">
+                                            {meta.icon}
+                                            <span>{meta.name}</span>
+                                            <SignalIndicator level={audioLevels[sourceId as AudioSourceId] || 0} />
+                                        </div>
+                                        <div className="flex items-center gap-3">
+                                            <button
+                                                onClick={() => handleSourceMuteToggle(sourceId as AudioSourceId)}
+                                                className={`px-2 py-0.5 text-xs font-bold rounded-full ${config.muted ? 'bg-red-500 text-white' : 'bg-neutral-300 dark:bg-neutral-700'}`}
+                                            >
+                                                MUTE
+                                            </button>
+                                        </div>
+                                    </div>
+                                     <input
+                                        type="range" min="0" max="1.5" step="0.01" value={config.gain}
+                                        onChange={(e) => handleSourceGainChange(sourceId as AudioSourceId, parseFloat(e.target.value))}
+                                        className="w-full h-2 bg-neutral-300 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
+                                        disabled={config.muted}
+                                    />
+                                    <div className="mt-3 flex items-center justify-end gap-2">
+                                        <span className="text-xs text-neutral-500 dark:text-neutral-400">Sends:</span>
+                                        {audioBuses.map(bus => (
+                                            <button
+                                                key={bus.id}
+                                                onClick={() => handleSendToggle(sourceId as AudioSourceId, bus.id)}
+                                                className={`px-2.5 py-1 text-xs font-semibold rounded-md ${config.sends[bus.id]?.enabled ? 'bg-green-600 text-white' : 'bg-neutral-300 dark:bg-neutral-700 text-black dark:text-white'}`}
+                                            >
+                                                {bus.name.split(' ')[0]}
+                                            </button>
+                                        ))}
+                                    </div>
                                 </div>
-                                <div className="flex items-center gap-3">
-                                    <button
-                                        onClick={() => handleSourceMuteToggle(sourceId as AudioSourceId)}
-                                        className={`px-2 py-0.5 text-xs font-bold rounded-full ${config.muted ? 'bg-red-500 text-white' : 'bg-neutral-300 dark:bg-neutral-700'}`}
-                                    >
-                                        MUTE
-                                    </button>
-                                </div>
-                            </div>
-                             <input
-                                type="range" min="0" max="1.5" step="0.01" value={config.gain}
-                                onChange={(e) => handleSourceGainChange(sourceId as AudioSourceId, parseFloat(e.target.value))}
-                                className="w-full h-2 bg-neutral-300 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                                disabled={config.muted}
-                            />
-                            <div className="mt-3 flex items-center justify-end gap-2">
-                                <span className="text-xs text-neutral-500 dark:text-neutral-400">Sends:</span>
-                                {audioBuses.map(bus => (
-                                    <button
-                                        key={bus.id}
-                                        onClick={() => handleSendToggle(sourceId as AudioSourceId, bus.id)}
-                                        className={`px-2.5 py-1 text-xs font-semibold rounded-md ${config.sends[bus.id]?.enabled ? 'bg-green-600 text-white' : 'bg-neutral-300 dark:bg-neutral-700 text-black dark:text-white'}`}
-                                    >
-                                        {bus.name.split(' ')[0]}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-                    ))}
+                            );
+                        })}
                 </div>
             </div>
 
