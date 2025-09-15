@@ -47,6 +47,7 @@ await db.write();
 // --- Directory Setup ---
 const MEDIA_DIR = path.join(__dirname, 'Media');
 const ARTWORK_DIR = path.join(__dirname, 'Artwork');
+const DIST_DIR = path.join(__dirname, 'dist');
 
 const ensureDirExists = async (dir) => {
   try {
@@ -211,12 +212,6 @@ const listenerInfo = new Map();
 let streamMimeType = 'audio/webm; codecs=opus';
 let streamMetadata = { title: 'Silence', artist: 'RadioHost.cloud', artworkUrl: null, nextTrackTitle: null };
 
-app.get('/stream', (req, res) => {
-  res.sendFile(path.join(__dirname, 'stream.html'));
-});
-app.get('/stream-service-worker.js', (req, res) => {
-    res.sendFile(path.join(__dirname, 'stream-service-worker.js'));
-});
 app.get('/api/stream-metadata', (req, res) => {
     res.json(streamMetadata);
 });
@@ -456,6 +451,25 @@ wss.on('connection', async (ws, req) => {
         console.log(`[WebSocket] Client disconnected: ${email}`);
         clients.delete(email);
         broadcastMessage({ type: 'presenters-update', payload: { presenters: getOnlinePresenters() } });
+    });
+});
+
+// --- Serve Frontend ---
+// Serve static files from the 'dist' directory
+app.use(express.static(DIST_DIR));
+
+// Fallback for client-side routing: send index.html for any unknown GET request
+app.get('*', (req, res) => {
+    // Check if the file exists in the static directory first to avoid sending index.html for missing assets
+    const filePath = path.join(DIST_DIR, req.path);
+    fsc.access(filePath, fsc.constants.F_OK, (err) => {
+        if (err) {
+            // File does not exist, send index.html
+            res.sendFile(path.join(DIST_DIR, 'index.html'));
+        } else {
+            // File exists, let the static middleware handle it (or send 404 if it's a directory)
+            res.status(404).send('Not found');
+        }
     });
 });
 
