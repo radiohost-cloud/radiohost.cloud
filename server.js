@@ -404,7 +404,10 @@ const startPlayout = () => {
     const trackIdForHistory = track.originalId || track.id;
     playoutHistory.push({ trackId: trackIdForHistory, artist: track.artist, title: track.title, playedAt: Date.now() });
 
-    const trackPath = path.join(mediaDir, track.id);
+    // FIX: Use the originalId for playlist items to find the correct file.
+    const trackRelativePath = track.originalId || track.id;
+    const trackPath = path.join(mediaDir, trackRelativePath);
+
     if (!fs.existsSync(trackPath)) {
         console.error(`[FFMPEG] File not found: ${trackPath}. Skipping.`);
         advanceTrackAndPlay(true);
