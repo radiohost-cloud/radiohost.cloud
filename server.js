@@ -529,6 +529,61 @@ wss.on('connection', async (ws, req) => {
                         const { sharedPlaylist, sharedPlayerState } = db.data;
                 
                         switch (command) {
+                            case 'updateFolderTags': {
+                                const { folderId, newTags } = payload;
+                                if (!folderId || !newTags) break;
+
+                                const findFolderInTree = (node, id) => {
+                                    if (node.id === id) return node;
+                                    if (node.type === 'folder') {
+                                        for (const child of node.children) {
+                                            const found = findFolderInTree(child, id);
+                                            if (found) return found;
+                                        }
+                                    }
+                                    return null;
+                                };
+                                
+                                const targetFolderNode = findFolderInTree(libraryState, folderId);
+
+                                if (targetFolderNode) {
+                                    const updateQueue = [];
+                                    const traverse = (item) => {
+                                        updateQueue.push(item);
+                                        if (item.type === 'folder') {
+                                            item.children.forEach(traverse);
+                                        }
+                                    };
+                                    traverse(targetFolderNode);
+
+                                    for (const item of updateQueue) {
+                                        if (item.type === 'folder') {
+                                            if (!db.data.folderMetadata) db.data.folderMetadata = {};
+                                            db.data.folderMetadata[item.id] = {
+                                                ...(db.data.folderMetadata[item.id] || {}),
+                                                tags: newTags,
+                                            };
+                                        } else { // track
+                                            const fullPath = path.join(mediaDir, item.id);
+                                            if (fs.existsSync(fullPath)) {
+                                                NodeID3.update({
+                                                    userDefinedText: [{
+                                                        description: "RH_TAGS",
+                                                        value: newTags.join(', ')
+                                                    }]
+                                                }, fullPath);
+                                            }
+                                        }
+                                    }
+
+                                    await db.write();
+                                    console.log(`[Tags] Recursively updated tags for folder ${folderId} and its contents.`);
+                                    refreshAndBroadcastLibrary();
+                                } else {
+                                    console.warn(`[Tags] Could not find folder with ID ${folderId} to update tags.`);
+                                }
+                                break;
+                            }
                             case 'updateTrackTags': {
                                 const { trackId, tags } = payload;
                                 const fullPath = path.join(mediaDir, trackId);
@@ -542,15 +597,6 @@ wss.on('connection', async (ws, req) => {
                                     console.log(`[Tags] Updated tags for ${trackId}`);
                                     refreshAndBroadcastLibrary();
                                 }
-                                break;
-                            }
-                            case 'updateFolderTags': {
-                                const { folderId, newTags } = payload;
-                                if (!db.data.folderMetadata) db.data.folderMetadata = {};
-                                db.data.folderMetadata[folderId] = { ...(db.data.folderMetadata[folderId] || {}), tags: newTags };
-                                await db.write();
-                                console.log(`[Tags] Updated tags for folder ${folderId}`);
-                                refreshAndBroadcastLibrary();
                                 break;
                             }
                             case 'removeFromLibrary': {
@@ -1282,275 +1328,4 @@ app.get('/api/users', (req, res) => {
     const usersWithoutPasswords = db.data.users.map(({ password, ...user }) => user);
     res.json(usersWithoutPasswords);
 });
-app.get('/api/user/:email', (req, res) => {
-    const user = db.data.users.find(u => u.email === req.params.email);
-    if(user){
-        const { password, ...userToReturn } = user;
-        res.json(userToReturn);
-    } else {
-        res.status(404).json({ message: 'User not found' });
-    }
-});
-
-app.put('/api/user/:email/role', async (req, res) => {
-    const { email } = req.params;
-    const { role } = req.body;
-
-    if (!['studio', 'presenter'].includes(role)) {
-        return res.status(400).json({ message: 'Invalid role specified.' });
-    }
-
-    const user = db.data.users.find(u => u.email === email);
-
-    if (user) {
-        user.role = role;
-        await db.write();
-        const { password, ...updatedUser } = user;
-        res.json(updatedUser);
-    } else {
-        res.status(404).json({ message: 'User not found.' });
-    }
-});
-
-app.get('/api/userdata/:email', (req, res) => res.json(db.data.userdata[req.params.email] || null));
-app.post('/api/userdata/:email', async (req, res) => {
-    db.data.userdata[req.params.email] = req.body;
-    await db.write();
-    res.json({ success: true });
-});
-
-app.post('/api/folder', async (req, res) => {
-    const { path: folderPath } = req.body;
-    if (!folderPath) {
-        return res.status(400).json({ message: 'Folder path is required.' });
-    }
-    try {
-        const fullPath = path.join(mediaDir, folderPath);
-        await fsPromises.mkdir(fullPath, { recursive: true });
-        // The watcher will handle the library update
-        res.status(201).json({ success: true, message: `Folder created at ${folderPath}` });
-    } catch (error) {
-        console.error('Error creating folder:', error);
-        res.status(500).json({ message: 'Failed to create folder. Check server logs and permissions.' });
-    }
-});
-
-const upload = multer({ storage: multer.memoryStorage() });
-app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ message: 'No audio file uploaded.' });
-    }
-    
-    try {
-        const { webkitRelativePath = '', duration } = req.body;
-        const destinationDir = path.dirname(webkitRelativePath);
-        const finalDir = path.join(mediaDir, destinationDir);
-        await fsPromises.mkdir(finalDir, { recursive: true });
-
-        const finalPath = path.join(finalDir, req.file.originalname);
-        await fsPromises.writeFile(finalPath, req.file.buffer);
-        console.log(`[Upload] Saved file to: ${finalPath}`);
-
-        if (duration && !isNaN(parseFloat(duration))) {
-            const durationInMs = Math.round(parseFloat(duration) * 1000).toString();
-            const success = NodeID3.update({ TLEN: durationInMs }, finalPath);
-            if (success) {
-                console.log(`[Upload] Successfully wrote duration (${duration}s) to ID3 tag for ${req.file.originalname}`);
-            } else {
-                console.warn(`[Upload] Could not write duration tag for ${req.file.originalname}`);
-            }
-        }
-        
-        // Optimistic update: process this one file and broadcast immediately
-        const relativePath = path.relative(mediaDir, finalPath).replace(/\\/g, '/');
-        const newTrack = await createTrackObject(finalPath, relativePath, req.file.originalname, parseFloat(duration));
-
-        // Find parent folder in the in-memory tree and add the new track
-        let parentNode = libraryState;
-        if(destinationDir) {
-            const pathParts = destinationDir.split('/');
-            for(const part of pathParts) {
-                let foundNode = parentNode.children.find(c => c.type === 'folder' && c.name === part);
-                if(foundNode) {
-                    parentNode = foundNode;
-                }
-            }
-        }
-        parentNode.children.push(newTrack);
-        
-        broadcastLibraryUpdate(); // Send instant update
-
-        res.status(201).json({ success: true, message: `File ${req.file.originalname} uploaded.` });
-
-    } catch (e) {
-        console.error('Error processing upload:', e);
-        res.status(500).json({ message: 'Error processing upload. Check server logs and permissions.' });
-    }
-});
-
-
-app.post('/api/track/delete', async (req, res) => {
-    const { id } = req.body;
-    if (!id) {
-        return res.status(400).json({ message: 'Track ID (relative path) is required.' });
-    }
-
-    try {
-        const fullPath = path.join(mediaDir, id);
-        if (fs.existsSync(fullPath)) {
-             await fsPromises.rm(fullPath, { recursive: true, force: true });
-             res.json({ success: true, message: 'Item deleted.' });
-        } else {
-             res.status(404).json({ message: 'Item not found on disk.' });
-        }
-    } catch (error) {
-        console.error("Error deleting item:", error);
-        res.status(500).json({ message: 'Error deleting item. Check server logs and permissions.' });
-    }
-});
-
-app.get('/api/artwork/:id', async (req, res) => {
-    try {
-        const artworkFilename = decodeURIComponent(req.params.id);
-        const filePath = path.join(artworkDir, artworkFilename);
-
-        if (fs.existsSync(filePath)) {
-            res.sendFile(filePath);
-        } else {
-            res.status(404).send('Artwork not found');
-        }
-    } catch (err) {
-        console.error("Error serving artwork:", err);
-        res.status(500).send('Error serving artwork');
-    }
-});
-
-
-const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
-if (isDirectRun) {
-    const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath));
-
-    app.get('/stream/manifest.json', async (req, res) => {
-        try {
-            const { stationName, description } = await getStationSettings();
-            const manifest = {
-                name: stationName,
-                short_name: stationName.length > 12 ? stationName.substring(0, 9) + '...' : stationName,
-                description: description,
-                start_url: "/stream",
-                display: "standalone",
-                background_color: "#000000",
-                theme_color: "#ef4444",
-                icons: [
-                    {
-                        src: "/stream/icon/192.png",
-                        sizes: "192x192",
-                        type: "image/png",
-                        purpose: "any maskable"
-                    },
-                    {
-                        src: "/stream/icon/512.png",
-                        sizes: "512x512",
-                        type: "image/png",
-                        purpose: "any maskable"
-                    }
-                ]
-            };
-            res.json(manifest);
-        } catch (error) {
-            console.error('Error generating stream manifest:', error);
-            res.status(500).json({ error: 'Could not generate manifest' });
-        }
-    });
-    
-    app.get('/stream/icon/:size.png', async (req, res) => {
-        try {
-            const { logoSrc } = await getStationSettings();
-            if (logoSrc && logoSrc.startsWith('data:image/')) {
-                const parts = logoSrc.split(',');
-                const mimeType = parts[0].split(':')[1].split(';')[0];
-                const imageBuffer = Buffer.from(parts[1], 'base64');
-                res.writeHead(200, {
-                    'Content-Type': mimeType,
-                    'Content-Length': imageBuffer.length
-                });
-                res.end(imageBuffer);
-            } else {
-                res.redirect('https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png');
-            }
-        } catch (error) {
-            console.error('Error serving stream icon:', error);
-            res.status(500).send('Error serving icon');
-        }
-    });
-
-    // Endpoint for the player page HTML
-    app.get('/stream', async (req, res) => {
-        try {
-            const { stationName } = await getStationSettings();
-            res.setHeader('Content-Type', 'text/html');
-            res.send(getPlayerPageHTML(stationName));
-        } catch (error) {
-            console.error('Error serving player page:', error);
-            res.status(500).send('Could not load player.');
-        }
-    });
-    
-    app.get('/stream/live.:ext?', (req, res) => {
-        console.log(`[Audio Stream] New listener connected. Sending headers.`);
-        res.writeHead(200, {
-            'Content-Type': currentMimeType,
-            'Connection': 'keep-alive',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-            'Access-Control-Allow-Origin': '*'
-        });
-    
-        if (streamHeader) {
-            res.write(streamHeader);
-        }
-    
-        directStreamListeners.add(res);
-    
-        req.on('close', () => {
-            console.log('[Audio Stream] Listener disconnected.');
-            directStreamListeners.delete(res);
-        });
-    });
-
-    // SPA Fallback: This should be the last route.
-    app.get('*', (req, res, next) => {
-        if (req.path.startsWith('/api/') ||
-            req.path.startsWith('/stream') ||
-            req.path.startsWith('/media/') ||
-            req.path.startsWith('/artwork/') ||
-            req.path.startsWith('/socket') ||
-            path.extname(req.path)) {
-            return next();
-        }
-        res.sendFile(path.join(distPath, 'index.html'));
-    });
-    
-    // Server startup logic
-    const startup = async () => {
-        console.log('[Startup] Initial scan of Media directory...');
-        const initialChildren = await scanMediaToTree(mediaDir);
-        libraryState.children = initialChildren;
-        console.log('[Startup] Initial library state generated.');
-        
-        server.listen(PORT, '0.0.0.0', () => {
-            console.log(`RadioHost.cloud HOST server running on http://0.0.0.0:${PORT}`);
-            // Startup Logic: Check if auto mode should be running
-            const studioUser = db.data.users.find(u => u.role === 'studio');
-            if (studioUser && db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
-                console.log('[Startup] Auto Mode is enabled. Starting playback loop.');
-                startPlaybackLoop();
-            }
-        });
-    };
-
-    startup();
-}
-
-export default app;
+app.get('/api/user/:email', (req,

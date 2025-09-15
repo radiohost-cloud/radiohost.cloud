@@ -286,6 +286,35 @@ const updateItemInTree = (node: Folder, itemId: string, updateFn: (item: Library
     };
 };
 
+const updateFolderAndChildrenTagsInTree = (node: Folder, targetFolderId: string, newTags: string[]): Folder => {
+    const updateRecursively = (item: LibraryItem): LibraryItem => {
+        const newTagsToApply = newTags.length > 0 ? newTags.sort() : undefined;
+        const updatedItem = { ...item, tags: newTagsToApply };
+        if (updatedItem.type === 'folder') {
+            updatedItem.children = updatedItem.children.map(updateRecursively);
+        }
+        return updatedItem;
+    };
+
+    const findAndUpdate = (folder: Folder): Folder => {
+        if (folder.id === targetFolderId) {
+            return updateRecursively(folder) as Folder;
+        }
+
+        return {
+            ...folder,
+            children: folder.children.map(child => {
+                if (child.type === 'folder') {
+                    return findAndUpdate(child);
+                }
+                return child;
+            })
+        };
+    };
+
+    return findAndUpdate(node);
+};
+
 
 type StreamStatus = 'inactive' | 'starting' | 'broadcasting' | 'error' | 'stopping';
 // --- App Component ---
@@ -1920,12 +1949,7 @@ const AppInternal: React.FC = () => {
         if (isHostMode) {
             sendStudioCommand('updateFolderTags', { folderId, newTags });
         } else {
-             setMediaLibrary(prev => updateItemInTree(prev, folderId, (item) => {
-                if (item.type === 'folder') {
-                    return { ...item, tags: newTags.length > 0 ? newTags.sort() : undefined };
-                }
-                return item;
-            }));
+             setMediaLibrary(prev => updateFolderAndChildrenTagsInTree(prev, folderId, newTags));
         }
     }, [isHostMode, sendStudioCommand]);
 

@@ -18,6 +18,7 @@ import { CloseIcon } from './icons/CloseIcon';
 import { HeadphoneIcon } from './icons/HeadphoneIcon';
 import { EditIcon } from './icons/EditIcon';
 import { fetchArtwork } from '../services/artworkService';
+import { PlusIcon } from './icons/PlusIcon';
 
 declare const jsmediatags: any;
 
@@ -471,8 +472,12 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ rootFolder, onAddToPlaylist
                     ))}
                 </div>
                 {canModifyLibrary && <div className="relative flex-shrink-0" ref={dropdownRef}>
-                    <button onClick={() => setIsDropdownOpen(p => !p)} className="flex items-center gap-2 px-3 py-1.5 font-semibold text-white bg-black dark:text-black dark:bg-white rounded-md hover:bg-neutral-800 dark:hover:bg-neutral-200">
-                        <PlusCircleIcon className="w-5 h-5" /> Add/Import
+                    <button 
+                        onClick={() => setIsDropdownOpen(p => !p)} 
+                        className="p-1.5 bg-neutral-200 dark:bg-neutral-800 rounded-md hover:bg-neutral-300 dark:hover:bg-neutral-700 transition-colors"
+                        title="Add/Import Media"
+                    >
+                        <PlusIcon className="w-5 h-5 text-black dark:text-white" />
                     </button>
                     {isDropdownOpen && <div className="absolute right-0 mt-2 w-56 bg-white dark:bg-neutral-800 rounded-md shadow-lg border border-neutral-200 dark:border-neutral-700 z-10">
                         <button onClick={() => { fileInputRef.current?.click(); setIsDropdownOpen(false); }} className="w-full text-left flex items-center gap-3 px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-700">
