@@ -1733,14 +1733,20 @@ const AppInternal: React.FC = () => {
     }, []);
 
     const handleInsertTrackInPlaylist = useCallback((track: Track, beforeItemId: string | null) => {
+        const newPlaylistItem: Track = {
+            ...track,
+            id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            originalId: track.id,
+        };
+    
         if (isHostMode) {
             if (playoutPolicy.playoutMode === 'presenter') return;
-            sendStudioCommand('insertTrack', { track, beforeItemId });
+            sendStudioCommand('insertTrack', { track: newPlaylistItem, beforeItemId });
         } else {
-             setPlaylist(prev => {
+            setPlaylist(prev => {
                 const newPlaylist = [...prev];
                 const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
-                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, track);
+                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, newPlaylistItem);
                 return newPlaylist;
             });
         }
@@ -2360,7 +2366,7 @@ const AppInternal: React.FC = () => {
             const intervalHours = autoBackupIntervalRef.current;
             if (intervalHours <= 0) return;
             const intervalMillis = intervalHours * 60 * 60 * 1000;
-            if (now - lastAutoBackupTimestamp > intervalMillis) performBackupAction('interval');
+            if (now - lastBackupTimestamp > intervalMillis) performBackupAction('interval');
         }, 1000 * 60 * 5);
 
         return () => clearInterval(intervalId);

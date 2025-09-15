@@ -166,14 +166,19 @@ export const getArtwork = (id: string) => {
 
 export const getArtworkUrl = async (track: Track): Promise<string | null> => {
     const mode = getMode();
+    const artworkId = track.originalId || track.id; // Use originalId if it's a playlist item
+
     if (mode === 'HOST') {
-        return track.hasEmbeddedArtwork ? `/api/artwork/${track.id}` : track.remoteArtworkUrl || null;
+        // The server needs the original track ID to find the artwork.
+        return track.hasEmbeddedArtwork ? `/api/artwork/${artworkId}` : track.remoteArtworkUrl || null;
     }
+    
+    // DEMO Mode
     if (track.remoteArtworkUrl) {
         return track.remoteArtworkUrl;
     }
     if (track.hasEmbeddedArtwork) {
-        const blob = await dbService.getArtwork(track.id);
+        const blob = await dbService.getArtwork(artworkId);
         return blob ? URL.createObjectURL(blob) : null;
     }
     return null;
