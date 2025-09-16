@@ -338,8 +338,9 @@ const broadcastStreamStatus = () => {
 const stopPlayout = () => {
     if (currentFfmpegCommand) {
         console.log('[FFMPEG] Stopping current playout command.');
-        currentFfmpegCommand.kill('SIGTERM'); // Use SIGTERM for graceful shutdown
-        currentFfmpegCommand = null;
+        // Don't nullify the command here. Let the 'error' event handler do it.
+        // This prevents a race condition where the command is nulled before its event fires.
+        currentFfmpegCommand.kill('SIGTERM');
     }
 };
 
@@ -486,7 +487,12 @@ const startPlayout = () => {
         })
         .on('end', () => {
             console.log(`[FFMPEG] Track finished: ${track.title}`);
+            if (currentFfmpegCommand !== command) {
+                console.log(`[FFMPEG] Ignoring stale "end" event for "${track.title}".`);
+                return;
+            }
             currentFfmpegCommand = null;
+
             const studioData = db.data.userdata[studioClientEmail];
             if (studioData?.settings?.isAutoModeEnabled) {
                 advanceTrackAndPlay(false);
@@ -497,20 +503,38 @@ const startPlayout = () => {
             }
         })
         .on('error', (err, stdout, stderr) => {
-            if (!err.message.includes('SIGTERM')) {
-                 console.error(`[FFMPEG] Error playing ${track.title}:`, err.message);
-                 if (streamConfig && streamConfig.isEnabled) {
-                    serverStreamStatus = 'error';
-                    serverStreamError = err.message + ': ' + stderr;
-                    broadcastStreamStatus();
-                 }
+            // If the error is for a command that is no longer the active one, ignore it.
+            // This prevents race conditions when quickly skipping tracks.
+            if (currentFfmpegCommand !== command) {
+                console.log(`[FFMPEG] Ignoring stale error for "${track.title}".`);
+                return;
             }
-            if (currentFfmpegCommand) { 
-                currentFfmpegCommand = null;
-                 const studioData = db.data.userdata[studioClientEmail];
-                if (studioData?.settings?.isAutoModeEnabled) {
-                     advanceTrackAndPlay(false);
-                }
+
+            // The command has now officially stopped, so clear the global reference.
+            currentFfmpegCommand = null;
+
+            // Log genuine errors, but not intentional stops.
+            if (err.message.includes('SIGTERM')) {
+                console.log(`[FFMPEG] Playout for "${track.title}" was stopped intentionally.`);
+                return; // Do not advance, the next track is already handled.
+            }
+
+            console.error(`[FFMPEG] Error playing ${track.title}: ffmpeg exited with code ${err.code}:`, stderr || err.message);
+            if (streamConfig && streamConfig.isEnabled) {
+                serverStreamStatus = 'error';
+                serverStreamError = stderr || err.message;
+                broadcastStreamStatus();
+            }
+            
+            // If there was a real error and auto mode is on, advance to the next track.
+            const studioData = db.data.userdata[studioClientEmail];
+            if (studioData?.settings?.isAutoModeEnabled) {
+                advanceTrackAndPlay(false);
+            } else {
+                // If not in automode, just stop.
+                sharedPlayerState.isPlaying = false;
+                db.write();
+                broadcastState();
             }
         });
         
