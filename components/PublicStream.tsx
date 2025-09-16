@@ -1,16 +1,14 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Toggle } from './Toggle';
 import { BroadcastIcon } from './icons/BroadcastIcon';
 import { type PlayoutPolicy } from '../types';
+import { ShareIcon } from './icons/ShareIcon';
 
 interface PublicStreamProps {
     policy: PlayoutPolicy;
     onUpdatePolicy: (policy: PlayoutPolicy) => void;
     serverStreamStatus: string;
     serverStreamError: string | null;
-    isAudioEngineReady: boolean;
-    isAudioEngineInitializing: boolean;
-    isSecureContext: boolean;
 }
 
 const PublicStream: React.FC<PublicStreamProps> = ({ 
@@ -18,10 +16,8 @@ const PublicStream: React.FC<PublicStreamProps> = ({
     onUpdatePolicy,
     serverStreamStatus,
     serverStreamError,
-    isAudioEngineReady, // This can be removed if not used, but keeping for context
-    isAudioEngineInitializing, // Same as above
-    isSecureContext // Same as above
 }) => {
+    const [isCopied, setIsCopied] = useState(false);
 
     const handleConfigChange = (field: keyof PlayoutPolicy['streamingConfig'], value: any) => {
         onUpdatePolicy({
@@ -46,17 +42,28 @@ const PublicStream: React.FC<PublicStreamProps> = ({
     }, [serverStreamStatus]);
 
     const isSettingsDisabled = serverStreamStatus === 'broadcasting' || serverStreamStatus === 'connecting';
+    const publicPlayerUrl = `${window.location.origin}/stream`;
+
+    const handleCopyUrl = () => {
+        navigator.clipboard.writeText(publicPlayerUrl).then(() => {
+            setIsCopied(true);
+            setTimeout(() => setIsCopied(false), 2000);
+        });
+    };
 
     return (
-        <div className="p-4 space-y-4 h-full flex flex-col">
-            <h3 className="text-lg font-semibold text-black dark:text-white flex items-center gap-2">
-                <BroadcastIcon className="w-6 h-6" />
-                Icecast Stream
-            </h3>
+        <div className="p-4 space-y-6 h-full flex flex-col">
+            <div>
+                <h3 className="text-lg font-semibold text-black dark:text-white flex items-center gap-2">
+                    <BroadcastIcon className="w-6 h-6" />
+                    Internal Broadcast Engine
+                </h3>
+                <p className="text-xs text-neutral-500">This section controls the app's internal FFmpeg engine to stream directly to an Icecast server.</p>
+            </div>
             
             <div className="text-center p-4 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
                 <div className={`text-xl font-bold ${statusInfo.color}`}>{statusInfo.text}</div>
-                {serverStreamStatus === 'error' && serverStreamError && <p className="text-xs text-red-500 mt-2 truncate">{serverStreamError}</p>}
+                {serverStreamStatus === 'error' && serverStreamError && <p className="text-xs text-red-500 mt-2 truncate" title={serverStreamError}>{serverStreamError}</p>}
             </div>
 
             <div className={`space-y-4 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg ${isSettingsDisabled ? 'opacity-60' : ''}`}>
@@ -83,26 +90,42 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                         <input type="password" id="password" value={streamingConfig.password} onChange={e => handleConfigChange('password', e.target.value)} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"/>
                     </div>
                 </div>
-
-                <div>
-                    <label htmlFor="bitrate" className="block text-sm font-medium mb-1">Bitrate</label>
-                    <select id="bitrate" value={streamingConfig.bitrate} onChange={e => handleConfigChange('bitrate', Number(e.target.value))} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed">
-                        {[64, 96, 128, 192, 256, 320].map(b => <option key={b} value={b}>{b} kbps</option>)}
-                    </select>
-                </div>
             </div>
             
-             <div className="space-y-4 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg ${isSettingsDisabled ? 'opacity-60' : ''}">
-                <h4 className="text-sm font-semibold">Station Metadata</h4>
-                <div>
-                    <label htmlFor="stationName" className="block text-sm font-medium mb-1">Station Name</label>
-                    <input type="text" id="stationName" value={streamingConfig.stationName} onChange={e => handleConfigChange('stationName', e.target.value)} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"/>
+            <hr className="border-neutral-200 dark:border-neutral-800" />
+            
+            <div>
+                 <h3 className="text-lg font-semibold text-black dark:text-white flex items-center gap-2">
+                    <ShareIcon className="w-6 h-6" />
+                    Public Player Page
+                </h3>
+                <p className="text-xs text-neutral-500">Configure a shareable web player for your listeners. It pulls metadata from this app and audio from any Icecast stream.</p>
+            </div>
+             <div className="space-y-4 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                <div className="flex items-center justify-between">
+                     <div>
+                        <label htmlFor="public-player-enabled" className="text-sm font-medium block cursor-pointer">Enable Public Player</label>
+                        <p className="text-xs text-neutral-500">Makes the /stream page accessible.</p>
+                    </div>
+                    <Toggle id="public-player-enabled" checked={streamingConfig.publicPlayerEnabled} onChange={(v) => handleConfigChange('publicPlayerEnabled', v)} />
                 </div>
-                <div>
-                    <label htmlFor="stationDescription" className="block text-sm font-medium mb-1">Description</label>
-                    <input type="text" id="stationDescription" value={streamingConfig.stationDescription} onChange={e => handleConfigChange('stationDescription', e.target.value)} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"/>
-                </div>
-             </div>
+                {streamingConfig.publicPlayerEnabled && (
+                    <div className="space-y-4 pt-4 border-t border-neutral-300 dark:border-neutral-700">
+                        <div>
+                            <label htmlFor="publicStreamUrl" className="block text-sm font-medium mb-1">Public Stream URL</label>
+                            <input type="text" id="publicStreamUrl" value={streamingConfig.publicStreamUrl} onChange={e => handleConfigChange('publicStreamUrl', e.target.value)} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm" placeholder="http://your-icecast:8000/stream"/>
+                            <p className="text-xs text-neutral-500 mt-1">The audio source for your listeners.</p>
+                        </div>
+                         <div>
+                            <label htmlFor="share-url" className="block text-sm font-medium mb-1">Shareable Link</label>
+                            <div className="flex gap-2">
+                                <input id="share-url" type="text" readOnly value={publicPlayerUrl} className="w-full bg-neutral-300/50 dark:bg-black/50 border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm text-neutral-600 dark:text-neutral-400" />
+                                <button onClick={handleCopyUrl} className="px-3 py-2 text-sm font-semibold rounded-md bg-blue-600 text-white hover:bg-blue-700">{isCopied ? 'Copied!' : 'Copy'}</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
         </div>
     );
 };
