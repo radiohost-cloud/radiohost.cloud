@@ -1,9 +1,9 @@
+
 import React, { useRef, useState } from 'react';
 import { type PlayoutPolicy } from '../types';
 import { DownloadIcon } from './icons/DownloadIcon';
 import ConfirmationDialog from './ConfirmationDialog';
 import { UploadIcon } from './icons/UploadIcon';
-import { FolderIcon } from './icons/FolderIcon';
 import { Toggle } from './Toggle';
 
 interface SettingsProps {
@@ -12,20 +12,12 @@ interface SettingsProps {
     currentUser: { email: string; nickname: string; } | null;
     onImportData: (data: any) => void;
     onExportData: () => void;
-    isNowPlayingExportEnabled: boolean;
-    onSetIsNowPlayingExportEnabled: (enabled: boolean) => void;
-    onSetNowPlayingFile: () => Promise<void>;
-    nowPlayingFileName: string | null;
-    metadataFormat: string;
-    onSetMetadataFormat: (format: string) => void;
     isAutoBackupEnabled: boolean;
     onSetIsAutoBackupEnabled: (enabled: boolean) => void;
     isAutoBackupOnStartupEnabled: boolean;
     onSetIsAutoBackupOnStartupEnabled: (enabled: boolean) => void;
     autoBackupInterval: number;
     onSetAutoBackupInterval: (interval: number) => void;
-    onSetAutoBackupFolder: () => Promise<void>;
-    autoBackupFolderPath: string | null;
     allFolders: { id: string, name: string }[];
     allTags: string[];
 }
@@ -35,20 +27,12 @@ const Settings: React.FC<SettingsProps> = ({
     onUpdatePolicy, 
     onImportData,
     onExportData,
-    isNowPlayingExportEnabled,
-    onSetIsNowPlayingExportEnabled,
-    onSetNowPlayingFile,
-    nowPlayingFileName,
-    metadataFormat,
-    onSetMetadataFormat,
     isAutoBackupEnabled,
     onSetIsAutoBackupEnabled,
     isAutoBackupOnStartupEnabled,
     onSetIsAutoBackupOnStartupEnabled,
     autoBackupInterval,
     onSetAutoBackupInterval,
-    onSetAutoBackupFolder,
-    autoBackupFolderPath,
     allFolders,
     allTags
 }) => {
@@ -282,60 +266,6 @@ const Settings: React.FC<SettingsProps> = ({
                 </div>
             </div>
 
-             <hr className="border-neutral-200 dark:border-neutral-800" />
-            
-            <div>
-                <h2 className="text-xl font-semibold">Now Playing Export</h2>
-                <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-1">
-                    Automatically export the current track's artist and title to a local text file for use with other broadcasting software.
-                </p>
-                <div className="mt-4 space-y-4">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <label htmlFor="nowplaying-export-enabled" className="text-sm font-medium block cursor-pointer">Enable Export</label>
-                            <p className="text-xs text-neutral-500">Continuously update the selected file.</p>
-                        </div>
-                        <Toggle id="nowplaying-export-enabled" checked={isNowPlayingExportEnabled} onChange={onSetIsNowPlayingExportEnabled} />
-                    </div>
-                    
-                    {isNowPlayingExportEnabled && (
-                        <div className="space-y-4">
-                            <div className="flex items-center gap-4 p-3 bg-neutral-200 dark:bg-neutral-800/50 rounded-md">
-                                <button
-                                    onClick={onSetNowPlayingFile}
-                                    className="inline-flex items-center justify-center gap-2 px-4 py-2 border border-neutral-300 dark:border-neutral-600 text-sm font-medium rounded-md shadow-sm bg-white dark:bg-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-700"
-                                >
-                                    <UploadIcon className="w-5 h-5" />
-                                    Set Export File
-                                </button>
-                                <div className="text-sm text-neutral-600 dark:text-neutral-400">
-                                    <span className="font-medium text-neutral-800 dark:text-neutral-300">Status:</span> 
-                                    {nowPlayingFileName 
-                                        ? <span className="font-mono text-green-600 dark:text-green-400 ml-2">{nowPlayingFileName}</span>
-                                        : <span className="ml-2">No file selected.</span>
-                                    }
-                                </div>
-                            </div>
-                            <div>
-                                <label htmlFor="metadata-format" className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
-                                    Metadata Format
-                                </label>
-                                <input
-                                    id="metadata-format"
-                                    type="text"
-                                    value={metadataFormat}
-                                    onChange={e => onSetMetadataFormat(e.target.value)}
-                                    className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-black dark:text-white font-mono"
-                                />
-                                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                                    Use <code className="bg-neutral-200 dark:bg-neutral-700 p-0.5 rounded">%artist%</code> and <code className="bg-neutral-200 dark:bg-neutral-700 p-0.5 rounded">%title%</code> as placeholders.
-                                </p>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            </div>
-
             <hr className="border-neutral-200 dark:border-neutral-800" />
 
             <div>
@@ -366,7 +296,7 @@ const Settings: React.FC<SettingsProps> = ({
             <div>
                 <h2 className="text-xl font-semibold">Automatic Backups</h2>
                 <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-1">
-                    Automatically save a backup of your data to a local folder. Requires browser permission.
+                    Automatically save a backup of your data to a 'Backup' folder on the server.
                 </p>
                 <div className="mt-4 space-y-4">
                     <div className="flex items-center justify-between">
@@ -401,24 +331,6 @@ const Settings: React.FC<SettingsProps> = ({
                                     />
                                 </div>
                             )}
-                            <div>
-                                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">Backup Folder</label>
-                                <div className="flex items-center gap-4 p-3 bg-neutral-200 dark:bg-neutral-800/50 rounded-md">
-                                    <button
-                                        onClick={onSetAutoBackupFolder}
-                                        className="inline-flex items-center justify-center gap-2 px-4 py-2 border border-neutral-300 dark:border-neutral-600 text-sm font-medium rounded-md shadow-sm bg-white dark:bg-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-700"
-                                    >
-                                        <FolderIcon className="w-5 h-5" />
-                                        Select Folder
-                                    </button>
-                                    <div className="text-sm text-neutral-600 dark:text-neutral-400 truncate">
-                                        {autoBackupFolderPath
-                                            ? <span className="font-mono">{autoBackupFolderPath}</span>
-                                            : <span>No folder selected.</span>
-                                        }
-                                    </div>
-                                </div>
-                            </div>
                         </div>
                     )}
                 </div>

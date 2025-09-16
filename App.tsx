@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -359,9 +360,6 @@ const AppInternal: React.FC = () => {
     const [logoHeaderGradient, setLogoHeaderGradient] = useState<string | null>(null);
     const [logoHeaderTextColor, setLogoHeaderTextColor] = useState<'white' | 'black'>('white');
     const [availableAudioDevices, setAvailableAudioDevices] = useState<MediaDeviceInfo[]>([]);
-    const [isNowPlayingExportEnabled, setIsNowPlayingExportEnabled] = useState(false);
-    const [nowPlayingFileName, setNowPlayingFileName] = useState<string | null>(null);
-    const [metadataFormat, setMetadataFormat] = useState<string>('%artist% - %title%');
     const [editingMetadataFolder, setEditingMetadataFolder] = useState<Folder | null>(null);
     const [editingTrack, setEditingTrack] = useState<Track | null>(null);
     const [headerHeight, setHeaderHeight] = useState(80);
@@ -390,16 +388,12 @@ const AppInternal: React.FC = () => {
     const [isAutoBackupEnabled, setIsAutoBackupEnabled] = useState(false);
     const [isAutoBackupOnStartupEnabled, setIsAutoBackupOnStartupEnabled] = useState(false);
     const [autoBackupInterval, setAutoBackupInterval] = useState<number>(24);
-    const [autoBackupFolderPath, setAutoBackupFolderPath] = useState<string | null>(null);
-    const [lastAutoBackupTimestamp, setLastAutoBackupTimestamp] = useState<number>(0);
      
     // --- Audio Player Refs ---
     const pflAudioRef = useRef<HTMLAudioElement>(null);
     const pflAudioUrlRef = useRef<string | null>(null);
     
     const remoteStudioRef = useRef<any>(null);
-    const nowPlayingFileHandleRef = useRef<FileSystemFileHandle | null>(null);
-    const autoBackupFolderHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
     const audioBufferRef = useRef<Map<string, Blob>>(new Map());
     
     // --- NEW Audio Mixer State ---
@@ -562,16 +556,7 @@ const AppInternal: React.FC = () => {
     }, []);
 
 
-    const verifyPermission = async (fileHandle: FileSystemDirectoryHandle | FileSystemFileHandle) => {
-        const options = { mode: 'readwrite' as const };
-        if ((await (fileHandle as any).queryPermission(options)) === 'granted') {
-            return true;
-        }
-        if ((await (fileHandle as any).requestPermission(options)) === 'granted') {
-            return true;
-        }
-        return false;
-    };
+
     
     // Check for saved user session or guest session on initial load
     useEffect(() => {
@@ -624,8 +609,6 @@ const AppInternal: React.FC = () => {
             setLogoSrc(initialSettings.logoSrc || null);
             setLogoHeaderGradient(initialSettings.headerGradient || null);
             setLogoHeaderTextColor(initialSettings.headerTextColor || 'white');
-            setIsNowPlayingExportEnabled(initialSettings.isNowPlayingExportEnabled || false);
-            setMetadataFormat(initialSettings.metadataFormat || '%artist% - %title%');
             if (initialSettings.columnWidths) setColumnWidths(initialSettings.columnWidths);
             setIsMicPanelCollapsed(initialSettings.isMicPanelCollapsed ?? false);
             setHeaderHeight(initialSettings.headerHeight ?? 80);
@@ -658,7 +641,6 @@ const AppInternal: React.FC = () => {
                 setMixerConfig(mergedMixerConfig);
             }
             
-            setLastAutoBackupTimestamp(initialUserData?.lastAutoBackupTimestamp || 0);
             setIsLoadingSession(false);
         };
 
@@ -750,8 +732,6 @@ const AppInternal: React.FC = () => {
                 logoSrc, 
                 headerGradient: logoHeaderGradient,
                 headerTextColor: logoHeaderTextColor,
-                isNowPlayingExportEnabled,
-                metadataFormat,
                 columnWidths,
                 isMicPanelCollapsed,
                 headerHeight,
@@ -774,7 +754,7 @@ const AppInternal: React.FC = () => {
         }
     }, [
         cartwallPages, broadcasts, playoutPolicy, logoSrc,
-        logoHeaderGradient, logoHeaderTextColor, isNowPlayingExportEnabled, metadataFormat,
+        logoHeaderGradient, logoHeaderTextColor,
         columnWidths, isMicPanelCollapsed, headerHeight, isLibraryCollapsed,
         isRightColumnCollapsed, isAutoBackupEnabled, isAutoBackupOnStartupEnabled,
         autoBackupInterval, isAutoModeEnabled, audioBuses, mixerConfig, currentUser
@@ -1281,35 +1261,7 @@ const AppInternal: React.FC = () => {
     }, [playoutPolicy]);
 
 
-    useEffect(() => {
-        const writeNowPlaying = async () => {
-            if (!isNowPlayingExportEnabled || !nowPlayingFileHandleRef.current) {
-                if (nowPlayingFileHandleRef.current) {
-                     const writable = await nowPlayingFileHandleRef.current.createWritable();
-                     await writable.write('');
-                     await writable.close();
-                }
-                return;
-            }
-            
-            let text = 'Silence';
-            if (isPlaying && currentTrack) {
-                const suppression = getSuppressionSettings(currentTrack, mediaLibrary);
-                if (suppression?.enabled) {
-                    text = suppression.customText || 'radiohost.cloud';
-                } else {
-                    text = metadataFormat.replace(/%artist%/g, currentTrack.artist || '').replace(/%title%/g, currentTrack.title || '');
-                }
-            }
-            
-            try {
-                const writable = await nowPlayingFileHandleRef.current.createWritable();
-                await writable.write(text);
-                await writable.close();
-            } catch (e) { console.error("Failed to write to 'Now Playing' file:", e); }
-        };
-        writeNowPlaying();
-    }, [isPlaying, currentTrack, isNowPlayingExportEnabled, mediaLibrary, metadataFormat]);
+
     
     const handlePflTrack = useCallback(async (trackId: string) => {
         const player = pflAudioRef.current;
@@ -1387,7 +1339,8 @@ const AppInternal: React.FC = () => {
     
         const relativePath = `${folderPathParts.join('/')}/${voiceTrack.title}.webm`;
         try {
-            const savedTrack = await dataService.addTrack(voiceTrack, blob, undefined, relativePath);
+            const vtFile = new File([blob], `${voiceTrack.title}.webm`, { type: 'audio/webm' });
+            const savedTrack = await dataService.addTrack(voiceTrack, vtFile, undefined, relativePath);
             const trackWithMix = { ...savedTrack, vtMix };
 
             if (playoutPolicy.playoutMode === 'presenter') {
@@ -1634,23 +1587,6 @@ const AppInternal: React.FC = () => {
         return undefined;
     }, [playlist, nextIndex, nextNextIndex]);
 
-    const handleSetNowPlayingFile = useCallback(async () => {
-        if (!('showSaveFilePicker' in window)) {
-            alert("Your browser doesn't support the File System Access API. This feature is only available in modern browsers like Chrome or Edge.");
-            return;
-        }
-        try {
-            const handle = await (window as any).showSaveFilePicker({ types: [{ description: 'Text Files', accept: { 'text/plain': ['.txt'] } }] });
-            if (await verifyPermission(handle)) {
-                nowPlayingFileHandleRef.current = handle;
-                setNowPlayingFileName(handle.name);
-                await dataService.setConfig('nowPlayingFileHandle', handle);
-                await dataService.setConfig('nowPlayingFileName', handle.name);
-            }
-        } catch (err) {
-            if ((err as Error).name !== 'AbortError') console.error("Error setting 'Now Playing' file:", err);
-        }
-    }, []);
     
     const handleToggleLibraryCollapse = useCallback(() => setIsLibraryCollapsed(p => !p), []);
     const handleToggleRightColumnCollapse = useCallback(() => setIsRightColumnCollapsed(p => !p), []);
@@ -1681,7 +1617,6 @@ const AppInternal: React.FC = () => {
 
     const handleExportData = useCallback(() => {}, []);
     const handleImportData = useCallback((data: any) => {}, []);
-    const handleSetAutoBackupFolder = useCallback(async () => {}, []);
     
     const allFolders = useMemo(() => getAllFolders(mediaLibrary), [mediaLibrary]);
     const allTags = useMemo(() => getAllTags(mediaLibrary), [mediaLibrary]);
@@ -1750,7 +1685,8 @@ const AppInternal: React.FC = () => {
         const vtFolderName = playoutPolicy.playoutMode === 'studio' ? 'Studio' : userNickname;
         const folderPathParts = ['Voicetracks', vtFolderName];
         const relativePath = `${folderPathParts.join('/')}/${voiceTrack.title}.webm`;
-        return dataService.addTrack(voiceTrack, blob, undefined, relativePath);
+        const vtFile = new File([blob], `${voiceTrack.title}.webm`, { type: 'audio/webm' });
+        return dataService.addTrack(voiceTrack, vtFile, undefined, relativePath);
     }, [playoutPolicy.playoutMode]);
 
     // --- NEW: WebSocket Logic for HOST mode ---
@@ -2084,7 +2020,7 @@ const AppInternal: React.FC = () => {
                                         serverStreamStatus={serverStreamStatus}
                                         serverStreamError={serverStreamError}
                                     />}
-                                    {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isNowPlayingExportEnabled={isNowPlayingExportEnabled} onSetIsNowPlayingExportEnabled={setIsNowPlayingExportEnabled} onSetNowPlayingFile={handleSetNowPlayingFile} nowPlayingFileName={nowPlayingFileName} metadataFormat={metadataFormat} onSetMetadataFormat={setMetadataFormat} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} onSetAutoBackupFolder={handleSetAutoBackupFolder} autoBackupFolderPath={autoBackupFolderPath} allFolders={allFolders} allTags={allTags} />}
+                                    {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} allFolders={allFolders} allTags={allTags} />}
                                 </div>
                             </div>
                         </div>

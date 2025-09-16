@@ -1,3 +1,4 @@
+
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
 // To run: `npm install express cors multer lowdb ws node-id3 fluent-ffmpeg` then `node server.js`
@@ -49,8 +50,7 @@ await db.read();
 db.data ||= { ...defaultData };
 for (const key of Object.keys(defaultData)) {
     if (db.data[key] === undefined) {
-        // FIX: Correctly assign the default value. The original `defaultData[key][key]` was incorrect and would cause properties to be `undefined`.
-        db.data[key] = defaultData[key];
+        db.data[key] = defaultData[key as keyof typeof defaultData];
     }
 }
 
@@ -60,6 +60,9 @@ const mediaDir = path.join(__dirname, 'Media');
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 const artworkDir = path.join(__dirname, 'Artwork');
 if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir, { recursive: true });
+const backupDir = path.join(__dirname, 'Backup');
+if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+
 
 // --- Promise wrapper for ffprobe ---
 const getDuration = (filePath) => {
@@ -380,12 +383,11 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
     return -1;
 };
 
-// --- Autonomous FFmpeg Playout Engine ---
+// --- Autonomous FFmpeg Playout Engine (Single-Track-at-a-time model) ---
 let currentFfmpegCommand = null;
-let serverStreamStatus = 'inactive'; // 'inactive', 'connecting', 'streaming', 'error'
+let serverStreamStatus = 'inactive'; // 'inactive', 'connecting', 'broadcasting', 'error'
 let serverStreamError = null;
 let metadataTimeoutId = null;
-const playlistFilePath = path.join(__dirname, 'playlist.txt');
 let playoutProgressInterval = null;
 
 
@@ -426,222 +428,146 @@ const updateIcecastMetadata = async (track, config) => {
     }
 };
 
-const scheduleMetadataUpdates = (tracks, config) => {
-    clearTimeout(metadataTimeoutId);
-
-    const updateNext = (trackIndex) => {
-        if (trackIndex >= tracks.length) {
-            console.log('[METADATA] All track metadata updates scheduled.');
-            return;
-        }
-        
-        const track = tracks[trackIndex];
-        
-        let fullTrackInfo = findTrackInServerTree(libraryState, track.originalId || track.id);
-        updateIcecastMetadata(fullTrackInfo || track, config);
-        
-        metadataTimeoutId = setTimeout(() => {
-            updateNext(trackIndex + 1);
-        }, track.duration * 1000);
-    };
-
-    updateNext(0);
-};
-
-const stopPlayout = () => {
+const stopPlayout = (shouldBroadcast = true) => {
     if (currentFfmpegCommand) {
         console.log('[FFMPEG] Stopping current playout command.');
         currentFfmpegCommand.kill('SIGTERM');
         currentFfmpegCommand = null;
     }
-    if (metadataTimeoutId) {
-        clearTimeout(metadataTimeoutId);
-        metadataTimeoutId = null;
-    }
     if (playoutProgressInterval) {
         clearInterval(playoutProgressInterval);
         playoutProgressInterval = null;
     }
+    db.data.sharedPlayerState.isPlaying = false;
+    db.data.sharedPlayerState.trackProgress = 0;
+    db.write();
+    if (shouldBroadcast) {
+        broadcastState();
+    }
 };
 
-const startPlayout = async () => {
-    stopPlayout(); 
+const playTrack = async (trackIndex) => {
+    stopPlayout(false); // Stop any existing playout without broadcasting yet
 
+    await db.read();
     const { sharedPlaylist, sharedPlayerState } = db.data;
-    const tracksToPlay = sharedPlaylist
-        .slice(sharedPlayerState.currentTrackIndex)
-        .filter(item => !item.markerType);
-
-    if (tracksToPlay.length === 0) {
-        console.log('[FFMPEG] No more tracks to play in the current sequence.');
+    
+    if (trackIndex >= sharedPlaylist.length) {
+        console.log('[Playout] Reached end of playlist.');
         sharedPlayerState.isPlaying = false;
         await db.write();
         broadcastState();
         return;
     }
     
-    const playoutMap = tracksToPlay.map(track => ({
-        id: track.id,
-        duration: track.duration 
-    }));
-    let currentPlayoutTrackIndex = 0;
-    let startTime = Date.now();
-
-    playoutProgressInterval = setInterval(() => {
-        if (!sharedPlayerState.isPlaying) {
-            clearInterval(playoutProgressInterval);
-            return;
-        }
-
-        const elapsedTime = (Date.now() - startTime) / 1000;
-        
-        let cumulativeDuration = 0;
-        let foundTrack = false;
-        for (let i = 0; i < playoutMap.length; i++) {
-            const trackDuration = playoutMap[i].duration;
-            if (elapsedTime < cumulativeDuration + trackDuration) {
-                const trackProgress = elapsedTime - cumulativeDuration;
-                if (currentPlayoutTrackIndex !== i) {
-                    currentPlayoutTrackIndex = i;
-                    const newTrack = tracksToPlay[i];
-                    sharedPlayerState.currentPlayingItemId = newTrack.id;
-                    sharedPlayerState.currentTrackIndex = db.data.sharedPlaylist.findIndex(t => t.id === newTrack.id);
-                }
-                sharedPlayerState.trackProgress = trackProgress;
-                foundTrack = true;
-                break;
-            }
-            cumulativeDuration += trackDuration;
-        }
-        
-        if (!foundTrack) { // Playout has finished
-             sharedPlayerState.isPlaying = false;
-             stopPlayout();
-        }
-
-        broadcastState();
-    }, 250);
-
-
-    const playlistFileContent = tracksToPlay.map(track => {
-        const trackPath = path.join(mediaDir, track.originalId || track.id);
-        return `file '${trackPath.replace(/'/g, "'\\''")}'`;
-    }).join('\n');
-
-    try {
-        await fsPromises.writeFile(playlistFilePath, playlistFileContent);
-    } catch (err) {
-        console.error('[FFMPEG] Failed to write temporary playlist file:', err);
+    const track = sharedPlaylist[trackIndex];
+    if (!track || track.markerType) {
+        playTrack(trackIndex + 1);
         return;
     }
-    
+
+    const trackPath = path.join(mediaDir, track.originalId || track.id);
+    if (!fs.existsSync(trackPath)) {
+        console.error(`[Playout] Track file not found: ${trackPath}. Skipping.`);
+        playTrack(trackIndex + 1);
+        return;
+    }
+
     const studioData = db.data.userdata[studioClientEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
 
-    const command = ffmpeg()
-        .input(playlistFilePath)
-        .inputOptions([
-            '-f', 'concat',
-            '-safe', '0',
-            '-re'
-        ]);
+    const command = ffmpeg(trackPath).inputOptions(['-re']);
+
+    command.audioCodec('libmp3lame')
+           .audioBitrate(streamConfig?.bitrate || 128)
+           .format('mp3')
+           .outputOptions(['-loglevel', 'verbose', '-content_type', 'audio/mpeg']);
 
     if (streamConfig && streamConfig.isEnabled) {
-        scheduleMetadataUpdates(tracksToPlay, streamConfig);
-
-        const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription, bitrate } = streamConfig;
-        
-        if (!serverAddress) {
-            console.error('[FFMPEG] Stream is enabled, but Server Address is not configured.');
-            serverStreamStatus = 'error';
-            serverStreamError = 'Server Address is not configured in Settings > Stream.';
-            broadcastStreamStatus();
-            return;
-        }
-
+        const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
         const outputUrl = `icecast://${username}:${password}@${serverAddress}`;
-
-        serverStreamStatus = 'connecting';
-        broadcastStreamStatus();
-
-        command
-            .audioCodec('libmp3lame')
-            .audioBitrate(bitrate || 128)
-            .format('mp3')
-            .outputOptions([
-                '-loglevel', 'verbose',
-                '-content_type', 'audio/mpeg',
-                '-ice_name', stationName || 'RadioHost.cloud',
-                '-ice_genre', stationGenre || 'Various',
-                '-ice_url', stationUrl || 'https://radiohost.cloud',
-                '-ice_description', stationDescription || 'Powered by RadioHost.cloud',
-                '-ice_public', '1',
-                '-reconnect', '1',
-                '-reconnect_streamed', '1',
-                '-reconnect_delay_max', '5',
-            ])
-            .save(outputUrl);
+        command.outputOptions([
+            '-ice_name', stationName || 'RadioHost.cloud',
+            '-ice_genre', stationGenre || 'Various',
+            '-ice_url', stationUrl || 'https://radiohost.cloud',
+            '-ice_description', stationDescription || 'Powered by RadioHost.cloud',
+            '-ice_public', '1',
+            '-reconnect', '1',
+            '-reconnect_streamed', '1',
+            '-reconnect_delay_max', '5'
+        ]).save(outputUrl);
     } else {
-        command.output('-f', 'null', '-');
-        serverStreamStatus = 'inactive';
-        broadcastStreamStatus();
+        command.save('-f null -');
     }
-        
+
+    let startTime;
+    currentFfmpegCommand = command;
+
     command
-        .on('start', (commandLine) => {
-            console.log('[FFMPEG] Spawned with concat playlist: ' + commandLine);
+        .on('start', () => {
+            console.log(`[FFMPEG] Playing track ${trackIndex}: ${track.title}`);
+            startTime = Date.now();
             sharedPlayerState.isPlaying = true;
-            sharedPlayerState.trackProgress = 0;
-            // Update the current playing item to the first in our list
-            const currentTrack = tracksToPlay[0];
-            sharedPlayerState.currentPlayingItemId = currentTrack.id;
-            sharedPlayerState.currentTrackIndex = sharedPlaylist.findIndex(t => t.id === currentTrack.id);
+            sharedPlayerState.currentTrackIndex = trackIndex;
+            sharedPlayerState.currentPlayingItemId = track.id;
+            db.write();
+            broadcastState();
 
             if (streamConfig && streamConfig.isEnabled) {
+                updateIcecastMetadata(track, streamConfig);
                 serverStreamStatus = 'broadcasting';
                 serverStreamError = null;
                 broadcastStreamStatus();
             }
-            db.write();
-            broadcastState();
-        })
-        .on('progress', (progress) => {
-            // Progress is now handled by the setInterval for better accuracy with track changes
+            
+            playoutProgressInterval = setInterval(() => {
+                sharedPlayerState.trackProgress = (Date.now() - startTime) / 1000;
+                broadcastState();
+            }, 500);
         })
         .on('end', async () => {
-            console.log('[FFMPEG] Concatenated playlist finished.');
+            if (currentFfmpegCommand !== command) return;
+            console.log(`[FFMPEG] Finished track: ${track.title}`);
+            clearInterval(playoutProgressInterval);
+            playoutProgressInterval = null;
             currentFfmpegCommand = null;
-            sharedPlayerState.isPlaying = false;
-            stopPlayout();
-            await db.write();
-            broadcastState();
-        })
-        .on('error', async (err, stdout, stderr) => {
-            if (currentFfmpegCommand !== command) {
-                 console.log(`[FFMPEG] Ignoring stale error.`);
-                return;
-            }
-            currentFfmpegCommand = null;
-
-            if (err.message.includes('SIGTERM')) {
-                console.log(`[FFMPEG] Concat playout was stopped intentionally.`);
-                return; 
-            }
-
-            console.error(`[FFMPEG] Concat playlist error: ffmpeg exited with code ${err.code}:`, stderr || err.message);
-            if (streamConfig && streamConfig.isEnabled) {
-                serverStreamStatus = 'error';
-                serverStreamError = stderr || err.message;
-                broadcastStreamStatus();
-            }
             
-            sharedPlayerState.isPlaying = false;
-            stopPlayout();
-            await db.write();
-            broadcastState();
+            if (sharedPlayerState.stopAfterTrackId === track.id) {
+                console.log('[Playout] Stop after track triggered.');
+                sharedPlayerState.isPlaying = false;
+                sharedPlayerState.stopAfterTrackId = null;
+                db.write();
+                broadcastState();
+            } else {
+                const studioData = db.data.userdata[studioClientEmail];
+                const shouldRemove = studioData?.settings?.playoutPolicy?.removePlayedTracks;
+                if (shouldRemove) {
+                    db.data.sharedPlaylist.splice(trackIndex, 1);
+                    await db.write();
+                    playTrack(trackIndex); // Next track is now at the same index
+                } else {
+                    playTrack(trackIndex + 1);
+                }
+            }
+        })
+        .on('error', (err) => {
+            if (currentFfmpegCommand !== command) return;
+            if (!err.message.includes('SIGTERM')) {
+                console.error(`[FFMPEG] Error playing ${track.title}:`, err.message);
+                playTrack(trackIndex + 1);
+            } else {
+                console.log(`[FFMPEG] Playout stopped intentionally for ${track.title}.`);
+            }
+            clearInterval(playoutProgressInterval);
+            playoutProgressInterval = null;
+            currentFfmpegCommand = null;
         });
-        
-    currentFfmpegCommand = command;
+};
+
+const startPlayout = () => {
+    const { sharedPlayerState } = db.data;
+    console.log(`[Playout] Starting playout from index ${sharedPlayerState.currentTrackIndex}`);
+    playTrack(sharedPlayerState.currentTrackIndex);
 };
 
 
@@ -878,12 +804,11 @@ wss.on('connection', async (ws, req) => {
                                 const direction = command === 'next' ? 1 : -1;
                                 const nextIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, direction);
                                 if (nextIndex !== -1) {
-                                    sharedPlayerState.currentTrackIndex = nextIndex;
-                                    const nextItem = sharedPlaylist[nextIndex];
-                                    sharedPlayerState.currentPlayingItemId = nextItem.id;
                                     if (sharedPlayerState.isPlaying) {
-                                        startPlayout();
+                                        playTrack(nextIndex);
                                     } else {
+                                        sharedPlayerState.currentTrackIndex = nextIndex;
+                                        sharedPlayerState.currentPlayingItemId = sharedPlaylist[nextIndex].id;
                                         sharedPlayerState.trackProgress = 0;
                                         stateChanged = true;
                                     }
@@ -897,7 +822,6 @@ wss.on('connection', async (ws, req) => {
                                 } else {
                                     stopPlayout();
                                 }
-                                stateChanged = true; // State is broadcast from within start/stop
                                 break;
                             }
                             case 'toggleAutoMode': {
@@ -920,13 +844,8 @@ wss.on('connection', async (ws, req) => {
                             case 'playTrack': {
                                 const { itemId } = payload;
                                 const targetIndex = sharedPlaylist.findIndex(item => item.id === itemId);
-                                if (targetIndex !== -1) {
-                                    const newTrack = sharedPlaylist[targetIndex];
-                                    if (!newTrack.markerType) {
-                                        sharedPlayerState.currentTrackIndex = targetIndex;
-                                        sharedPlayerState.isPlaying = true;
-                                        startPlayout();
-                                    }
+                                if (targetIndex !== -1 && !sharedPlaylist[targetIndex].markerType) {
+                                    playTrack(targetIndex);
                                 }
                                 break;
                             }
@@ -969,24 +888,25 @@ wss.on('connection', async (ws, req) => {
                                 break;
                             }
                              case 'removeFromPlaylist': {
-                                const { itemId } = payload;
-                                const newPlaylist = sharedPlaylist.filter(item => item.id !== itemId);
-                                if (sharedPlayerState.currentPlayingItemId === itemId) {
-                                    const wasPlaying = sharedPlayerState.isPlaying;
-                                    sharedPlayerState.isPlaying = false;
-                                    const firstPlayable = findNextPlayableIndex(newPlaylist, -1, 1);
-                                    sharedPlayerState.currentTrackIndex = firstPlayable > -1 ? firstPlayable : 0;
-                                    const nextItem = newPlaylist[sharedPlayerState.currentTrackIndex];
-                                    sharedPlayerState.currentPlayingItemId = nextItem ? nextItem.id : null;
-                                    if(wasPlaying) { // if it was playing, start the next one
-                                       sharedPlayerState.isPlaying = true;
-                                       startPlayout();
-                                    } else {
-                                       stopPlayout();
+                                const originalIndex = sharedPlaylist.findIndex(item => item.id === payload.itemId);
+                                if (originalIndex === -1) break;
+
+                                const newPlaylist = sharedPlaylist.filter(item => item.id !== payload.itemId);
+                                const wasPlaying = sharedPlayerState.isPlaying;
+
+                                if (sharedPlayerState.currentPlayingItemId === payload.itemId) {
+                                    // The currently playing track was removed
+                                    stopPlayout(false);
+                                    if (wasPlaying) {
+                                        const nextPlayableIndex = findNextPlayableIndex(newPlaylist, originalIndex - 1, 1);
+                                        if (nextPlayableIndex > -1) {
+                                            playTrack(nextPlayableIndex);
+                                        }
                                     }
                                 } else {
-                                    const newIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
-                                    if(newIndex > -1) sharedPlayerState.currentTrackIndex = newIndex;
+                                    // A different track was removed, just update the index
+                                    const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
+                                    if(newCurrentIndex > -1) sharedPlayerState.currentTrackIndex = newCurrentIndex;
                                 }
                                 db.data.sharedPlaylist = newPlaylist;
                                 stateChanged = true;
@@ -1012,12 +932,11 @@ wss.on('connection', async (ws, req) => {
                             }
                             case 'clearPlaylist': {
                                 db.data.sharedPlaylist = [];
-                                sharedPlayerState.isPlaying = false;
-                                stopPlayout();
                                 sharedPlayerState.currentPlayingItemId = null;
                                 sharedPlayerState.currentTrackIndex = 0;
                                 sharedPlayerState.trackProgress = 0;
                                 sharedPlayerState.stopAfterTrackId = null;
+                                stopPlayout(false); // Stop playout but don't broadcast yet
                                 stateChanged = true;
                                 break;
                             }
@@ -1560,6 +1479,9 @@ app.post('/api/userdata/:email', async (req, res) => {
     db.data.userdata[email] = req.body;
     await db.write();
 
+    // After updating user data, re-evaluate auto-backup settings
+    setupAutoBackup();
+
     const newConfig = req.body?.settings?.playoutPolicy?.streamingConfig;
     if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
         console.log('[Config] Streaming config changed. Restarting playout if active.');
@@ -1657,6 +1579,49 @@ app.get('/stream', async (req, res) => {
     }
 });
 
+// --- Server-side Backup Logic ---
+const performBackup = async () => {
+    await db.read();
+    const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
+    const backupFileName = `radiohost-backup-${timestamp}.json`;
+    const backupFilePath = path.join(backupDir, backupFileName);
+
+    const backupData = {
+        type: 'radiohost.cloud_backup',
+        version: '1.0.0',
+        timestamp: new Date().toISOString(),
+        data: db.data
+    };
+
+    try {
+        await fsPromises.writeFile(backupFilePath, JSON.stringify(backupData, null, 2));
+        console.log(`[Backup] Successfully created backup: ${backupFileName}`);
+    } catch (error) {
+        console.error('[Backup] Failed to create backup:', error);
+    }
+};
+
+let backupInterval = null;
+
+const setupAutoBackup = async () => {
+    if (backupInterval) {
+        clearInterval(backupInterval);
+    }
+    await db.read();
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
+    const settings = studioData?.settings;
+
+    if (settings?.isAutoBackupEnabled && settings?.autoBackupInterval > 0) {
+        const intervalHours = settings.autoBackupInterval;
+        console.log(`[Backup] Setting up automatic backup every ${intervalHours} hour(s).`);
+        backupInterval = setInterval(performBackup, intervalHours * 60 * 60 * 1000);
+    } else {
+        console.log('[Backup] Automatic interval backup is disabled.');
+    }
+};
+
+
 // --- Serve Frontend ---
 // This must be placed after all API and stream routes to function as a catch-all for the SPA.
 const distPath = path.join(__dirname, 'dist');
@@ -1684,14 +1649,22 @@ if (fs.existsSync(distPath)) {
     console.log('[Startup] Performing initial media library scan...');
     libraryState.children = await scanMediaToTree(mediaDir);
     console.log(`[Startup] Scan complete. Found ${libraryState.children.length} items in root.`);
+
+    await db.read();
     const studioUser = db.data.users.find(u => u.role === 'studio');
-    if (studioUser && db.data.userdata[studioUser.email]?.settings.isAutoModeEnabled) {
+    const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
+    if (studioData?.settings?.isAutoModeEnabled) {
         if (db.data.sharedPlaylist.length > 0) {
             db.data.sharedPlayerState.isPlaying = true;
             await db.write();
             startPlayout();
         }
     }
+    if (studioData?.settings?.isAutoBackupOnStartupEnabled) {
+        console.log('[Backup] Performing startup backup as per settings.');
+        performBackup();
+    }
+    setupAutoBackup();
 })();
 
 // --- Start Server ---
