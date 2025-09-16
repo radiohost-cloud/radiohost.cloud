@@ -69,9 +69,7 @@ const defaultPlayoutPolicy: PlayoutPolicy = {
     voiceTrackEditorPreviewDuration: 5, // 5 seconds default
     streamingConfig: {
         isEnabled: false,
-        serverUrl: 'localhost',
-        port: 8000,
-        mountPoint: 'live',
+        serverAddress: 'stream.radiohost.cloud:8000/live',
         username: 'source',
         password: 'yourpassword',
         bitrate: 128,

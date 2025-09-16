@@ -421,17 +421,17 @@ const startPlayout = () => {
         .inputOptions('-re'); // Read input at native frame rate
 
     if (streamConfig && streamConfig.isEnabled) {
-        const { username, password, serverUrl, port, mountPoint, bitrate, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
+        const { username, password, serverAddress, bitrate, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
         
-        // FINAL ROBUST FIX: Isolate hostname and clean mount point to build a guaranteed-valid URL.
-        const cleanHostname = serverUrl.replace(/^https?:\/\//, '').split('/')[0];
-
-        let cleanMount = (mountPoint || '').trim().replace(/^\/+|\/+$/g, '');
-        if (cleanMount === '') {
-            cleanMount = 'live';
+        if (!serverAddress) {
+            console.error('[FFMPEG] Stream is enabled, but Server Address is not configured.');
+            serverStreamStatus = 'error';
+            serverStreamError = 'Server Address is not configured in Settings > Stream.';
+            broadcastStreamStatus();
+            return;
         }
 
-        const outputUrl = `icecast://${username}:${password}@${cleanHostname}:${port}/${cleanMount}`;
+        const outputUrl = `icecast://${username}:${password}@${serverAddress}`;
 
         serverStreamStatus = 'connecting';
         broadcastStreamStatus();

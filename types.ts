@@ -2,6 +2,7 @@
 
 
 
+
 export enum TrackType {
   SONG = 'Song',
   JINGLE = 'Jingle',
@@ -83,9 +84,7 @@ export interface CartwallPage {
 // FIX: Add StreamingConfig interface and property to PlayoutPolicy
 export interface StreamingConfig {
   isEnabled: boolean;
-  serverUrl: string;
-  port: number;
-  mountPoint: string;
+  serverAddress: string;
   username: string;
   password: string;
   bitrate: number;

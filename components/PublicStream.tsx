@@ -68,20 +68,9 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                     <Toggle id="stream-enabled" checked={streamingConfig.isEnabled} onChange={(v) => handleConfigChange('isEnabled', v)} />
                 </div>
                 
-                <div className="grid grid-cols-2 gap-4">
-                    <div>
-                        <label htmlFor="serverUrl" className="block text-sm font-medium mb-1">Server URL</label>
-                        <input type="text" id="serverUrl" value={streamingConfig.serverUrl} onChange={e => handleConfigChange('serverUrl', e.target.value)} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"/>
-                    </div>
-                    <div>
-                        <label htmlFor="port" className="block text-sm font-medium mb-1">Port</label>
-                        <input type="number" id="port" value={streamingConfig.port} onChange={e => handleConfigChange('port', Number(e.target.value))} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"/>
-                    </div>
-                </div>
-
                 <div>
-                    <label htmlFor="mountPoint" className="block text-sm font-medium mb-1">Mount Point</label>
-                    <input type="text" id="mountPoint" value={streamingConfig.mountPoint} onChange={e => handleConfigChange('mountPoint', e.target.value)} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"/>
+                    <label htmlFor="serverAddress" className="block text-sm font-medium mb-1">Server Address</label>
+                    <input type="text" id="serverAddress" value={streamingConfig.serverAddress} onChange={e => handleConfigChange('serverAddress', e.target.value)} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed" placeholder="hostname:port/mountpoint"/>
                 </div>
 
                  <div className="grid grid-cols-2 gap-4">
