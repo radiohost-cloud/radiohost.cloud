@@ -400,6 +400,7 @@ const broadcastState = () => {
 
 const broadcastPublicMetadata = async () => {
     await db.read();
+    const settings = await getStationSettings();
     const { sharedPlayerState, sharedPlaylist } = db.data;
 
     let metadataPayload = {
@@ -431,7 +432,9 @@ const broadcastPublicMetadata = async () => {
 
     const message = JSON.stringify({
         type: 'metadataUpdate',
-        payload: { ...metadataPayload, logoSrc: currentLogoSrc }
+        payload: {
+            nowPlaying: { ...metadataPayload, logoSrc: settings.logoSrc }
+        }
     });
 
     browserPlayerClients.forEach(ws => {
@@ -1573,15 +1576,17 @@ const getPlayerPageHTML = (stationName) => `
 
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                if (data.type === 'initial-state') {
-                    publicStreamUrl = data.payload.publicStreamUrl;
-                     if (publicStreamUrl && !audioPlayer.src) {
-                        // Set src but don't play until user clicks
-                        audioPlayer.src = publicStreamUrl;
+                if (data.type === 'initial-state' || data.type === 'metadataUpdate') {
+                    const nowPlaying = data.payload.nowPlaying;
+                    if (data.type === 'initial-state' && data.payload.publicStreamUrl) {
+                        publicStreamUrl = data.payload.publicStreamUrl;
+                        if (publicStreamUrl && !audioPlayer.src) {
+                            audioPlayer.src = publicStreamUrl;
+                        }
                     }
-                    updateMetadataDisplay(data.payload.nowPlaying);
-                } else if (data.type === 'metadataUpdate') {
-                    updateMetadataDisplay(data.payload);
+                    if (nowPlaying) {
+                        updateMetadataDisplay(nowPlaying);
+                    }
                 } else if (data.type === 'chatMessage') {
                     addChatMessage(data.payload);
                     if (!chatWindow.classList.contains('open')) {
