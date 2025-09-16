@@ -1,4 +1,3 @@
-
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
 // To run: `npm install express cors multer lowdb ws node-id3 fluent-ffmpeg` then `node server.js`
@@ -42,6 +41,7 @@ const defaultData = {
         trackProgress: 0,
         stopAfterTrackId: null,
     },
+    playoutHistory: [],
 };
 const db = new Low(adapter, defaultData);
 await db.read();
@@ -452,8 +452,8 @@ const playTrack = async (trackIndex) => {
     await db.read();
     const { sharedPlaylist, sharedPlayerState } = db.data;
     
-    if (trackIndex >= sharedPlaylist.length) {
-        console.log('[Playout] Reached end of playlist.');
+    if (trackIndex >= sharedPlaylist.length || trackIndex < 0) {
+        console.log('[Playout] Reached end of playlist or invalid index.');
         sharedPlayerState.isPlaying = false;
         await db.write();
         broadcastState();
@@ -532,22 +532,42 @@ const playTrack = async (trackIndex) => {
             playoutProgressInterval = null;
             currentFfmpegCommand = null;
             
+            let nextTrackIndexToPlay = -1;
+
+            // Add to history
+            db.data.playoutHistory.push({
+                trackId: track.originalId || track.id,
+                artist: track.artist,
+                title: track.title,
+                playedAt: Date.now(),
+            });
+            if (db.data.playoutHistory.length > 500) {
+                db.data.playoutHistory = db.data.playoutHistory.slice(-500);
+            }
+
+            const studioData = db.data.userdata[studioClientEmail];
+            const shouldRemove = studioData?.settings?.playoutPolicy?.removePlayedTracks;
+
+            if (shouldRemove) {
+                db.data.sharedPlaylist.splice(trackIndex, 1);
+                nextTrackIndexToPlay = trackIndex; // The next track is now at the current index
+            } else {
+                nextTrackIndexToPlay = trackIndex + 1;
+            }
+
             if (sharedPlayerState.stopAfterTrackId === track.id) {
                 console.log('[Playout] Stop after track triggered.');
                 sharedPlayerState.isPlaying = false;
                 sharedPlayerState.stopAfterTrackId = null;
-                db.write();
-                broadcastState();
+                nextTrackIndexToPlay = -1; // Don't play next
+            }
+            
+            await db.write(); // Write history and potential playlist changes
+
+            if (nextTrackIndexToPlay !== -1) {
+                playTrack(nextTrackIndexToPlay);
             } else {
-                const studioData = db.data.userdata[studioClientEmail];
-                const shouldRemove = studioData?.settings?.playoutPolicy?.removePlayedTracks;
-                if (shouldRemove) {
-                    db.data.sharedPlaylist.splice(trackIndex, 1);
-                    await db.write();
-                    playTrack(trackIndex); // Next track is now at the same index
-                } else {
-                    playTrack(trackIndex + 1);
-                }
+                broadcastState(); // Broadcast the stopped state
             }
         })
         .on('error', (err) => {
@@ -570,6 +590,180 @@ const startPlayout = () => {
     playTrack(sharedPlayerState.currentTrackIndex);
 };
 
+// --- Auto-Fill Logic ---
+let autoFillInterval = null;
+
+const findFolderInServerTree = (node, folderId) => {
+    if (node.id === folderId) return node;
+    for (const child of node.children) {
+        if (child.type === 'folder') {
+            const found = findFolderInServerTree(child, folderId);
+            if (found) return found;
+        }
+    }
+    return null;
+};
+
+const getAllTracksFromNode = (node) => {
+    let tracks = [];
+    if (node.type !== 'folder') {
+        tracks.push(node);
+    } else {
+        for (const child of node.children) {
+            tracks = tracks.concat(getAllTracksFromNode(child));
+        }
+    }
+    return tracks;
+};
+
+const performAutofill = async () => {
+    console.log('[Auto-Fill] Performing autofill...');
+    await db.read();
+
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    if (!studioUser) return;
+    const studioData = db.data.userdata[studioUser.email];
+    const policy = studioData?.settings?.playoutPolicy;
+
+    if (!policy || !policy.isAutoFillEnabled || !policy.autoFillSourceId) {
+        console.log('[Auto-Fill] Autofill is disabled or not configured properly.');
+        return;
+    }
+
+    const { 
+        autoFillSourceType, 
+        autoFillSourceId, 
+        autoFillTargetDuration, 
+        artistSeparation, 
+        titleSeparation 
+    } = policy;
+    const targetDurationSecs = autoFillTargetDuration * 60;
+    const artistSeparationMs = artistSeparation * 60 * 1000;
+    const titleSeparationMs = titleSeparation * 60 * 1000;
+
+    let sourceTracks = [];
+    if (autoFillSourceType === 'folder') {
+        const sourceFolder = findFolderInServerTree(libraryState, autoFillSourceId);
+        if (sourceFolder) {
+            sourceTracks = getAllTracksFromNode(sourceFolder);
+        }
+    } else if (autoFillSourceType === 'tag') {
+        sourceTracks = getAllTracksFromNode(libraryState)
+            .filter(t => t.tags && t.tags.includes(autoFillSourceId));
+    }
+
+    if (sourceTracks.length === 0) {
+        console.warn('[Auto-Fill] Source contains no tracks.');
+        return;
+    }
+
+    const eligibleTracks = sourceTracks.filter(track => {
+        // Check against playout history
+        const hasHistoryConflict = db.data.playoutHistory.some(entry => {
+            const timeSincePlayed = Date.now() - entry.playedAt;
+            if (entry.artist === track.artist && timeSincePlayed < artistSeparationMs) return true;
+            if (entry.title === track.title && timeSincePlayed < titleSeparationMs) return true;
+            return false;
+        });
+
+        if (hasHistoryConflict) return false;
+
+        // Check against the current playlist to avoid adding recent repeats
+        const hasPlaylistConflict = db.data.sharedPlaylist.some(item => {
+            if (item.markerType) return false;
+            if (item.artist === track.artist) return true;
+            if (item.title === track.title) return true;
+            return false;
+        });
+
+        return !hasPlaylistConflict;
+    });
+
+    if (eligibleTracks.length === 0) {
+        console.warn('[Auto-Fill] No eligible tracks found after applying separation rules.');
+        return;
+    }
+
+    const tracksToAdd = [];
+    let accumulatedDuration = 0;
+    const shuffledTracks = eligibleTracks.sort(() => 0.5 - Math.random());
+
+    for (const track of shuffledTracks) {
+        // Double-check against the tracks we're about to add in this batch
+        const hasBatchConflict = tracksToAdd.some(added => added.artist === track.artist || added.title === track.title);
+        if (!hasBatchConflict) {
+            tracksToAdd.push(track);
+            accumulatedDuration += track.duration;
+            if (accumulatedDuration >= targetDurationSecs) break;
+        }
+    }
+    
+    if (tracksToAdd.length > 0) {
+        const newPlaylistItems = tracksToAdd.map(track => ({
+            ...track,
+            id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            originalId: track.id,
+            addedBy: 'auto-fill',
+        }));
+
+        db.data.sharedPlaylist.push(...newPlaylistItems);
+        await db.write();
+        broadcastState();
+        console.log(`[Auto-Fill] Added ${tracksToAdd.length} tracks to the playlist.`);
+    } else {
+        console.log('[Auto-Fill] No tracks could be added in this cycle.');
+    }
+};
+
+const checkAndTriggerAutofill = async () => {
+    await db.read();
+    const { sharedPlaylist, sharedPlayerState } = db.data;
+    const { isPlaying, currentTrackIndex, trackProgress } = sharedPlayerState;
+
+    if (!isPlaying) return; // Only run when playing
+
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    if (!studioUser) return;
+    const studioData = db.data.userdata[studioUser.email];
+    const policy = studioData?.settings?.playoutPolicy;
+
+    if (!policy || !policy.isAutoFillEnabled) return;
+
+    let remainingDuration = 0;
+    const currentTrack = sharedPlaylist[currentTrackIndex];
+    if (currentTrack && !currentTrack.markerType) {
+        remainingDuration += (currentTrack.duration - trackProgress);
+    }
+    for (let i = currentTrackIndex + 1; i < sharedPlaylist.length; i++) {
+        const item = sharedPlaylist[i];
+        if (item && !item.markerType) {
+            remainingDuration += item.duration;
+        }
+    }
+
+    const remainingMinutes = remainingDuration / 60;
+    if (remainingMinutes < policy.autoFillLeadTime) {
+        console.log(`[Auto-Fill] Remaining playlist duration (${remainingMinutes.toFixed(1)} min) is below threshold (${policy.autoFillLeadTime} min). Triggering fill.`);
+        await performAutofill();
+    }
+};
+
+const setupAutoMode = async () => {
+    if (autoFillInterval) clearInterval(autoFillInterval);
+    autoFillInterval = null;
+    await db.read();
+    
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    if (!studioUser) return;
+    const studioData = db.data.userdata[studioUser.email];
+    
+    if (studioData?.settings?.isAutoModeEnabled) {
+        console.log('[Auto-Mode] Auto mode is enabled. Starting automation checks.');
+        autoFillInterval = setInterval(checkAndTriggerAutofill, 15000); // Check every 15 seconds
+    } else {
+        console.log('[Auto-Mode] Auto mode is disabled.');
+    }
+};
 
 // --- Main WebSocket Logic ---
 
@@ -837,6 +1031,7 @@ wss.on('connection', async (ws, req) => {
                                         sharedPlayerState.isPlaying = false;
                                         stopPlayout();
                                     }
+                                    setupAutoMode(); // Restart/stop the interval
                                     stateChanged = true;
                                 }
                                 break;
@@ -1481,6 +1676,7 @@ app.post('/api/userdata/:email', async (req, res) => {
 
     // After updating user data, re-evaluate auto-backup settings
     setupAutoBackup();
+    setupAutoMode(); // Also re-evaluate auto-mode settings
 
     const newConfig = req.body?.settings?.playoutPolicy?.streamingConfig;
     if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
@@ -1653,6 +1849,12 @@ if (fs.existsSync(distPath)) {
     await db.read();
     const studioUser = db.data.users.find(u => u.role === 'studio');
     const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
+    
+    // Setup automation and backups
+    setupAutoMode();
+    setupAutoBackup();
+    
+    // Start playout if auto mode was enabled from a previous session
     if (studioData?.settings?.isAutoModeEnabled) {
         if (db.data.sharedPlaylist.length > 0) {
             db.data.sharedPlayerState.isPlaying = true;
@@ -1660,11 +1862,12 @@ if (fs.existsSync(distPath)) {
             startPlayout();
         }
     }
+    
+    // Perform startup backup if enabled
     if (studioData?.settings?.isAutoBackupOnStartupEnabled) {
         console.log('[Backup] Performing startup backup as per settings.');
         performBackup();
     }
-    setupAutoBackup();
 })();
 
 // --- Start Server ---
