@@ -850,6 +850,58 @@ const setupAutoMode = async () => {
     }
 };
 
+const sendInitialPublicState = async (ws) => {
+    const settings = await getStationSettings();
+    const config = settings?.streamingConfig || {};
+
+    if (!config.publicPlayerEnabled) {
+        return;
+    }
+
+    await db.read();
+    const { sharedPlayerState, sharedPlaylist } = db.data;
+
+    let nowPlaying = {
+        title: 'Silence',
+        artist: 'RadioHost.cloud',
+        artworkUrl: null,
+        logoSrc: settings.logoSrc
+    };
+
+    if (sharedPlayerState.isPlaying && sharedPlayerState.currentPlayingItemId) {
+        const currentItem = sharedPlaylist.find(item => item.id === sharedPlayerState.currentPlayingItemId);
+        if (currentItem && currentItem.type !== 'marker') {
+            const fullTrackInfo = findTrackInServerTree(libraryState, currentItem.originalId || currentItem.id);
+            let artworkUrl = null;
+            if (fullTrackInfo) {
+                if (fullTrackInfo.remoteArtworkUrl) {
+                    artworkUrl = fullTrackInfo.remoteArtworkUrl;
+                } else if (fullTrackInfo.hasEmbeddedArtwork) {
+                    const artworkPath = (fullTrackInfo.originalId || fullTrackInfo.id).replace(/\.[^/.]+$/, ".jpg");
+                    artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
+                }
+            }
+            nowPlaying.title = currentItem.title;
+            nowPlaying.artist = currentItem.artist;
+            nowPlaying.artworkUrl = artworkUrl;
+        }
+    }
+
+    const initialState = {
+        publicStreamUrl: config.publicStreamUrl,
+        nowPlaying: nowPlaying
+    };
+
+    const message = JSON.stringify({
+        type: 'initial-state',
+        payload: initialState
+    });
+
+    if (ws.readyState === WebSocket.OPEN) {
+        ws.send(message);
+    }
+};
+
 wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const email = url.searchParams.get('email');
@@ -859,6 +911,8 @@ wss.on('connection', async (ws, req) => {
         console.log('[WebSocket] Browser Player Page connected.');
         ws.req = req;
         browserPlayerClients.add(ws);
+        
+        sendInitialPublicState(ws);
         
         ws.on('message', (message) => {
             try {
@@ -1472,21 +1526,6 @@ const getPlayerPageHTML = (stationName) => `
         let publicStreamUrl = '';
         let stationName = ${JSON.stringify(stationName || 'Live Stream')};
         let ws;
-        
-        const fetchInitialState = async () => {
-            try {
-                const response = await fetch('/api/public-initial-state');
-                const data = await response.json();
-                if (data.publicPlayerEnabled) {
-                    publicStreamUrl = data.publicStreamUrl;
-                    updateMetadataDisplay(data.nowPlaying);
-                } else {
-                    document.body.innerHTML = '<h1>Stream is currently offline.</h1>';
-                }
-            } catch (e) {
-                document.body.innerHTML = '<h1>Could not load stream configuration.</h1>';
-            }
-        };
 
         const updateMetadataDisplay = (metadata) => {
             if (!metadata) return;
@@ -1534,20 +1573,27 @@ const getPlayerPageHTML = (stationName) => `
 
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                if (data.type === 'chatMessage') {
+                if (data.type === 'initial-state') {
+                    publicStreamUrl = data.payload.publicStreamUrl;
+                     if (publicStreamUrl && !audioPlayer.src) {
+                        // Set src but don't play until user clicks
+                        audioPlayer.src = publicStreamUrl;
+                    }
+                    updateMetadataDisplay(data.payload.nowPlaying);
+                } else if (data.type === 'metadataUpdate') {
+                    updateMetadataDisplay(data.payload);
+                } else if (data.type === 'chatMessage') {
                     addChatMessage(data.payload);
                     if (!chatWindow.classList.contains('open')) {
                         chatNotification.style.display = 'block';
                     }
-                } else if (data.type === 'metadataUpdate') {
-                    updateMetadataDisplay(data.payload);
                 }
             };
             ws.onclose = () => setTimeout(connectWs, 5000);
         };
 
         const addChatMessage = (msg) => {
-            const isMe = msg.from === nicknameInput.value || msg.from === 'Studio' && nicknameInput.value === 'Studio';
+            const isMe = msg.from === nicknameInput.value || (msg.from === 'Studio' && (nicknameInput.value === 'Studio' || currentUser?.role === 'studio'));
             const msgDiv = document.createElement('div');
             msgDiv.className = 'chat-message ' + (isMe ? 'me' : 'other');
             
@@ -1599,52 +1645,10 @@ const getPlayerPageHTML = (stationName) => `
             }
         });
         
-        fetchInitialState().then(() => {
-            connectWs();
-        });
+        connectWs();
     </script>
 </body>
 </html>`;
-
-app.get('/api/public-initial-state', async (req, res) => {
-    const settings = await getStationSettings();
-    const config = settings?.streamingConfig || {};
-
-    await db.read();
-    const { sharedPlayerState, sharedPlaylist } = db.data;
-
-    let nowPlaying = {
-        title: 'Silence',
-        artist: 'RadioHost.cloud',
-        artworkUrl: null,
-        logoSrc: settings.logoSrc
-    };
-
-    if (sharedPlayerState.isPlaying && sharedPlayerState.currentPlayingItemId) {
-        const currentItem = sharedPlaylist.find(item => item.id === sharedPlayerState.currentPlayingItemId);
-        if (currentItem && currentItem.type !== 'marker') {
-            const fullTrackInfo = findTrackInServerTree(libraryState, currentItem.originalId || currentItem.id);
-            let artworkUrl = null;
-            if (fullTrackInfo) {
-                if (fullTrackInfo.remoteArtworkUrl) {
-                    artworkUrl = fullTrackInfo.remoteArtworkUrl;
-                } else if (fullTrackInfo.hasEmbeddedArtwork) {
-                    const artworkPath = (fullTrackInfo.originalId || fullTrackInfo.id).replace(/\.[^/.]+$/, ".jpg");
-                    artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
-                }
-            }
-            nowPlaying.title = currentItem.title;
-            nowPlaying.artist = currentItem.artist;
-            nowPlaying.artworkUrl = artworkUrl;
-        }
-    }
-
-    res.json({
-        publicPlayerEnabled: config.publicPlayerEnabled,
-        publicStreamUrl: config.publicStreamUrl,
-        nowPlaying: nowPlaying
-    });
-});
 
 app.post('/api/signup', async (req, res) => {
     const { email, password, nickname } = req.body;
