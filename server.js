@@ -1244,7 +1244,7 @@ const getPlayerPageHTML = (stationName) => `
                     navigator.mediaSession.metadata = new MediaMetadata({
                         title: data.title || '...',
                         artist: data.artist || 'RadioHost.cloud',
-                        album: '${stationName || 'Live Stream'}',
+                        album: ${JSON.stringify(stationName || 'Live Stream')},
                         artwork: data.artworkUrl ? [{ src: data.artworkUrl, sizes: '512x512' }] : []
                     });
                 }
@@ -1280,7 +1280,7 @@ const getPlayerPageHTML = (stationName) => `
         // Chat logic
         const connectWs = () => {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${window.location.host}/socket?clientType=playerPage`);
+            ws = new WebSocket(protocol + '//' + window.location.host + '/socket?clientType=playerPage');
 
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
