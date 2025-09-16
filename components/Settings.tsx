@@ -1,4 +1,5 @@
 
+
 import React, { useRef, useState } from 'react';
 import { type PlayoutPolicy } from '../types';
 import { DownloadIcon } from './icons/DownloadIcon';
@@ -262,6 +263,36 @@ const Settings: React.FC<SettingsProps> = ({
                             className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
                         />
                         <p className="text-xs text-neutral-500">The amount of the previous and next track to load into the editor for mixing.</p>
+                    </div>
+                </div>
+            </div>
+
+            <hr className="border-neutral-200 dark:border-neutral-800" />
+
+            <div>
+                <h2 className="text-xl font-semibold">API Integrations</h2>
+                <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-1">
+                    Connect to external services to enhance application features.
+                </p>
+                <div className="mt-4 space-y-4">
+                    <div>
+                        <label htmlFor="lastfm-api-key" className="block text-sm font-medium text-black dark:text-white mb-1">
+                            Last.fm API Key
+                        </label>
+                        <input
+                            id="lastfm-api-key"
+                            type="text"
+                            value={policy.lastFmApiKey || ''}
+                            onChange={(e) => handlePolicyChange('lastFmApiKey', e.target.value)}
+                            placeholder="Enter your Last.fm API key"
+                            className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm"
+                        />
+                        <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                            Required for the Last.fm Assistant feature. Get a key from the{' '}
+                            <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">
+                                Last.fm API website
+                            </a>.
+                        </p>
                     </div>
                 </div>
             </div>

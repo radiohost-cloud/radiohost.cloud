@@ -122,6 +122,7 @@ export interface PlayoutPolicy {
   autoFillSourceId: string | null;
   autoFillTargetDuration: number; // in minutes
   voiceTrackEditorPreviewDuration: number; // in seconds
+  lastFmApiKey?: string;
   streamingConfig: StreamingConfig;
 }
 

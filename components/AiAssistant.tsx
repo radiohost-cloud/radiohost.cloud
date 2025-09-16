@@ -3,9 +3,7 @@ import { type Track } from '../types';
 import { MusicNoteIcon } from './icons/MusicNoteIcon';
 
 // --- Last.fm API Service ---
-// WAŻNE: Potrzebujesz klucza API Last.fm. Możesz go uzyskać tutaj: https://www.last.fm/api/account/create
-// Zastąp 'YOUR_LASTFM_API_KEY_PLACEHOLDER' swoim kluczem.
-const LASTFM_API_KEY = 'YOUR_LASTFM_API_KEY_PLACEHOLDER';
+// The API key is now passed as a prop.
 const API_BASE_URL = 'https://ws.audioscrobbler.com/2.0/';
 
 // --- Interfejsy dla odpowiedzi API ---
@@ -45,14 +43,14 @@ interface FetchedInfo {
     artistInfo: LastFmArtistInfo | null;
 }
 
-const getTrackAndArtistInfo = async (artist: string, track: string): Promise<FetchedInfo> => {
+const getTrackAndArtistInfo = async (artist: string, track: string, apiKey: string): Promise<FetchedInfo> => {
     let trackInfo: LastFmTrackInfo | null = null;
     let artistInfo: LastFmArtistInfo | null = null;
 
     // Najpierw spróbuj pobrać połączone informacje o utworze, które zawierają podsumowanie biografii
     const trackInfoParams = new URLSearchParams({
         method: 'track.getInfo',
-        api_key: LASTFM_API_KEY,
+        api_key: apiKey,
         artist,
         track,
         format: 'json',
@@ -70,7 +68,7 @@ const getTrackAndArtistInfo = async (artist: string, track: string): Promise<Fet
     // Zawsze pobieraj pełne informacje o artyście dla biografii i podobnych artystów
     const artistInfoParams = new URLSearchParams({
         method: 'artist.getInfo',
-        api_key: LASTFM_API_KEY,
+        api_key: apiKey,
         artist: finalArtistName,
         format: 'json',
         autocorrect: '1'
@@ -99,13 +97,25 @@ const LoadingSpinner: React.FC = () => (
 const FONT_SIZES = ['text-xs', 'text-sm', 'text-base', 'text-lg', 'text-xl'];
 const DEFAULT_FONT_INDEX = 1;
 
-const LastFmAssistant: React.FC<{ currentTrack: Track | undefined }> = ({ currentTrack }) => {
+interface LastFmAssistantProps {
+    currentTrack: Track | undefined;
+    apiKey: string | undefined;
+}
+
+const LastFmAssistant: React.FC<LastFmAssistantProps> = ({ currentTrack, apiKey }) => {
     const [info, setInfo] = useState<FetchedInfo | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [fontIndex, setFontIndex] = useState(DEFAULT_FONT_INDEX);
 
     useEffect(() => {
+        if (!apiKey) {
+            setError('Please set your Last.fm API key in the Settings tab.');
+            setInfo(null);
+            setIsLoading(false);
+            return;
+        }
+
         if (!currentTrack || (!currentTrack.artist && !currentTrack.title)) {
             setInfo(null);
             setError(null);
@@ -121,10 +131,7 @@ const LastFmAssistant: React.FC<{ currentTrack: Track | undefined }> = ({ curren
                 if (currentTrack.artist?.toLowerCase() === 'radiohost.cloud') {
                      throw new Error('Nie można wyszukać informacji o wewnętrznym utworze.');
                 }
-                 if (LASTFM_API_KEY.includes('YOUR_LASTFM_API_KEY')) {
-                    throw new Error('Proszę skonfigurować klucz API Last.fm, aby korzystać z tej funkcji.');
-                }
-                const data = await getTrackAndArtistInfo(currentTrack.artist || '', currentTrack.title || '');
+                const data = await getTrackAndArtistInfo(currentTrack.artist || '', currentTrack.title || '', apiKey);
                 setInfo(data);
             } catch (err) {
                 if (err instanceof Error) {
@@ -140,7 +147,7 @@ const LastFmAssistant: React.FC<{ currentTrack: Track | undefined }> = ({ curren
 
         const debounceTimer = setTimeout(fetchInfo, 500);
         return () => clearTimeout(debounceTimer);
-    }, [currentTrack]);
+    }, [currentTrack, apiKey]);
 
     const changeFontSize = (direction: 'increase' | 'decrease' | 'reset') => {
         if (direction === 'reset') {
@@ -182,7 +189,7 @@ const LastFmAssistant: React.FC<{ currentTrack: Track | undefined }> = ({ curren
                 </div>
                 <div className="flex-grow overflow-y-auto p-3">
                     {isLoading ? <LoadingSpinner />
-                    : error ? <div className="text-red-500 text-center p-4">{error}</div>
+                    : error ? <div className="text-yellow-500 text-center p-4">{error}</div>
                     : info ? (
                         <div className={`space-y-4 text-black dark:text-white ${FONT_SIZES[fontIndex]}`}>
                             <div className="flex gap-4">
