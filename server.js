@@ -50,7 +50,7 @@ await db.read();
 db.data ||= { ...defaultData };
 for (const key of Object.keys(defaultData)) {
     if (db.data[key] === undefined) {
-        db.data[key] = defaultData[key as keyof typeof defaultData];
+        db.data[key] = defaultData[key];
     }
 }
 
