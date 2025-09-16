@@ -1,4 +1,3 @@
-
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
 // To run: `npm install express cors multer lowdb ws node-id3 fluent-ffmpeg` then `node server.js`
@@ -424,19 +423,16 @@ const startPlayout = () => {
     if (streamConfig && streamConfig.isEnabled) {
         const { username, password, serverUrl, port, mountPoint, bitrate, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
         
-        // This is the most robust way to handle this.
-        // We manually build the URL to ensure there is exactly one separator.
-        const host = `${serverUrl}:${port}`;
+        // FINAL FIX: Explicitly remove any protocol from the serverUrl before constructing the Icecast URL.
+        const cleanServerUrl = serverUrl.replace(/^https?:\/\//, '');
+
+        const host = `${cleanServerUrl}:${port}`;
         let mount = mountPoint ? String(mountPoint).trim() : '';
 
         if (mount === '/' || mount === '') {
             mount = 'live';
         }
 
-        // Now, combine them, ensuring a single slash.
-        // 1. Remove trailing slashes from host
-        // 2. Remove leading slashes from mount
-        // 3. Join with a single slash
         const cleanHost = host.replace(/\/+$/, '');
         const cleanMount = mount.replace(/^\/+/, '');
         const outputUrl = `icecast://${username}:${password}@${cleanHost}/${cleanMount}`;
@@ -1630,4 +1626,3 @@ if (fs.existsSync(distPath)) {
 server.listen(PORT, () => {
     console.log(`RadioHost.cloud server running on http://localhost:${PORT}`);
 });
-      
