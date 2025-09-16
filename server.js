@@ -442,9 +442,7 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
 let currentFfmpegCommand = null;
 let serverStreamStatus = 'inactive';
 let serverStreamError = null;
-let metadataTimeoutId = null;
-let playoutProgressInterval = null;
-
+let lastProgressBroadcast = 0;
 
 const broadcastStreamStatus = () => {
     if (!studioClientEmail) return;
@@ -489,10 +487,6 @@ const stopPlayout = (shouldBroadcast = true) => {
         currentFfmpegCommand.kill('SIGTERM');
         currentFfmpegCommand = null;
     }
-    if (playoutProgressInterval) {
-        clearInterval(playoutProgressInterval);
-        playoutProgressInterval = null;
-    }
     db.data.sharedPlayerState.isPlaying = false;
     db.data.sharedPlayerState.trackProgress = 0;
     db.write();
@@ -501,37 +495,47 @@ const stopPlayout = (shouldBroadcast = true) => {
     }
 };
 
-const playTrack = async (trackIndex) => {
-    stopPlayout(false);
+const startPlayoutFromIndex = async (startIndex) => {
+    stopPlayout(false); // Stop any existing command without broadcasting, as this function will handle it.
 
     await db.read();
-    const { sharedPlaylist, sharedPlayerState } = db.data;
-    
-    if (trackIndex >= sharedPlaylist.length || trackIndex < 0) {
-        console.log('[Playout] Reached end of playlist or invalid index.');
-        sharedPlayerState.isPlaying = false;
+    const { sharedPlaylist } = db.data;
+
+    const playoutSlice = sharedPlaylist.slice(startIndex).filter(i => !i.markerType);
+
+    if (playoutSlice.length === 0) {
+        console.log('[Playout] Reached end of playlist or no playable items found.');
+        db.data.sharedPlayerState.isPlaying = false;
         await db.write();
         broadcastState();
         return;
     }
-    
-    const track = sharedPlaylist[trackIndex];
-    if (!track || track.markerType) {
-        playTrack(trackIndex + 1);
-        return;
-    }
 
-    const trackPath = path.join(mediaDir, track.originalId || track.id);
-    if (!fs.existsSync(trackPath)) {
-        console.error(`[Playout] Track file not found: ${trackPath}. Skipping.`);
-        playTrack(trackIndex + 1);
-        return;
-    }
+    // Generate a temporary playlist file for ffmpeg's concat protocol
+    const playlistFilePath = path.join(__dirname, 'playlist.txt');
+    const playlistContent = playoutSlice
+        .map(track => `file '${path.join(mediaDir, track.originalId || track.id)}'`)
+        .join('\n');
+    await fsPromises.writeFile(playlistFilePath, playlistContent);
+    
+    // Create a map to translate total stream time to individual track progress
+    const trackTimings = new Map();
+    let cumulativeDuration = 0;
+    playoutSlice.forEach((track, index) => {
+        trackTimings.set(index, { 
+            trackId: track.id, 
+            startTime: cumulativeDuration,
+            duration: track.duration 
+        });
+        cumulativeDuration += track.duration;
+    });
 
     const studioData = db.data.userdata[studioClientEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
 
-    const command = ffmpeg(trackPath).inputOptions(['-re']);
+    const command = ffmpeg()
+        .input(playlistFilePath)
+        .inputOptions(['-f', 'concat', '-safe', '0', '-re']); // Use concat demuxer
 
     command.audioCodec('libmp3lame')
            .audioBitrate(streamConfig?.bitrate || 128)
@@ -552,96 +556,87 @@ const playTrack = async (trackIndex) => {
             '-reconnect_delay_max', '5'
         ]).save(outputUrl);
     } else {
-        command.save('-f null -');
+        command.save('-f null -'); // Play to null output if streaming is disabled
     }
 
-    let startTime;
     currentFfmpegCommand = command;
 
     command
         .on('start', () => {
-            console.log(`[FFMPEG] Playing track ${trackIndex}: ${track.title}`);
-            startTime = Date.now();
-            sharedPlayerState.isPlaying = true;
-            sharedPlayerState.currentTrackIndex = trackIndex;
-            sharedPlayerState.currentPlayingItemId = track.id;
+            console.log(`[FFMPEG] Started continuous playout from track index ${startIndex}.`);
+            db.data.sharedPlayerState.isPlaying = true;
             db.write();
-            broadcastState();
-
+            broadcastState(); // Initial broadcast to show playback has started
+            
             if (streamConfig && streamConfig.isEnabled) {
-                updateIcecastMetadata(track, streamConfig);
                 serverStreamStatus = 'broadcasting';
                 serverStreamError = null;
                 broadcastStreamStatus();
             }
+        })
+        .on('progress', (progress) => {
+            if (currentFfmpegCommand !== command) return;
+
+            const totalSecondsElapsed = progress.timemark.split(':').reduce((acc, time) => (60 * acc) + +time, 0);
             
-            playoutProgressInterval = setInterval(() => {
-                sharedPlayerState.trackProgress = (Date.now() - startTime) / 1000;
-                broadcastState();
-            }, 500);
+            let currentTrackPlaylistIndex = -1;
+            let currentTrackProgress = 0;
+            let currentTrackId = null;
+
+            for (const [index, timing] of trackTimings.entries()) {
+                if (totalSecondsElapsed >= timing.startTime) {
+                    currentTrackPlaylistIndex = startIndex + index;
+                    currentTrackProgress = totalSecondsElapsed - timing.startTime;
+                    currentTrackId = timing.trackId;
+                } else {
+                    break;
+                }
+            }
+            
+            if (currentTrackPlaylistIndex !== -1) {
+                const { sharedPlayerState } = db.data;
+                const trackChanged = sharedPlayerState.currentPlayingItemId !== currentTrackId;
+
+                sharedPlayerState.currentTrackIndex = currentTrackPlaylistIndex;
+                sharedPlayerState.currentPlayingItemId = currentTrackId;
+                sharedPlayerState.trackProgress = currentTrackProgress;
+
+                if (trackChanged && streamConfig && streamConfig.isEnabled) {
+                    const currentTrack = sharedPlaylist[currentTrackPlaylistIndex];
+                    if(currentTrack) updateIcecastMetadata(currentTrack, streamConfig);
+                }
+
+                const now = Date.now();
+                if (now - lastProgressBroadcast > 1000) { // Throttle state broadcasts
+                    broadcastState();
+                    lastProgressBroadcast = now;
+                }
+            }
         })
         .on('end', async () => {
             if (currentFfmpegCommand !== command) return;
-            console.log(`[FFMPEG] Finished track: ${track.title}`);
-            clearInterval(playoutProgressInterval);
-            playoutProgressInterval = null;
+            console.log('[FFMPEG] Finished entire playout segment.');
             currentFfmpegCommand = null;
-            
-            let nextTrackIndexToPlay = -1;
-
-            db.data.playoutHistory.push({
-                trackId: track.originalId || track.id,
-                artist: track.artist,
-                title: track.title,
-                playedAt: Date.now(),
-            });
-            if (db.data.playoutHistory.length > 500) {
-                db.data.playoutHistory = db.data.playoutHistory.slice(-500);
-            }
-
-            const studioData = db.data.userdata[studioClientEmail];
-            const shouldRemove = studioData?.settings?.playoutPolicy?.removePlayedTracks;
-
-            if (shouldRemove) {
-                db.data.sharedPlaylist.splice(trackIndex, 1);
-                nextTrackIndexToPlay = trackIndex;
-            } else {
-                nextTrackIndexToPlay = trackIndex + 1;
-            }
-
-            if (sharedPlayerState.stopAfterTrackId === track.id) {
-                console.log('[Playout] Stop after track triggered.');
-                sharedPlayerState.isPlaying = false;
-                sharedPlayerState.stopAfterTrackId = null;
-                nextTrackIndexToPlay = -1;
-            }
-            
+            db.data.sharedPlayerState.isPlaying = false;
             await db.write();
-
-            if (nextTrackIndexToPlay !== -1) {
-                playTrack(nextTrackIndexToPlay);
-            } else {
-                broadcastState();
-            }
+            broadcastState();
+            // Here you could trigger autofill or other end-of-playlist logic
         })
         .on('error', (err) => {
             if (currentFfmpegCommand !== command) return;
-            if (!err.message.includes('SIGTERM')) {
-                console.error(`[FFMPEG] Error playing ${track.title}:`, err.message);
-                playTrack(trackIndex + 1);
+            if (!err.message.includes('SIGTERM')) { // Ignore intentional stop signals
+                console.error('[FFMPEG] Continuous playout error:', err.message);
+                serverStreamStatus = 'error';
+                serverStreamError = err.message;
+                broadcastStreamStatus();
             } else {
-                console.log(`[FFMPEG] Playout stopped intentionally for ${track.title}.`);
+                console.log('[FFMPEG] Continuous playout stopped intentionally.');
             }
-            clearInterval(playoutProgressInterval);
-            playoutProgressInterval = null;
             currentFfmpegCommand = null;
+            db.data.sharedPlayerState.isPlaying = false;
+            db.write();
+            broadcastState();
         });
-};
-
-const startPlayout = () => {
-    const { sharedPlayerState } = db.data;
-    console.log(`[Playout] Starting playout from index ${sharedPlayerState.currentTrackIndex}`);
-    playTrack(sharedPlayerState.currentTrackIndex);
 };
 
 let autoFillInterval = null;
@@ -753,6 +748,11 @@ const performAutofill = async () => {
         await db.write();
         broadcastState();
         console.log(`[Auto-Fill] Added ${tracksToAdd.length} tracks to the playlist.`);
+        
+        // If playback was active, restart it to include the new tracks
+        if (db.data.sharedPlayerState.isPlaying) {
+            startPlayoutFromIndex(db.data.sharedPlayerState.currentTrackIndex);
+        }
     } else {
         console.log('[Auto-Fill] No tracks could be added in this cycle due to separation rules.');
     }
@@ -930,7 +930,6 @@ wss.on('connection', async (ws, req) => {
                 
                         await db.read();
                 
-                        let stateChanged = false;
                         const { sharedPlaylist, sharedPlayerState } = db.data;
                 
                         switch (command) {
@@ -966,19 +965,15 @@ wss.on('connection', async (ws, req) => {
                                 const { folderId, newTags } = payload;
                                 if (!folderId || !newTags) break;
                             
-                                // Ensure metadata object exists
                                 if (!db.data.folderMetadata) db.data.folderMetadata = {};
                             
-                                // 1. Apply tags to the target folder itself
                                 db.data.folderMetadata[folderId] = {
                                     ...(db.data.folderMetadata[folderId] || {}),
                                     tags: newTags
                                 };
                             
-                                // 2. Apply tags recursively to all children (subfolders and files)
                                 await applyTagsRecursively(folderId, newTags, db);
                             
-                                // 3. Save changes to DB and refresh the library for all clients
                                 await db.write();
                                 await refreshAndBroadcastLibrary();
                                 break;
@@ -1060,12 +1055,13 @@ wss.on('connection', async (ws, req) => {
                                 const nextIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, direction);
                                 if (nextIndex !== -1) {
                                     if (sharedPlayerState.isPlaying) {
-                                        playTrack(nextIndex);
+                                        startPlayoutFromIndex(nextIndex);
                                     } else {
                                         sharedPlayerState.currentTrackIndex = nextIndex;
                                         sharedPlayerState.currentPlayingItemId = sharedPlaylist[nextIndex].id;
                                         sharedPlayerState.trackProgress = 0;
-                                        stateChanged = true;
+                                        await db.write();
+                                        broadcastState();
                                     }
                                 }
                                 break;
@@ -1073,7 +1069,7 @@ wss.on('connection', async (ws, req) => {
                             case 'togglePlay': {
                                 sharedPlayerState.isPlaying = !sharedPlayerState.isPlaying;
                                 if (sharedPlayerState.isPlaying) {
-                                    startPlayout();
+                                    startPlayoutFromIndex(sharedPlayerState.currentTrackIndex);
                                 } else {
                                     stopPlayout();
                                 }
@@ -1087,13 +1083,14 @@ wss.on('connection', async (ws, req) => {
                                     
                                     if (payload.enabled && !sharedPlayerState.isPlaying && sharedPlaylist.length > 0) {
                                         sharedPlayerState.isPlaying = true;
-                                        startPlayout();
+                                        startPlayoutFromIndex(sharedPlayerState.currentTrackIndex);
                                     } else if (!payload.enabled && sharedPlayerState.isPlaying) {
                                         sharedPlayerState.isPlaying = false;
                                         stopPlayout();
                                     }
                                     setupAutoMode();
-                                    stateChanged = true;
+                                    await db.write();
+                                    broadcastState();
                                 }
                                 break;
                             }
@@ -1101,13 +1098,14 @@ wss.on('connection', async (ws, req) => {
                                 const { itemId } = payload;
                                 const targetIndex = sharedPlaylist.findIndex(item => item.id === itemId);
                                 if (targetIndex !== -1 && !sharedPlaylist[targetIndex].markerType) {
-                                    playTrack(targetIndex);
+                                    startPlayoutFromIndex(targetIndex);
                                 }
                                 break;
                             }
                              case 'setStopAfterTrackId': {
                                 sharedPlayerState.stopAfterTrackId = payload.id;
-                                stateChanged = true;
+                                await db.write();
+                                broadcastState();
                                 break;
                             }
                             case 'insertTrack': {
@@ -1117,7 +1115,12 @@ wss.on('connection', async (ws, req) => {
                                 const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
                                 newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, track);
                                 db.data.sharedPlaylist = newPlaylist;
-                                stateChanged = true;
+                                await db.write();
+                                broadcastState();
+                                if(sharedPlayerState.isPlaying) {
+                                    const newCurrentIndex = db.data.sharedPlaylist.findIndex(i => i.id === sharedPlayerState.currentPlayingItemId);
+                                    if (newCurrentIndex !== -1) startPlayoutFromIndex(newCurrentIndex);
+                                }
                                 break;
                             }
                             case 'insertTimeMarker': {
@@ -1127,7 +1130,8 @@ wss.on('connection', async (ws, req) => {
                                 const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
                                 newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, marker);
                                 db.data.sharedPlaylist = newPlaylist;
-                                stateChanged = true;
+                                await db.write();
+                                broadcastState();
                                 break;
                             }
                             case 'updateTimeMarker': {
@@ -1140,30 +1144,33 @@ wss.on('connection', async (ws, req) => {
                                     return item;
                                 });
                                 db.data.sharedPlaylist = newPlaylist;
-                                stateChanged = true;
+                                await db.write();
+                                broadcastState();
                                 break;
                             }
                              case 'removeFromPlaylist': {
-                                const originalIndex = sharedPlaylist.findIndex(item => item.id === payload.itemId);
+                                const itemId = payload.itemId;
+                                const originalIndex = sharedPlaylist.findIndex(item => item.id === itemId);
                                 if (originalIndex === -1) break;
 
-                                const newPlaylist = sharedPlaylist.filter(item => item.id !== payload.itemId);
+                                const wasPlayingThisItem = sharedPlayerState.currentPlayingItemId === itemId;
                                 const wasPlaying = sharedPlayerState.isPlaying;
 
-                                if (sharedPlayerState.currentPlayingItemId === payload.itemId) {
+                                const newPlaylist = sharedPlaylist.filter(item => item.id !== itemId);
+                                db.data.sharedPlaylist = newPlaylist;
+
+                                if (wasPlayingThisItem) {
                                     stopPlayout(false);
-                                    if (wasPlaying) {
-                                        const nextPlayableIndex = findNextPlayableIndex(newPlaylist, originalIndex - 1, 1);
-                                        if (nextPlayableIndex > -1) {
-                                            playTrack(nextPlayableIndex);
-                                        }
+                                    if(wasPlaying) {
+                                        startPlayoutFromIndex(originalIndex);
                                     }
                                 } else {
-                                    const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
-                                    if(newCurrentIndex > -1) sharedPlayerState.currentTrackIndex = newCurrentIndex;
+                                     const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
+                                     sharedPlayerState.currentTrackIndex = newCurrentIndex > -1 ? newCurrentIndex : 0;
+                                     await db.write();
+                                     broadcastState();
+                                     if(wasPlaying) startPlayoutFromIndex(sharedPlayerState.currentTrackIndex);
                                 }
-                                db.data.sharedPlaylist = newPlaylist;
-                                stateChanged = true;
                                 break;
                             }
                             case 'reorderPlaylist': {
@@ -1176,11 +1183,14 @@ wss.on('connection', async (ws, req) => {
                                     newPlaylist.splice(dropIndex !== -1 ? dropIndex : newPlaylist.length, 0, draggedItem);
                                     db.data.sharedPlaylist = newPlaylist;
 
+                                    const wasPlaying = sharedPlayerState.isPlaying;
                                     if(sharedPlayerState.currentPlayingItemId) {
                                         const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
                                         if (newCurrentIndex !== -1) sharedPlayerState.currentTrackIndex = newCurrentIndex;
                                     }
-                                    stateChanged = true;
+                                    await db.write();
+                                    broadcastState();
+                                    if(wasPlaying) startPlayoutFromIndex(sharedPlayerState.currentTrackIndex);
                                 }
                                 break;
                             }
@@ -1191,7 +1201,8 @@ wss.on('connection', async (ws, req) => {
                                 sharedPlayerState.trackProgress = 0;
                                 sharedPlayerState.stopAfterTrackId = null;
                                 stopPlayout(false);
-                                stateChanged = true;
+                                await db.write();
+                                broadcastState();
                                 break;
                             }
                              case 'saveBroadcast': {
@@ -1206,7 +1217,8 @@ wss.on('connection', async (ws, req) => {
                                     } else {
                                         studioData.broadcasts.push(broadcast);
                                     }
-                                    stateChanged = true;
+                                    await db.write();
+                                    broadcastState();
                                 }
                                 break;
                             }
@@ -1215,15 +1227,11 @@ wss.on('connection', async (ws, req) => {
                                 const studioData = db.data.userdata[studioClientEmail];
                                 if (studioData && studioData.broadcasts) {
                                     studioData.broadcasts = studioData.broadcasts.filter(b => b.id !== broadcastId);
-                                    stateChanged = true;
+                                    await db.write();
+                                    broadcastState();
                                 }
                                 break;
                             }
-                        }
-                
-                        if (stateChanged) {
-                            await db.write();
-                            broadcastState();
                         }
                     }
                     break;
@@ -1734,7 +1742,7 @@ app.post('/api/userdata/:email', async (req, res) => {
     if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
         console.log('[Config] Streaming config changed. Restarting playout if active.');
         if (db.data.sharedPlayerState.isPlaying) {
-            startPlayout();
+            startPlayoutFromIndex(db.data.sharedPlayerState.currentTrackIndex);
         }
     }
 
@@ -1908,7 +1916,7 @@ if (fs.existsSync(distPath)) {
         if (db.data.sharedPlaylist.length > 0) {
             db.data.sharedPlayerState.isPlaying = true;
             await db.write();
-            startPlayout();
+            startPlayoutFromIndex(db.data.sharedPlayerState.currentTrackIndex);
         }
     }
     
