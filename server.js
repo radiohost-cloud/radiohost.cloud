@@ -446,6 +446,11 @@ const startPlayout = () => {
                 '-ice_genre', stationGenre || 'Various',
                 '-ice_url', stationUrl || 'https://radiohost.cloud',
                 '-ice_description', stationDescription || 'Powered by RadioHost.cloud',
+                '-ice_public', '1',
+                '-reconnect', '1',
+                '-reconnect_at_eof', '0',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '5',
             ])
             .save(outputUrl);
     } else {
