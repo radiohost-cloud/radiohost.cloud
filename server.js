@@ -254,119 +254,18 @@ let studioClientEmail = null;
 const presenterEmails = new Set();
 let currentLogoSrc = null;
 
-const getPlayerPageHTML = (stationConfig) => `
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${stationConfig.stationName || 'Live Radio Player'}</title>
-    <style>
-        :root { --bg-color: #000; --text-color: #fff; --subtext-color: #a0a0a0; --accent-color: #ef4444; }
-        html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
-        body { background-color: var(--bg-color); color: var(--text-color); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px 0; }
-        .player-container { max-width: 350px; width: 90%; background: rgba(255,255,255,0.05); border-radius: 20px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); backdrop-filter: blur(10px); }
-        #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease; }
-        #title { font-size: 1.5rem; font-weight: bold; margin: 0; min-height: 2.25rem; }
-        #artist { font-size: 1rem; color: var(--subtext-color); margin: 5px 0 20px; min-height: 1.5rem; }
-        .play-button { background-color: var(--accent-color); color: white; border: none; border-radius: 50%; width: 60px; height: 60px; font-size: 2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; margin: 0 auto; transition: background-color 0.2s; }
-        .play-button:hover { background-color: #d03838; }
-        .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; }
-        .footer a { color: var(--text-color); text-decoration: none; }
-    </style>
-</head>
-<body>
-    <div class="player-container">
-        <img id="artwork" src="https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png" alt="Album Art">
-        <h1 id="title">${stationConfig.stationName || 'Live Stream'}</h1>
-        <h2 id="artist">${stationConfig.stationDescription || '...'}</h2>
-        <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
-        <div class="footer">
-            Powered by <a href="https://radiohost.cloud" target="_blank">RadioHost.cloud</a>
-        </div>
-    </div>
-    <audio id="audioPlayer" preload="none" crossOrigin="anonymous"></audio>
-    <script>
-        const playBtn = document.getElementById('playBtn');
-        const audioPlayer = document.getElementById('audioPlayer');
-        const titleEl = document.getElementById('title');
-        const artistEl = document.getElementById('artist');
-        const artworkEl = document.getElementById('artwork');
-        let stationConfig = {};
-        let metadataTimer = null;
-        let lastTrackTitle = '';
-        
-        async function fetchArtwork(artist, title) {
-            if (!artist || !title) return 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
-            try {
-                const response = await fetch(\`/api/artwork-proxy?artist=\${encodeURIComponent(artist)}&title=\${encodeURIComponent(title)}\`);
-                if (!response.ok) return null;
-                const data = await response.json();
-                return data.url;
-            } catch (e) {
-                console.error("Failed to fetch artwork", e);
-                return null;
-            }
-        }
-        
-        async function updateMetadata() {
-            if (!stationConfig.icecastStatsUrl) return;
-            try {
-                const response = await fetch(stationConfig.icecastStatsUrl);
-                const data = await response.json();
-                const source = data.icestats.source.find(s => s.listenurl.endsWith(stationConfig.icecastMountpoint));
-                if (source && source.title && source.title !== lastTrackTitle) {
-                    lastTrackTitle = source.title;
-                    const parts = source.title.split(' - ');
-                    const artist = parts[0] || '';
-                    const title = parts.slice(1).join(' - ') || 'Unknown Title';
-                    titleEl.textContent = title;
-                    artistEl.textContent = artist;
-                    const artworkUrl = await fetchArtwork(artist, title);
-                    if (artworkUrl) {
-                        artworkEl.src = artworkUrl;
-                    }
-                }
-            } catch(e) {
-                console.error("Error fetching Icecast metadata:", e);
-            }
-        }
-        
-        async function initPlayer() {
-            try {
-                const response = await fetch('/api/stream-config');
-                stationConfig = await response.json();
-                if (stationConfig.icecastStreamUrl) {
-                    audioPlayer.src = stationConfig.icecastStreamUrl;
-                    playBtn.disabled = false;
-                    updateMetadata();
-                    metadataTimer = setInterval(updateMetadata, 10000); // Check every 10 seconds
-                } else {
-                    titleEl.textContent = "Stream Not Configured";
-                    playBtn.disabled = true;
-                }
-            } catch (e) {
-                console.error("Failed to initialize player:", e);
-                titleEl.textContent = "Error Loading Stream";
-            }
-        }
-        
-        playBtn.addEventListener('click', () => {
-            if (audioPlayer.paused) {
-                audioPlayer.load();
-                audioPlayer.play().catch(e => console.error("Playback failed:", e));
-            } else {
-                audioPlayer.pause();
-            }
-        });
-        
-        audioPlayer.onplaying = () => { playBtn.innerHTML = '&#10074;&#10074;'; artworkEl.style.transform = 'scale(1.05)'; };
-        audioPlayer.onpause = () => { playBtn.innerHTML = '&#9658;'; artworkEl.style.transform = 'scale(1)'; };
-        
-        initPlayer();
-    </script>
-</body>
-</html>`;
+const browserPlayerClients = new Set();
+const directStreamListeners = new Set();
+let streamHeader = null;
+
+let currentMimeType = 'audio/webm; codecs=opus';
+let currentMetadata = {
+    title: "Silence",
+    artist: "RadioHost.cloud",
+    artworkUrl: null,
+    nextTrackTitle: null
+};
+const MSG_TYPE_PUBLIC_STREAM_CHUNK = 1;
 
 
 const broadcastState = () => {
@@ -594,6 +493,55 @@ const startPlayout = async () => {
 wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const email = url.searchParams.get('email');
+    const clientType = url.searchParams.get('clientType');
+
+    if (clientType === 'playerPage') {
+        console.log('[WebSocket] Browser Player Page connected.');
+        ws.req = req; // Store request for IP lookup
+        browserPlayerClients.add(ws);
+        
+        if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ type: 'streamConfig', payload: { mimeType: currentMimeType } }));
+            ws.send(JSON.stringify({ type: 'metadataUpdate', payload: { ...currentMetadata, logoSrc: currentLogoSrc } }));
+        }
+        
+        ws.on('message', (message) => {
+            try {
+                const data = JSON.parse(message.toString());
+                if (data.type === 'chatMessage') {
+                    console.log(`[WebSocket] Chat from listener '${data.payload.from}': ${data.payload.text}`);
+                    const listenerMessage = {
+                        from: data.payload.from.substring(0, 20), // Sanitize nickname
+                        text: data.payload.text.substring(0, 280), // Sanitize text
+                        timestamp: Date.now()
+                    };
+
+                    // Broadcast to studio
+                    if (studioClientEmail) {
+                        const studioWs = clients.get(studioClientEmail);
+                        if (studioWs && studioWs.readyState === WebSocket.OPEN) {
+                            studioWs.send(JSON.stringify({ type: 'chatMessage', payload: listenerMessage }));
+                        }
+                    }
+
+                    // Broadcast to all player clients (including sender)
+                    browserPlayerClients.forEach(clientWs => {
+                        if (clientWs.readyState === WebSocket.OPEN) {
+                            clientWs.send(JSON.stringify({ type: 'chatMessage', payload: listenerMessage }));
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error('Error processing message from player page client:', e);
+            }
+        });
+
+        ws.on('close', () => {
+            console.log('[WebSocket] Browser Player Page disconnected.');
+            browserPlayerClients.delete(ws);
+        });
+        return;
+    }
 
     if (!email) {
         console.log('[WebSocket] Connection attempt without email rejected.');
@@ -636,6 +584,19 @@ wss.on('connection', async (ws, req) => {
 
     ws.on('message', async (message) => {
         try {
+             if (message instanceof Buffer && message.length > 1) {
+                const messageType = message.readUInt8(0);
+                if (messageType === MSG_TYPE_PUBLIC_STREAM_CHUNK && studioClientEmail && studioClientEmail === email) {
+                    const audioData = message.slice(1);
+                    if (!streamHeader) {
+                        streamHeader = audioData;
+                        console.log(`[Audio Stream] Header received (${streamHeader.length} bytes).`);
+                    }
+                    directStreamListeners.forEach(res => res.write(audioData));
+                    return;
+                }
+            }
+
             const data = JSON.parse(message.toString());
             
             if (data.type !== 'ping') {
@@ -944,6 +905,11 @@ wss.on('connection', async (ws, req) => {
                             text: data.payload.text,
                             timestamp: Date.now(),
                         };
+                        browserPlayerClients.forEach(clientWs => {
+                            if (clientWs.readyState === WebSocket.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'chatMessage', payload: studioMessage }));
+                            }
+                        });
                     }
                     break;
                 
@@ -951,6 +917,37 @@ wss.on('connection', async (ws, req) => {
                     if (studioClientEmail && studioClientEmail === email) {
                         currentLogoSrc = data.payload.logoSrc;
                         console.log(`[WebSocket] Studio updated logo.`);
+                        browserPlayerClients.forEach(clientWs => {
+                            if (clientWs.readyState === ws.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'configUpdate', payload: { logoSrc: currentLogoSrc } }));
+                            }
+                        });
+                    }
+                    break;
+
+                case 'streamConfigUpdate':
+                    if (studioClientEmail && studioClientEmail === email) {
+                        currentMimeType = data.payload.mimeType;
+                        console.log(`[Audio Stream] Mime type updated to: ${currentMimeType}. Resetting stream.`);
+                        directStreamListeners.forEach(res => res.end());
+                        directStreamListeners.clear();
+                        streamHeader = null;
+                        browserPlayerClients.forEach(clientWs => {
+                             if (clientWs.readyState === ws.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'streamConfig', payload: { mimeType: currentMimeType } }));
+                            }
+                        });
+                    }
+                    break;
+
+                case 'metadataUpdate':
+                    if (studioClientEmail && studioClientEmail === email) {
+                        currentMetadata = data.payload;
+                        browserPlayerClients.forEach(clientWs => {
+                            if (clientWs.readyState === ws.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'metadataUpdate', payload: { ...currentMetadata, logoSrc: currentLogoSrc } }));
+                            }
+                        });
                     }
                     break;
                 
@@ -1003,6 +1000,14 @@ wss.on('connection', async (ws, req) => {
         let listChanged = false;
         if (studioClientEmail === email) {
             studioClientEmail = null;
+            console.log('[WebSocket] Studio client disconnected. Ending public stream.');
+            directStreamListeners.forEach(res => res.end());
+            directStreamListeners.clear();
+            browserPlayerClients.forEach(clientWs => {
+                if (clientWs.readyState === ws.OPEN) {
+                    clientWs.send(JSON.stringify({ type: 'streamEnded' }));
+                }
+            });
         }
         if (presenterEmails.has(email)) {
             presenterEmails.delete(email);
@@ -1041,25 +1046,325 @@ app.use('/media', express.static(mediaDir, {
 }));
 app.use('/artwork', express.static(artworkDir));
 
-// --- API Endpoints ---
-app.get('/api/stream-config', async (req, res) => {
-    await db.read();
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    if (!studioUser) {
-        return res.status(404).json({ message: "No studio user configured." });
-    }
-    const userData = db.data.userdata[studioUser.email];
-    const config = userData?.settings?.playoutPolicy?.streamingConfig || {};
-    res.json(config);
-});
+const getPlayerPageHTML = (stationName) => `
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${stationName || 'RadioHost.cloud Live Player'}</title>
 
-app.get('/api/artwork-proxy', async (req, res) => {
-    const { artist, title } = req.query;
+    <!-- PWA and Mobile meta tags -->
+    <meta name="theme-color" content="#000000" />
+    <link rel="manifest" href="/stream/manifest.json">
+    <link rel="apple-touch-icon" href="/stream/icon/192.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="${stationName || 'Live Radio'}">
+
+    <style>
+        :root { --bg-color: #000; --text-color: #fff; --subtext-color: #a0a0a0; --accent-color: #ef4444; }
+        html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-color); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px 0; }
+        .player-container { max-width: 350px; width: 90%; background: rgba(255,255,255,0.05); border-radius: 20px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); backdrop-filter: blur(10px); }
+        #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease; }
+        #title { font-size: 1.5rem; font-weight: bold; margin: 0; min-height: 2.25rem; }
+        #artist { font-size: 1rem; color: var(--subtext-color); margin: 5px 0 20px; min-height: 1.5rem; }
+        #next-track { font-size: 0.8rem; color: var(--subtext-color); margin-top: -15px; margin-bottom: 20px; min-height: 1.2rem; display: none; font-weight: 500; }
+        .play-button { background-color: var(--accent-color); color: white; border: none; border-radius: 50%; width: 60px; height: 60px; font-size: 2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; margin: 0 auto; transition: background-color 0.2s; }
+        .play-button:hover { background-color: #d03838; }
+        .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; }
+        .footer a { color: var(--text-color); text-decoration: none; }
+        
+        /* Compact Chat Styles */
+        #chat-container { position: fixed; bottom: 20px; right: 20px; z-index: 1000; }
+        #chat-fab { width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; border: none; color: white; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.3); transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease; position: relative; }
+        #chat-fab:hover { transform: scale(1.1); box-shadow: 0 6px 15px rgba(0,0,0,0.4); }
+        #chat-fab.open { background-color: #555; }
+        #chat-fab .icon { width: 32px; height: 32px; transition: transform 0.3s ease, opacity 0.3s ease; position: absolute; }
+        #chat-fab .icon-chat { opacity: 1; }
+        #chat-fab .icon-close { opacity: 0; transform: rotate(-45deg) scale(0.5); }
+        #chat-fab.open .icon-chat { opacity: 0; transform: rotate(45deg) scale(0.5); }
+        #chat-fab.open .icon-close { opacity: 1; transform: rotate(0) scale(1); }
+        #chat-fab .notification-dot { position: absolute; top: 8px; right: 8px; width: 10px; height: 10px; background-color: #fff; border: 2px solid var(--accent-color); border-radius: 50%; display: none; }
+        #chat-window { position: absolute; bottom: 75px; right: 0; width: 350px; height: 450px; background-color: rgba(30,30,30,0.95); backdrop-filter: blur(10px); border-radius: 15px; z-index: 999; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 5px 25px rgba(0,0,0,0.4); transform-origin: bottom right; transition: opacity 0.2s ease-out, transform 0.2s ease-out; opacity: 0; transform: scale(0.95) translateY(10px); pointer-events: none; }
+        #chat-window.open { opacity: 1; transform: scale(1) translateY(0); pointer-events: auto; }
+        .chat-header { padding: 10px 15px; font-weight: bold; background-color: rgba(0,0,0,0.2); border-bottom: 1px solid rgba(255,255,255,0.1); }
+        #chatMessages { list-style: none; padding: 15px; margin: 0; flex-grow: 1; overflow-y: auto; }
+        #chatMessages li { margin-bottom: 10px; }
+        #chatMessages .msg-bubble { display: inline-block; max-width: 85%; padding: 8px 12px; border-radius: 15px; word-wrap: break-word; }
+        #chatMessages .msg-studio .msg-bubble { background-color: var(--accent-color); color: white; border-bottom-right-radius: 3px; }
+        #chatMessages .msg-listener .msg-bubble { background-color: #333; border-bottom-left-radius: 3px; }
+        #chatMessages .msg-studio { text-align: right; }
+        #chatMessages .msg-from { font-size: 0.75rem; font-weight: bold; color: var(--subtext-color); margin-bottom: 3px; }
+        #chatMessages .msg-listener .msg-from { margin-left: 5px; }
+        .chat-input-area { padding: 10px; background-color: rgba(0,0,0,0.2); border-top: 1px solid rgba(255,255,255,0.1); }
+        .chat-input-area input { width: 100%; background: #222; border: 1px solid #444; border-radius: 8px; padding: 8px 10px; color: white; font-size: 0.9rem; }
+        .chat-input-area input:focus { outline: none; border-color: var(--accent-color); }
+        .chat-input-area form { display: flex; gap: 10px; }
+        .chat-input-area button { background: var(--accent-color); border: none; border-radius: 8px; color: white; padding: 0 12px; cursor: pointer; }
+        .chat-input-area button:disabled { background: #555; cursor: not-allowed; }
+
+        @media (max-width: 480px) {
+            #chat-window { width: calc(100vw - 40px); height: 60vh; }
+        }
+    </style>
+</head>
+<body>
+    <img id="logo" style="max-height: 40px; display: none; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); margin-bottom: 20px;">
+    <div class="player-container">
+        <img id="artwork" src="https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png" alt="Album Art">
+        <h1 id="title">RadioHost.cloud</h1>
+        <h2 id="artist">Live Stream</h2>
+        <div id="next-track"></div>
+        <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
+        <div class="footer">
+            Powered by <a href="https://radiohost.cloud" target="_blank">RadioHost.cloud</a>
+        </div>
+    </div>
+    <audio id="audioPlayer" preload="none" crossOrigin="anonymous"></audio>
+
+    <div id="chat-container">
+        <div id="chat-window">
+            <div class="chat-header">Live Chat</div>
+            <ul id="chatMessages"></ul>
+            <div class="chat-input-area">
+                <input type="text" id="chatNickname" placeholder="Your Name" maxlength="20">
+                <form id="chatForm">
+                    <input type="text" id="chatInput" placeholder="Type a message..." required>
+                    <button type="submit" id="chatSendBtn">&#10148;</button>
+                </form>
+            </div>
+        </div>
+        <button id="chat-fab" aria-label="Toggle Chat">
+            <svg class="icon icon-chat" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
+            <svg class="icon icon-close" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            <span class="notification-dot"></span>
+        </button>
+    </div>
+
+    <script>
+        const playBtn = document.getElementById('playBtn');
+        const audioPlayer = document.getElementById('audioPlayer');
+        const titleEl = document.getElementById('title');
+        const artistEl = document.getElementById('artist');
+        const artworkEl = document.getElementById('artwork');
+        const logoEl = document.getElementById('logo');
+        const nextTrackEl = document.getElementById('next-track');
+
+        const chatFab = document.getElementById('chat-fab');
+        const chatNotificationDot = chatFab.querySelector('.notification-dot');
+        const chatWindow = document.getElementById('chat-window');
+        const chatMessages = document.getElementById('chatMessages');
+        const chatNickname = document.getElementById('chatNickname');
+        const chatForm = document.getElementById('chatForm');
+        const chatInput = document.getElementById('chatInput');
+        const chatSendBtn = document.getElementById('chatSendBtn');
+
+        let ws;
+        let currentMimeType = '';
+        let isPlaying = false;
+        
+        chatNickname.value = localStorage.getItem('chatNickname') || \`Listener-\${Math.floor(Math.random() * 9000) + 1000}\`;
+        chatNickname.addEventListener('change', () => {
+            localStorage.setItem('chatNickname', chatNickname.value);
+        });
+
+        chatFab.addEventListener('click', () => {
+            chatWindow.classList.toggle('open');
+            chatFab.classList.toggle('open');
+            if (chatWindow.classList.contains('open')) {
+                chatNotificationDot.style.display = 'none';
+                chatInput.focus();
+            }
+        });
+
+        function addChatMessage(msg) {
+            const li = document.createElement('li');
+            const isStudio = msg.from === 'Studio';
+            li.className = isStudio ? 'msg-studio' : 'msg-listener';
+            
+            let fromHtml = '';
+            if (!isStudio) {
+                fromHtml = \`<div class="msg-from">\${msg.from}</div>\`;
+            }
+            
+            li.innerHTML = \`
+                \${fromHtml}
+                <div class="msg-bubble">\${msg.text}</div>
+            \`;
+            chatMessages.appendChild(li);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            if (!chatWindow.classList.contains('open')) {
+                chatNotificationDot.style.display = 'block';
+            }
+        }
+
+        chatForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const text = chatInput.value.trim();
+            const nickname = chatNickname.value.trim();
+            if (text && nickname && ws && ws.readyState === WebSocket.OPEN) {
+                const message = {
+                    from: nickname,
+                    text: text,
+                    timestamp: Date.now()
+                };
+                ws.send(JSON.stringify({ type: 'chatMessage', payload: message }));
+                chatInput.value = '';
+            }
+        });
+
+        function getExtension(mime) {
+            if (!mime) return '';
+            if (mime.includes('webm')) return '.webm';
+            if (mime.includes('mp4')) return '.mp4';
+            if (mime.includes('mpeg')) return '.mp3';
+            return '';
+        }
+        
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = \`\${protocol}//\${window.location.host}/socket?clientType=playerPage\`;
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) return; 
+
+                const data = JSON.parse(event.data);
+                switch (data.type) {
+                    case 'streamConfig':
+                        currentMimeType = data.payload.mimeType;
+                        if (isPlaying) {
+                            const streamUrl = '/stream/live' + getExtension(currentMimeType);
+                            audioPlayer.src = streamUrl;
+                            audioPlayer.load();
+                            audioPlayer.play();
+                        }
+                        break;
+                    case 'metadataUpdate':
+                        const { title, artist, artworkUrl, logoSrc, nextTrackTitle } = data.payload;
+                        titleEl.textContent = title || '...';
+                        artistEl.textContent = artist || '...';
+                        artworkEl.src = artworkUrl || 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
+                        if (logoSrc) { logoEl.src = logoSrc; logoEl.style.display = 'block'; }
+                        else { logoEl.style.display = 'none'; }
+                        if (nextTrackTitle) { nextTrackEl.textContent = 'Up Next: ' + nextTrackTitle; nextTrackEl.style.display = 'block'; }
+                        else { nextTrackEl.style.display = 'none'; }
+                        
+                        if ('mediaSession' in navigator) {
+                            navigator.mediaSession.metadata = new MediaMetadata({
+                                title: title || '...',
+                                artist: artist || 'RadioHost.cloud',
+                                album: '${stationName || 'Live Stream'}',
+                                artwork: artworkUrl ? [
+                                    { src: artworkUrl.replace('600x600', '96x96'), sizes: '96x96', type: 'image/jpeg' },
+                                    { src: artworkUrl.replace('600x600', '128x128'), sizes: '128x128', type: 'image/jpeg' },
+                                    { src: artworkUrl.replace('600x600', '192x192'), sizes: '192x192', type: 'image/jpeg' },
+                                    { src: artworkUrl.replace('600x600', '256x256'), sizes: '256x256', type: 'image/jpeg' },
+                                    { src: artworkUrl.replace('600x600', '384x384'), sizes: '384x384', type: 'image/jpeg' },
+                                    { src: artworkUrl.replace('600x600', '512x512'), sizes: '512x512', type: 'image/jpeg' },
+                                ] : []
+                            });
+                        }
+                        break;
+                    case 'configUpdate':
+                        if (data.payload.logoSrc) { logoEl.src = data.payload.logoSrc; logoEl.style.display = 'block'; }
+                        else { logoEl.style.display = 'none'; }
+                        break;
+                    case 'streamEnded':
+                        artistEl.textContent = 'Stream Offline';
+                        audioPlayer.pause();
+                        audioPlayer.src = '';
+                        break;
+                    case 'chatMessage':
+                        addChatMessage(data.payload);
+                        break;
+                }
+            };
+            ws.onclose = () => setTimeout(connect, 5000);
+            ws.onerror = (err) => { console.error('WebSocket error:', err); ws.close(); };
+        }
+
+        playBtn.addEventListener('click', () => {
+            if (audioPlayer.paused) {
+                if (!audioPlayer.src && currentMimeType) {
+                    const streamUrl = '/stream/live' + getExtension(currentMimeType);
+                    audioPlayer.src = streamUrl;
+                    audioPlayer.load();
+                }
+                audioPlayer.play().catch(e => {
+                    console.error("Playback failed:", e);
+                    artistEl.textContent = 'Playback failed. Tap to retry.';
+                });
+            } else {
+                audioPlayer.pause();
+            }
+        });
+        
+        audioPlayer.onplaying = () => { isPlaying = true; playBtn.innerHTML = '&#10074;&#10074;'; artworkEl.style.transform = 'scale(1.05)'; };
+        audioPlayer.onpause = () => { isPlaying = false; playBtn.innerHTML = '&#9658;'; artworkEl.style.transform = 'scale(1)'; };
+        
+        if ('mediaSession' in navigator) {
+            navigator.mediaSession.setActionHandler('play', () => audioPlayer.play());
+            navigator.mediaSession.setActionHandler('pause', () => audioPlayer.pause());
+        }
+        
+        connect();
+
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/stream-service-worker.js').then(registration => {
+                    console.log('Stream Player SW registered: ', registration);
+                }).catch(registrationError => {
+                    console.log('Stream Player SW registration failed: ', registrationError);
+                });
+            });
+        }
+    </script>
+</body>
+</html>
+`;
+
+// --- API Endpoints ---
+app.get('/api/stream-listeners', async (req, res) => {
     try {
-        const url = await fetchArtwork(artist, title);
-        res.json({ url });
-    } catch (e) {
-        res.status(500).json({ url: null, error: e.message });
+        const listenerPromises = Array.from(browserPlayerClients).map(async (listenerWs) => {
+            const listenerReq = listenerWs.req;
+            if (!listenerReq) return { ip: 'N/A', country: 'N/A', city: 'N/A' };
+
+            let ip = listenerReq.headers['x-forwarded-for'] || listenerReq.socket.remoteAddress;
+
+            if (ip === '::1' || ip === '127.0.0.1') {
+                return { ip: '127.0.0.1', country: 'Localhost', city: 'Local' };
+            }
+            if (ip.startsWith('::ffff:')) {
+                ip = ip.substring(7);
+            }
+
+            try {
+                const geoResponse = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,city`);
+                if (!geoResponse.ok) {
+                    return { ip, country: 'N/A', city: 'N/A' };
+                }
+                const geoData = await geoResponse.json();
+                if (geoData.status === 'success') {
+                    return { ip, country: geoData.country || 'N/A', city: geoData.city || 'N/A' };
+                }
+                return { ip, country: 'N/A', city: 'N/A' };
+            } catch (error) {
+                console.error(`GeoIP lookup failed for ${ip}:`, error.message);
+                return { ip, country: 'N/A', city: 'N/A' };
+            }
+        });
+
+        const listenersData = await Promise.all(listenerPromises);
+        res.json(listenersData);
+    } catch (error) {
+        console.error("Error fetching listener data:", error);
+        res.status(500).json([]);
     }
 });
 
@@ -1222,18 +1527,32 @@ app.post('/api/folder', async (req, res) => {
 
 // --- Public stream routes ---
 app.get('/stream', async (req, res) => {
-    await db.read();
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    const userData = studioUser ? db.data.userdata[studioUser.email] : null;
-    const streamConfig = userData?.settings?.playoutPolicy?.streamingConfig || {};
-    
-    if (!streamConfig.isEnabled) {
-        return res.status(404).send('<h1>Stream is currently offline.</h1>');
-    }
-
-    res.send(getPlayerPageHTML(streamConfig));
+    const settings = await getStationSettings();
+    res.send(getPlayerPageHTML(settings.stationName));
 });
 
+app.get('/stream/live*', (req, res) => {
+    if (!studioClientEmail) {
+        return res.status(503).send('Stream is currently offline.');
+    }
+
+    console.log('[Audio Stream] New listener connected.');
+    res.writeHead(200, {
+        'Content-Type': currentMimeType,
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
+    });
+
+    if (streamHeader) {
+        res.write(streamHeader);
+    }
+    directStreamListeners.add(res);
+
+    req.on('close', () => {
+        console.log('[Audio Stream] Listener disconnected.');
+        directStreamListeners.delete(res);
+    });
+});
 
 // --- Serve Frontend ---
 // This must be placed after all API and stream routes to function as a catch-all for the SPA.

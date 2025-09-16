@@ -1,4 +1,8 @@
 
+
+
+
+
 export enum TrackType {
   SONG = 'Song',
   JINGLE = 'Jingle',
@@ -80,16 +84,15 @@ export interface CartwallPage {
 // FIX: Add StreamingConfig interface and property to PlayoutPolicy
 export interface StreamingConfig {
   isEnabled: boolean;
-  serverAddress: string; // Kept for legacy or other uses, though primary URLs are below
+  serverAddress: string;
+  username: string;
+  password: string;
+  bitrate: number;
   stationName: string;
   stationGenre: string;
   stationUrl: string;
   stationDescription: string;
   metadataHeader?: string;
-  // New fields for connecting to an external Icecast stream
-  icecastStreamUrl: string;
-  icecastStatsUrl: string;
-  icecastMountpoint: string;
 }
 
 export interface PlayoutPolicy {
