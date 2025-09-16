@@ -422,23 +422,11 @@ const AppInternal: React.FC = () => {
     cartwallPagesRef.current = cartwallPages;
     const broadcastsRef = useRef(broadcasts);
     broadcastsRef.current = broadcasts;
-    const currentTrackIndexRef = useRef(currentTrackIndex);
-    currentTrackIndexRef.current = currentTrackIndex;
-    const currentPlayingItemIdRef = useRef(currentPlayingItemId);
-    currentPlayingItemIdRef.current = currentPlayingItemId;
-    const isPlayingRef = useRef(isPlaying);
-    isPlayingRef.current = isPlaying;
     const mediaLibraryRef = useRef(mediaLibrary);
     mediaLibraryRef.current = mediaLibrary;
     const playoutPolicyRef = useRef(playoutPolicy);
     playoutPolicyRef.current = playoutPolicy;
-    const playoutHistoryRef = useRef(playoutHistory);
-    playoutHistoryRef.current = playoutHistory;
-    const stopAfterTrackIdRef = useRef(stopAfterTrackId);
-    stopAfterTrackIdRef.current = stopAfterTrackId;
     const timelineRef = useRef(new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>());
-    const isAutoModeEnabledRef = useRef(isAutoModeEnabled);
-    isAutoModeEnabledRef.current = isAutoModeEnabled;
     const logoSrcRef = useRef(logoSrc);
     logoSrcRef.current = logoSrc;
     const activeRightColumnTabRef = useRef(activeRightColumnTab);
@@ -707,7 +695,7 @@ const AppInternal: React.FC = () => {
     // Add a warning before closing the tab if playback is active or the mic is live.
     useEffect(() => {
         const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-            if (isPlayingRef.current || mixerConfig.mic.sends.main.enabled) {
+            if (isPlaying || mixerConfig.mic.sends.main.enabled) {
                 event.preventDefault();
                 event.returnValue = ''; // Required for modern browsers to show a generic confirmation prompt.
             }
@@ -718,7 +706,7 @@ const AppInternal: React.FC = () => {
         return () => {
             window.removeEventListener('beforeunload', handleBeforeUnload);
         };
-    }, [mixerConfig.mic.sends.main.enabled]);
+    }, [isPlaying, mixerConfig.mic.sends.main.enabled]);
     
     const useDebouncedEffect = (effect: () => void, deps: React.DependencyList, delay: number) => {
         useEffect(() => {
@@ -1755,11 +1743,11 @@ const AppInternal: React.FC = () => {
                     setBroadcasts(serverBroadcasts);
                 }
                 if (playerState) {
-                    if (playerState.currentTrackIndex !== undefined && playerState.currentTrackIndex !== currentTrackIndexRef.current) setCurrentTrackIndex(playerState.currentTrackIndex);
-                    if (playerState.isPlaying !== undefined && playerState.isPlaying !== isPlayingRef.current) setIsPlaying(playerState.isPlaying);
+                    if (playerState.currentTrackIndex !== undefined) setCurrentTrackIndex(playerState.currentTrackIndex);
+                    if (playerState.isPlaying !== undefined) setIsPlaying(playerState.isPlaying);
                     if (playerState.trackProgress !== undefined) setTrackProgress(playerState.trackProgress);
-                    if (playerState.currentPlayingItemId !== undefined && playerState.currentPlayingItemId !== currentPlayingItemIdRef.current) setCurrentPlayingItemId(playerState.currentPlayingItemId);
-                    if (playerState.stopAfterTrackId !== undefined && playerState.stopAfterTrackId !== stopAfterTrackIdRef.current) setStopAfterTrackId(playerState.stopAfterTrackId);
+                    if (playerState.currentPlayingItemId !== undefined) setCurrentPlayingItemId(playerState.currentPlayingItemId);
+                    if (playerState.stopAfterTrackId !== undefined) setStopAfterTrackId(playerState.stopAfterTrackId);
                 }
             } else if (data.type === 'library-update') {
                 if (JSON.stringify(data.payload) !== JSON.stringify(mediaLibraryRef.current)) {
