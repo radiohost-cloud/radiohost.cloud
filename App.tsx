@@ -905,7 +905,8 @@ const AppInternal: React.FC = () => {
                 audioBuses.forEach(bus => {
                     const routingGain = context.createGain();
                     routingGains[`${sourceId}_to_${bus.id}`] = routingGain;
-                    analysers[sourceId]!.connect(routingGain);
+                    // FIX: Route the actual audio signal from the source gain, not the analyser.
+                    sourceGains[sourceId]!.connect(routingGain);
 
                     const busesWithDucking: AudioBusId[] = ['main', 'monitor'];
                     if ((sourceId === 'mainPlayer' || sourceId === 'cartwall') && busesWithDucking.includes(bus.id)) {
