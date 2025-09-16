@@ -321,6 +321,43 @@ const refreshAndBroadcastLibrary = async () => {
     }
 };
 
+const applyTagsRecursively = async (relativePath, tags, db) => {
+    const fullPath = path.join(mediaDir, relativePath);
+    try {
+        const entries = await fsPromises.readdir(fullPath, { withFileTypes: true });
+
+        for (const entry of entries) {
+            const entryRelativePath = path.join(relativePath, entry.name).replace(/\\/g, '/');
+            const entryFullPath = path.join(fullPath, entry.name);
+
+            if (entry.isDirectory()) {
+                // Update subfolder metadata in DB
+                db.data.folderMetadata[entryRelativePath] = {
+                    ...(db.data.folderMetadata[entryRelativePath] || {}),
+                    tags: tags,
+                };
+                // Recurse into subfolder
+                await applyTagsRecursively(entryRelativePath, tags, db);
+            } else if (/\.(mp3|wav|ogg|flac|aac|m4a|webm)$/i.test(entry.name)) {
+                // Update file ID3 tags
+                try {
+                    // For MP3s. This will fail for other formats but won't crash.
+                    NodeID3.update({
+                        userDefinedText: [{
+                            description: "RH_TAGS",
+                            value: tags.join(', ')
+                        }]
+                    }, entryFullPath);
+                } catch (e) {
+                     console.warn(`Could not write ID3 tags for non-MP3 file: ${entry.name}`);
+                }
+            }
+        }
+    } catch (error) {
+        console.error(`Error applying tags recursively in ${fullPath}:`, error);
+    }
+};
+
 
 const getStationSettings = async () => {
     await db.read();
@@ -928,8 +965,20 @@ wss.on('connection', async (ws, req) => {
                             case 'updateFolderTags': {
                                 const { folderId, newTags } = payload;
                                 if (!folderId || !newTags) break;
+                            
+                                // Ensure metadata object exists
                                 if (!db.data.folderMetadata) db.data.folderMetadata = {};
-                                db.data.folderMetadata[folderId] = { ...(db.data.folderMetadata[folderId] || {}), tags: newTags };
+                            
+                                // 1. Apply tags to the target folder itself
+                                db.data.folderMetadata[folderId] = {
+                                    ...(db.data.folderMetadata[folderId] || {}),
+                                    tags: newTags
+                                };
+                            
+                                // 2. Apply tags recursively to all children (subfolders and files)
+                                await applyTagsRecursively(folderId, newTags, db);
+                            
+                                // 3. Save changes to DB and refresh the library for all clients
                                 await db.write();
                                 await refreshAndBroadcastLibrary();
                                 break;
