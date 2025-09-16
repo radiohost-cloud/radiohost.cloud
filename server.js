@@ -423,10 +423,16 @@ const startPlayout = () => {
     if (streamConfig && streamConfig.isEnabled) {
         const { username, password, serverUrl, port, mountPoint, bitrate, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
         
-        // FIX: More robustly construct the Icecast URL to prevent double slashes.
-        const baseUrl = `icecast://${username}:${password}@${serverUrl}:${port}/`;
-        const finalMount = mountPoint ? String(mountPoint).trim().replace(/^\/+/, '') : '';
-        const outputUrl = baseUrl + finalMount;
+        const baseUrl = `icecast://${username}:${password}@${serverUrl}:${port}`;
+        
+        let finalMount = mountPoint ? String(mountPoint).trim() : '';
+        if (finalMount === '/' || finalMount === '') {
+            finalMount = 'live'; // Use a sensible default if mount is '/' or empty
+        }
+        if (finalMount.startsWith('/')) {
+            finalMount = finalMount.substring(1);
+        }
+        const outputUrl = `${baseUrl}/${finalMount}`;
 
         serverStreamStatus = 'connecting';
         broadcastStreamStatus();
@@ -490,7 +496,7 @@ const startPlayout = () => {
                  console.error(`[FFMPEG] Error playing ${track.title}:`, err.message);
                  if (streamConfig && streamConfig.isEnabled) {
                     serverStreamStatus = 'error';
-                    serverStreamError = err.message;
+                    serverStreamError = err.message + ': ' + stderr;
                     broadcastStreamStatus();
                  }
             }
