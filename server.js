@@ -1,3 +1,4 @@
+
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
 // To run: `npm install express cors multer lowdb ws node-id3 fluent-ffmpeg` then `node server.js`
@@ -956,26 +957,23 @@ wss.on('connection', async (ws, req) => {
                             case 'removeFromLibrary': {
                                 const { id } = payload;
                                 if (!id) break;
-                                const fullPath = path.join(mediaDir, id);
+                                const itemPath = path.join(mediaDir, id);
                                 try {
-                                    if (fs.existsSync(fullPath)) {
-                                        await fsPromises.rm(fullPath, { recursive: true, force: true });
-                                        console.log(`[FS] Deleted item: ${fullPath}`);
-                                        
-                                        const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
-                                        if (fs.existsSync(artworkPath)) {
-                                            await fsPromises.unlink(artworkPath);
-                                            console.log(`[FS] Deleted artwork: ${artworkPath}`);
+                                    const stats = await fsPromises.stat(itemPath).catch(() => null);
+                                    if (stats) {
+                                        await fsPromises.rm(itemPath, { recursive: true, force: true });
+                                        console.log(`[FS] Deleted item: ${itemPath}`);
+                                        if (stats.isFile()) {
+                                            const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
+                                            if (fs.existsSync(artworkPath)) {
+                                                await fsPromises.unlink(artworkPath);
+                                                console.log(`[FS] Deleted artwork: ${artworkPath}`);
+                                            }
                                         }
-
-                                        if (db.data.mediaCache[id]) {
-                                            delete db.data.mediaCache[id];
-                                            await db.write();
-                                            console.log(`[Cache] Removed ${id} from cache.`);
-                                        }
+                                        refreshAndBroadcastLibrary();
                                     }
                                 } catch (e) {
-                                    console.error(`[FS] Failed to delete item at ${fullPath}:`, e);
+                                    console.error(`[FS] Failed to delete item at ${itemPath}:`, e);
                                 }
                                 break;
                             }
@@ -988,21 +986,33 @@ wss.on('connection', async (ws, req) => {
                                     if (!fs.existsSync(fullPath)) {
                                         await fsPromises.mkdir(fullPath, { recursive: true });
                                         console.log(`[FS] Created folder: ${fullPath}`);
+                                        refreshAndBroadcastLibrary();
                                     }
                                 } catch (e) {
                                     console.error(`[FS] Failed to create folder at ${fullPath}:`, e);
                                 }
                                 break;
                             }
-                             case 'moveItemInLibrary': {
+                            case 'moveItemInLibrary': {
                                 const { itemId, destinationFolderId } = payload;
                                 if (!itemId || !destinationFolderId) break;
                                 const sourcePath = path.join(mediaDir, itemId);
                                 const destDir = destinationFolderId === 'root' ? mediaDir : path.join(mediaDir, destinationFolderId);
                                 const destPath = path.join(destDir, path.basename(itemId));
+                                const artworkSourcePath = path.join(artworkDir, itemId.replace(/\.[^/.]+$/, ".jpg"));
+                                const artworkDestDir = destinationFolderId === 'root' ? artworkDir : path.join(artworkDir, destinationFolderId);
+                                const artworkDestPath = path.join(artworkDestDir, path.basename(itemId).replace(/\.[^/.]+$/, ".jpg"));
                                 try {
+                                    const sourceStats = await fsPromises.stat(sourcePath).catch(() => null);
+                                    if (!sourceStats) break;
+                                    if (sourceStats.isFile() && fs.existsSync(artworkSourcePath)) {
+                                        await fsPromises.mkdir(path.dirname(artworkDestPath), { recursive: true });
+                                        await fsPromises.rename(artworkSourcePath, artworkDestPath);
+                                        console.log(`[FS] Moved artwork from ${artworkSourcePath} to ${artworkDestPath}`);
+                                    }
                                     await fsPromises.rename(sourcePath, destPath);
                                     console.log(`[FS] Moved item from ${sourcePath} to ${destPath}`);
+                                    refreshAndBroadcastLibrary();
                                 } catch (e) {
                                     console.error(`[FS] Failed to move item:`, e);
                                 }
@@ -1713,12 +1723,12 @@ app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ message: 'No file uploaded.' });
     }
-
     try {
         const relativePath = req.body.webkitRelativePath || req.file.originalname;
         const clientDuration = req.body.duration;
         const trackObject = await createTrackObject(req.file.path, relativePath.replace(/\\/g, '/'), req.file.originalname, clientDuration);
         res.status(201).json(trackObject);
+        refreshAndBroadcastLibrary();
     } catch (error) {
         console.error('Error processing uploaded file:', error);
         res.status(500).json({ message: 'Error processing file.' });
