@@ -32,6 +32,7 @@ const adapter = new JSONFile(file);
 const defaultData = {
     users: [],
     userdata: {},
+    mediaCache: {},
     folderMetadata: {},
     sharedPlaylist: [],
     sharedPlayerState: {
@@ -50,7 +51,7 @@ await db.read();
 db.data ||= { ...defaultData };
 for (const key of Object.keys(defaultData)) {
     if (db.data[key] === undefined) {
-        db.data[key] = defaultData[key];
+        db.data[key] = defaultData[key as keyof typeof defaultData];
     }
 }
 
@@ -112,11 +113,9 @@ const fetchArtwork = async (artist, title) => {
 };
 
 
-// --- NEW: Filesystem-based Media Library Logic ---
+// --- Filesystem-based Media Library Logic ---
 const createTrackObject = async (entryFullPath, entryRelativePath, entryName, clientDuration) => {
     try {
-        // Use client-provided duration if available, otherwise probe the file.
-        // This makes ffmpeg optional on the server for uploads.
         const durationInSeconds = clientDuration ? parseFloat(clientDuration) : await getDuration(entryFullPath);
         const tags = NodeID3.read(entryFullPath);
         let hasArtwork = false;
@@ -171,6 +170,16 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, cl
     }
 };
 
+// Helper for cache cleanup
+const getAllFilePaths = async (dir, relativePath = '') => {
+    const entries = await fsPromises.readdir(path.join(dir, relativePath), { withFileTypes: true });
+    const files = await Promise.all(entries.map(async (entry) => {
+        const res = path.join(relativePath, entry.name).replace(/\\/g, '/');
+        return entry.isDirectory() ? getAllFilePaths(dir, res) : res;
+    }));
+    return files.flat();
+};
+
 const scanMediaToTree = async (dirPath, relativePath = '') => {
     const fullPath = path.join(mediaDir, relativePath);
     const children = [];
@@ -191,13 +200,39 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
                     ...folderMetadata
                 });
             } else if (/\.(mp3|wav|ogg|flac|aac|m4a|webm)$/i.test(entry.name)) {
-                const trackObject = await createTrackObject(entryFullPath, entryRelativePath, entry.name);
-                children.push(trackObject);
+                const stats = await fsPromises.stat(entryFullPath);
+                const fileMtime = stats.mtime.getTime();
+                const cachedTrack = db.data.mediaCache[entryRelativePath];
+
+                if (cachedTrack && cachedTrack.mtime >= fileMtime) {
+                    children.push(cachedTrack); // Use valid cache
+                } else {
+                    const trackObject = await createTrackObject(entryFullPath, entryRelativePath, entry.name);
+                    trackObject.mtime = fileMtime; // Store modification time in cache
+                    db.data.mediaCache[entryRelativePath] = trackObject;
+                    children.push(trackObject);
+                }
             }
         }
     } catch (error) {
         console.error(`Error scanning directory ${fullPath}:`, error);
     }
+    
+    // Cache cleanup: remove entries for files that no longer exist on disk.
+    if (relativePath === '') { // Only run cleanup at the top level for efficiency.
+        let cacheChanged = false;
+        const allFilePaths = new Set(await getAllFilePaths(mediaDir));
+
+        for (const cachedPath in db.data.mediaCache) {
+            if (!allFilePaths.has(cachedPath)) {
+                delete db.data.mediaCache[cachedPath];
+                console.log(`[Cache] Cleaned up stale cache for: ${cachedPath}`);
+                cacheChanged = true;
+            }
+        }
+        if(cacheChanged) await db.write();
+    }
+
     return children;
 };
 
@@ -227,7 +262,6 @@ const syncPlaylistWithLibrary = async () => {
 
         const libraryTrack = findTrackInServerTree(libraryState, item.originalId || item.id);
         if (libraryTrack) {
-            // Check if anything actually changed to avoid unnecessary updates
             if (item.title !== libraryTrack.title || 
                 item.artist !== libraryTrack.artist ||
                 item.duration !== libraryTrack.duration ||
@@ -235,7 +269,7 @@ const syncPlaylistWithLibrary = async () => {
             {
                 playlistChanged = true;
                 return {
-                    ...item, // Keep playlist-specific stuff like id, vtMix, addedBy
+                    ...item,
                     title: libraryTrack.title,
                     artist: libraryTrack.artist,
                     duration: libraryTrack.duration,
@@ -273,21 +307,23 @@ const refreshAndBroadcastLibrary = () => {
     watchTimeout = setTimeout(async () => {
         console.log('[File Watcher] Change detected. Re-scanning media library...');
         try {
-            await db.read(); // Read latest folder metadata
+            await db.read();
             const newChildren = await scanMediaToTree(mediaDir);
             libraryState.children = newChildren;
+            
+            await db.write(); // IMPORTANT: Write cache updates
+            
             broadcastLibraryUpdate();
             const playlistWasUpdated = await syncPlaylistWithLibrary();
             if (playlistWasUpdated) {
-                broadcastState(); // Broadcast updated playlist if it changed
+                broadcastState();
             }
         } catch (error) {
             console.error('[File Watcher] Failed to refresh and broadcast library:', error);
         }
-    }, 2000); // Increased debounce to handle multiple changes
+    }, 2000);
 };
 
-// Initialize and start the file watcher.
 fs.watch(mediaDir, { recursive: true }, (eventType, filename) => {
     if (filename) {
         console.log(`[File Watcher] Event '${eventType}' on: ${filename}`);
@@ -296,10 +332,8 @@ fs.watch(mediaDir, { recursive: true }, (eventType, filename) => {
 });
 
 
-// --- Helper to get station settings ---
 const getStationSettings = async () => {
     await db.read();
-    // Find the first user with 'studio' role, they are considered the admin
     const studioUser = db.data.users.find(u => u.role === 'studio');
     const userData = studioUser ? db.data.userdata[studioUser.email] : null;
     const settings = userData?.settings;
@@ -313,8 +347,7 @@ const getStationSettings = async () => {
 };
 
 
-// --- WebSocket Connection Management ---
-const clients = new Map(); // email -> ws
+const clients = new Map();
 let studioClientEmail = null;
 const presenterEmails = new Set();
 let currentLogoSrc = null;
@@ -353,7 +386,7 @@ const broadcastPresenterList = async () => {
     const studioWs = clients.get(studioClientEmail);
     if (!studioWs || studioWs.readyState !== WebSocket.OPEN) return;
 
-    await db.read(); // Ensure we have the latest user data
+    await db.read();
     const presenters = db.data.users
         .filter(u => presenterEmails.has(u.email))
         .map(({ password, ...user }) => user);
@@ -365,8 +398,6 @@ const broadcastPresenterList = async () => {
     console.log(`[WebSocket] Sent updated presenter list to studio. Count: ${presenters.length}`);
 };
 
-// --- LOGIC HELPERS (ported from App.tsx) ---
-
 const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
     const len = playlist.length;
     if (len === 0) return -1;
@@ -374,8 +405,6 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
     for (let i = 0; i < len; i++) {
         nextIndex = (nextIndex + direction + len) % len;
         const item = playlist[nextIndex];
-        // Note: Server-side logic for skipping based on timeline is complex and will be handled later.
-        // For now, it just finds the next item that isn't a marker.
         if (item && !item.markerType) {
             return nextIndex;
         }
@@ -383,9 +412,8 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
     return -1;
 };
 
-// --- Autonomous FFmpeg Playout Engine (Single-Track-at-a-time model) ---
 let currentFfmpegCommand = null;
-let serverStreamStatus = 'inactive'; // 'inactive', 'connecting', 'broadcasting', 'error'
+let serverStreamStatus = 'inactive';
 let serverStreamError = null;
 let metadataTimeoutId = null;
 let playoutProgressInterval = null;
@@ -447,7 +475,7 @@ const stopPlayout = (shouldBroadcast = true) => {
 };
 
 const playTrack = async (trackIndex) => {
-    stopPlayout(false); // Stop any existing playout without broadcasting yet
+    stopPlayout(false);
 
     await db.read();
     const { sharedPlaylist, sharedPlayerState } = db.data;
@@ -534,7 +562,6 @@ const playTrack = async (trackIndex) => {
             
             let nextTrackIndexToPlay = -1;
 
-            // Add to history
             db.data.playoutHistory.push({
                 trackId: track.originalId || track.id,
                 artist: track.artist,
@@ -550,7 +577,7 @@ const playTrack = async (trackIndex) => {
 
             if (shouldRemove) {
                 db.data.sharedPlaylist.splice(trackIndex, 1);
-                nextTrackIndexToPlay = trackIndex; // The next track is now at the current index
+                nextTrackIndexToPlay = trackIndex;
             } else {
                 nextTrackIndexToPlay = trackIndex + 1;
             }
@@ -559,15 +586,15 @@ const playTrack = async (trackIndex) => {
                 console.log('[Playout] Stop after track triggered.');
                 sharedPlayerState.isPlaying = false;
                 sharedPlayerState.stopAfterTrackId = null;
-                nextTrackIndexToPlay = -1; // Don't play next
+                nextTrackIndexToPlay = -1;
             }
             
-            await db.write(); // Write history and potential playlist changes
+            await db.write();
 
             if (nextTrackIndexToPlay !== -1) {
                 playTrack(nextTrackIndexToPlay);
             } else {
-                broadcastState(); // Broadcast the stopped state
+                broadcastState();
             }
         })
         .on('error', (err) => {
@@ -590,7 +617,6 @@ const startPlayout = () => {
     playTrack(sharedPlayerState.currentTrackIndex);
 };
 
-// --- Auto-Fill Logic ---
 let autoFillInterval = null;
 
 const findFolderInServerTree = (node, folderId) => {
@@ -617,7 +643,6 @@ const getAllTracksFromNode = (node) => {
 };
 
 const performAutofill = async () => {
-    console.log('[Auto-Fill] Performing autofill...');
     await db.read();
 
     const studioUser = db.data.users.find(u => u.role === 'studio');
@@ -626,7 +651,6 @@ const performAutofill = async () => {
     const policy = studioData?.settings?.playoutPolicy;
 
     if (!policy || !policy.isAutoFillEnabled || !policy.autoFillSourceId) {
-        console.log('[Auto-Fill] Autofill is disabled or not configured properly.');
         return;
     }
 
@@ -644,9 +668,7 @@ const performAutofill = async () => {
     let sourceTracks = [];
     if (autoFillSourceType === 'folder') {
         const sourceFolder = findFolderInServerTree(libraryState, autoFillSourceId);
-        if (sourceFolder) {
-            sourceTracks = getAllTracksFromNode(sourceFolder);
-        }
+        if (sourceFolder) sourceTracks = getAllTracksFromNode(sourceFolder);
     } else if (autoFillSourceType === 'tag') {
         sourceTracks = getAllTracksFromNode(libraryState)
             .filter(t => t.tags && t.tags.includes(autoFillSourceId));
@@ -657,30 +679,21 @@ const performAutofill = async () => {
         return;
     }
 
+    const now = Date.now();
+    const playlistTail = db.data.sharedPlaylist.filter(item => !item.markerType).slice(-5);
+
     const eligibleTracks = sourceTracks.filter(track => {
-        // Check against playout history
         const hasHistoryConflict = db.data.playoutHistory.some(entry => {
-            const timeSincePlayed = Date.now() - entry.playedAt;
-            if (entry.artist === track.artist && timeSincePlayed < artistSeparationMs) return true;
+            const timeSincePlayed = now - entry.playedAt;
+            if (entry.artist && entry.artist === track.artist && timeSincePlayed < artistSeparationMs) return true;
             if (entry.title === track.title && timeSincePlayed < titleSeparationMs) return true;
             return false;
         });
-
-        if (hasHistoryConflict) return false;
-
-        // Check against the current playlist to avoid adding recent repeats
-        const hasPlaylistConflict = db.data.sharedPlaylist.some(item => {
-            if (item.markerType) return false;
-            if (item.artist === track.artist) return true;
-            if (item.title === track.title) return true;
-            return false;
-        });
-
-        return !hasPlaylistConflict;
+        return !hasHistoryConflict;
     });
 
     if (eligibleTracks.length === 0) {
-        console.warn('[Auto-Fill] No eligible tracks found after applying separation rules.');
+        console.warn('[Auto-Fill] No eligible tracks found after applying playout history rules.');
         return;
     }
 
@@ -689,9 +702,12 @@ const performAutofill = async () => {
     const shuffledTracks = eligibleTracks.sort(() => 0.5 - Math.random());
 
     for (const track of shuffledTracks) {
-        // Double-check against the tracks we're about to add in this batch
-        const hasBatchConflict = tracksToAdd.some(added => added.artist === track.artist || added.title === track.title);
-        if (!hasBatchConflict) {
+        const contextToCheck = [...playlistTail, ...tracksToAdd];
+        const hasContextConflict = contextToCheck.some(contextTrack => 
+            (contextTrack.artist && contextTrack.artist === track.artist) || contextTrack.title === track.title
+        );
+
+        if (!hasContextConflict) {
             tracksToAdd.push(track);
             accumulatedDuration += track.duration;
             if (accumulatedDuration >= targetDurationSecs) break;
@@ -711,7 +727,7 @@ const performAutofill = async () => {
         broadcastState();
         console.log(`[Auto-Fill] Added ${tracksToAdd.length} tracks to the playlist.`);
     } else {
-        console.log('[Auto-Fill] No tracks could be added in this cycle.');
+        console.log('[Auto-Fill] No tracks could be added in this cycle due to separation rules.');
     }
 };
 
@@ -720,7 +736,7 @@ const checkAndTriggerAutofill = async () => {
     const { sharedPlaylist, sharedPlayerState } = db.data;
     const { isPlaying, currentTrackIndex, trackProgress } = sharedPlayerState;
 
-    if (!isPlaying) return; // Only run when playing
+    if (!isPlaying) return;
 
     const studioUser = db.data.users.find(u => u.role === 'studio');
     if (!studioUser) return;
@@ -743,7 +759,7 @@ const checkAndTriggerAutofill = async () => {
 
     const remainingMinutes = remainingDuration / 60;
     if (remainingMinutes < policy.autoFillLeadTime) {
-        console.log(`[Auto-Fill] Remaining playlist duration (${remainingMinutes.toFixed(1)} min) is below threshold (${policy.autoFillLeadTime} min). Triggering fill.`);
+        console.log(`[Auto-Fill] Remaining duration (${remainingMinutes.toFixed(1)} min) is below threshold (${policy.autoFillLeadTime} min). Triggering.`);
         await performAutofill();
     }
 };
@@ -759,13 +775,11 @@ const setupAutoMode = async () => {
     
     if (studioData?.settings?.isAutoModeEnabled) {
         console.log('[Auto-Mode] Auto mode is enabled. Starting automation checks.');
-        autoFillInterval = setInterval(checkAndTriggerAutofill, 15000); // Check every 15 seconds
+        autoFillInterval = setInterval(checkAndTriggerAutofill, 15000);
     } else {
         console.log('[Auto-Mode] Auto mode is disabled.');
     }
 };
-
-// --- Main WebSocket Logic ---
 
 wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -774,7 +788,7 @@ wss.on('connection', async (ws, req) => {
 
     if (clientType === 'playerPage') {
         console.log('[WebSocket] Browser Player Page connected.');
-        ws.req = req; // Store request for IP lookup
+        ws.req = req;
         browserPlayerClients.add(ws);
         
         if (ws.readyState === ws.OPEN) {
@@ -788,12 +802,11 @@ wss.on('connection', async (ws, req) => {
                 if (data.type === 'chatMessage') {
                     console.log(`[WebSocket] Chat from listener '${data.payload.from}': ${data.payload.text}`);
                     const listenerMessage = {
-                        from: data.payload.from.substring(0, 20), // Sanitize nickname
-                        text: data.payload.text.substring(0, 280), // Sanitize text
+                        from: data.payload.from.substring(0, 20),
+                        text: data.payload.text.substring(0, 280),
                         timestamp: Date.now()
                     };
 
-                    // Broadcast to studio
                     if (studioClientEmail) {
                         const studioWs = clients.get(studioClientEmail);
                         if (studioWs && studioWs.readyState === WebSocket.OPEN) {
@@ -801,7 +814,6 @@ wss.on('connection', async (ws, req) => {
                         }
                     }
 
-                    // Broadcast to all player clients (including sender)
                     browserPlayerClients.forEach(clientWs => {
                         if (clientWs.readyState === WebSocket.OPEN) {
                             clientWs.send(JSON.stringify({ type: 'chatMessage', payload: listenerMessage }));
@@ -847,7 +859,6 @@ wss.on('connection', async (ws, req) => {
     broadcastPresenterList();
 
     if (ws.readyState === ws.OPEN) {
-        // Send the current library state on connection
         ws.send(JSON.stringify({ type: 'library-update', payload: libraryState }));
         ws.send(JSON.stringify({
             type: 'state-update',
@@ -890,7 +901,7 @@ wss.on('connection', async (ws, req) => {
                         const { command, payload } = data.payload;
                         console.log(`[WebSocket] Processing studio command: ${command}`);
                 
-                        await db.read(); // Read latest state
+                        await db.read();
                 
                         let stateChanged = false;
                         const { sharedPlaylist, sharedPlayerState } = db.data;
@@ -936,7 +947,6 @@ wss.on('connection', async (ws, req) => {
                                     title: newMetadata.title,
                                     artist: newMetadata.artist,
                                 }, fullPath);
-                                // Note: TrackType is not an ID3 tag, so we can't save it directly. This would require a DB mapping.
                                 if (success) {
                                     console.log(`[Metadata] Updated metadata for ${trackId}`);
                                     refreshAndBroadcastLibrary();
@@ -944,7 +954,7 @@ wss.on('connection', async (ws, req) => {
                                 break;
                             }
                             case 'removeFromLibrary': {
-                                const { id } = payload; // id is the relative path
+                                const { id } = payload;
                                 if (!id) break;
                                 const fullPath = path.join(mediaDir, id);
                                 try {
@@ -952,11 +962,16 @@ wss.on('connection', async (ws, req) => {
                                         await fsPromises.rm(fullPath, { recursive: true, force: true });
                                         console.log(`[FS] Deleted item: ${fullPath}`);
                                         
-                                        // Also delete associated artwork
                                         const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
                                         if (fs.existsSync(artworkPath)) {
                                             await fsPromises.unlink(artworkPath);
                                             console.log(`[FS] Deleted artwork: ${artworkPath}`);
+                                        }
+
+                                        if (db.data.mediaCache[id]) {
+                                            delete db.data.mediaCache[id];
+                                            await db.write();
+                                            console.log(`[Cache] Removed ${id} from cache.`);
                                         }
                                     }
                                 } catch (e) {
@@ -1031,7 +1046,7 @@ wss.on('connection', async (ws, req) => {
                                         sharedPlayerState.isPlaying = false;
                                         stopPlayout();
                                     }
-                                    setupAutoMode(); // Restart/stop the interval
+                                    setupAutoMode();
                                     stateChanged = true;
                                 }
                                 break;
@@ -1090,7 +1105,6 @@ wss.on('connection', async (ws, req) => {
                                 const wasPlaying = sharedPlayerState.isPlaying;
 
                                 if (sharedPlayerState.currentPlayingItemId === payload.itemId) {
-                                    // The currently playing track was removed
                                     stopPlayout(false);
                                     if (wasPlaying) {
                                         const nextPlayableIndex = findNextPlayableIndex(newPlaylist, originalIndex - 1, 1);
@@ -1099,7 +1113,6 @@ wss.on('connection', async (ws, req) => {
                                         }
                                     }
                                 } else {
-                                    // A different track was removed, just update the index
                                     const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
                                     if(newCurrentIndex > -1) sharedPlayerState.currentTrackIndex = newCurrentIndex;
                                 }
@@ -1131,7 +1144,7 @@ wss.on('connection', async (ws, req) => {
                                 sharedPlayerState.currentTrackIndex = 0;
                                 sharedPlayerState.trackProgress = 0;
                                 sharedPlayerState.stopAfterTrackId = null;
-                                stopPlayout(false); // Stop playout but don't broadcast yet
+                                stopPlayout(false);
                                 stateChanged = true;
                                 break;
                             }
@@ -1306,7 +1319,6 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 
-// --- Middleware ---
 app.use(cors());
 app.use(express.json());
 app.set('trust proxy', 1);
@@ -1338,7 +1350,6 @@ const getPlayerPageHTML = (stationName) => `
         .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; }
         .footer a { color: var(--text-color); text-decoration: none; }
         
-        /* Chat Styles */
         #chat-bubble { position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 15px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
         #chat-bubble:hover { transform: scale(1.1); }
         #chat-bubble svg { width: 32px; height: 32px; color: white; }
@@ -1405,7 +1416,6 @@ const getPlayerPageHTML = (stationName) => `
         const artistEl = document.getElementById('artist');
         const artworkEl = document.getElementById('artwork');
 
-        // Chat elements
         const chatBubble = document.getElementById('chat-bubble');
         const chatNotification = document.getElementById('chat-notification');
         const chatWindow = document.getElementById('chat-window');
@@ -1478,7 +1488,6 @@ const getPlayerPageHTML = (stationName) => `
             navigator.mediaSession.setActionHandler('pause', () => playBtn.click());
         }
 
-        // Chat logic
         const connectWs = () => {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(protocol + '//' + window.location.host + '/socket?clientType=playerPage');
@@ -1557,7 +1566,6 @@ const getPlayerPageHTML = (stationName) => `
 </body>
 </html>`;
 
-// --- API Endpoints ---
 app.get('/api/public-config', async (req, res) => {
     const settings = await getStationSettings();
     if (settings && settings.streamingConfig) {
@@ -1583,7 +1591,6 @@ app.get('/api/public-now-playing', async (req, res) => {
         return res.json({ title: 'Silence', artist: 'RadioHost.cloud', artworkUrl: null });
     }
     
-    // Find full track info in the library for artwork URL
     let fullTrackInfo = findTrackInServerTree(libraryState, currentItem.originalId || currentItem.id);
     
     let artworkUrl = null;
@@ -1674,9 +1681,8 @@ app.post('/api/userdata/:email', async (req, res) => {
     db.data.userdata[email] = req.body;
     await db.write();
 
-    // After updating user data, re-evaluate auto-backup settings
     setupAutoBackup();
-    setupAutoMode(); // Also re-evaluate auto-mode settings
+    setupAutoMode();
 
     const newConfig = req.body?.settings?.playoutPolicy?.streamingConfig;
     if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
@@ -1689,7 +1695,6 @@ app.post('/api/userdata/:email', async (req, res) => {
     res.json({ success: true });
 });
 
-// Multer setup for file uploads
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const relativePath = req.body.webkitRelativePath || file.originalname;
@@ -1721,7 +1726,7 @@ app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
 });
 
 app.post('/api/track/delete', async (req, res) => {
-    const { id } = req.body; // id is the relative path
+    const { id } = req.body;
     if (!id) {
         return res.status(400).json({ message: 'Track ID is required.' });
     }
@@ -1731,10 +1736,16 @@ app.post('/api/track/delete', async (req, res) => {
         if (fs.existsSync(fullPath)) {
             await fsPromises.rm(fullPath, { recursive: true, force: true });
 
-            // Also delete associated artwork
             const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
             if (fs.existsSync(artworkPath)) {
                 await fsPromises.unlink(artworkPath);
+            }
+
+            await db.read();
+            if (db.data.mediaCache[id]) {
+                delete db.data.mediaCache[id];
+                await db.write();
+                console.log(`[Cache] Removed ${id} from cache.`);
             }
             
             res.json({ success: true, message: `Deleted ${id}` });
@@ -1765,7 +1776,6 @@ app.post('/api/folder', async (req, res) => {
 });
 
 
-// --- Public stream routes ---
 app.get('/stream', async (req, res) => {
     const settings = await getStationSettings();
     if(settings?.streamingConfig?.publicPlayerEnabled){
@@ -1775,7 +1785,6 @@ app.get('/stream', async (req, res) => {
     }
 });
 
-// --- Server-side Backup Logic ---
 const performBackup = async () => {
     await db.read();
     const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
@@ -1818,16 +1827,11 @@ const setupAutoBackup = async () => {
 };
 
 
-// --- Serve Frontend ---
-// This must be placed after all API and stream routes to function as a catch-all for the SPA.
 const distPath = path.join(__dirname, 'dist');
 if (fs.existsSync(distPath)) {
     console.log(`[Server] Production mode: serving static files from '${distPath}'`);
-    // Serve static files from the 'dist' directory
     app.use(express.static(distPath));
 
-    // For any other GET request that doesn't match a static file or an API route,
-    // send the index.html file. This is for SPA routing.
     app.get('*', (req, res) => {
         res.sendFile(path.join(distPath, 'index.html'));
     });
@@ -1840,21 +1844,19 @@ if (fs.existsSync(distPath)) {
 }
 
 
-// --- Initial library scan on startup ---
 (async () => {
     console.log('[Startup] Performing initial media library scan...');
     libraryState.children = await scanMediaToTree(mediaDir);
+    await db.write();
     console.log(`[Startup] Scan complete. Found ${libraryState.children.length} items in root.`);
 
     await db.read();
     const studioUser = db.data.users.find(u => u.role === 'studio');
     const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
     
-    // Setup automation and backups
     setupAutoMode();
     setupAutoBackup();
     
-    // Start playout if auto mode was enabled from a previous session
     if (studioData?.settings?.isAutoModeEnabled) {
         if (db.data.sharedPlaylist.length > 0) {
             db.data.sharedPlayerState.isPlaying = true;
@@ -1863,14 +1865,12 @@ if (fs.existsSync(distPath)) {
         }
     }
     
-    // Perform startup backup if enabled
     if (studioData?.settings?.isAutoBackupOnStartupEnabled) {
         console.log('[Backup] Performing startup backup as per settings.');
         performBackup();
     }
 })();
 
-// --- Start Server ---
 server.listen(PORT, () => {
     console.log(`RadioHost.cloud server running on http://localhost:${PORT}`);
 });
