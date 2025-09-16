@@ -199,6 +199,60 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
 let libraryState = { id: 'root', name: 'Media Library', type: 'folder', children: [] };
 let watchTimeout = null;
 
+const findTrackInServerTree = (node, trackId) => {
+    for (const child of node.children) {
+        if (child.type !== 'folder' && (child.id === trackId || child.originalId === trackId)) {
+            return child;
+        }
+        if (child.type === 'folder') {
+            const found = findTrackInServerTree(child, trackId);
+            if (found) return found;
+        }
+    }
+    return null;
+};
+
+const syncPlaylistWithLibrary = async () => {
+    await db.read();
+    const { sharedPlaylist } = db.data;
+    let playlistChanged = false;
+    
+    const newPlaylist = sharedPlaylist.map(item => {
+        if (item.markerType) return item; // Skip markers
+
+        const libraryTrack = findTrackInServerTree(libraryState, item.originalId || item.id);
+        if (libraryTrack) {
+            // Check if anything actually changed to avoid unnecessary updates
+            if (item.title !== libraryTrack.title || 
+                item.artist !== libraryTrack.artist ||
+                item.duration !== libraryTrack.duration ||
+                JSON.stringify(item.tags || []) !== JSON.stringify(libraryTrack.tags || []))
+            {
+                playlistChanged = true;
+                return {
+                    ...item, // Keep playlist-specific stuff like id, vtMix, addedBy
+                    title: libraryTrack.title,
+                    artist: libraryTrack.artist,
+                    duration: libraryTrack.duration,
+                    type: libraryTrack.type,
+                    hasEmbeddedArtwork: libraryTrack.hasEmbeddedArtwork,
+                    remoteArtworkUrl: libraryTrack.remoteArtworkUrl,
+                    tags: libraryTrack.tags,
+                };
+            }
+        }
+        return item;
+    });
+
+    if (playlistChanged) {
+        console.log('[Sync] Library changes detected. Updating shared playlist.');
+        db.data.sharedPlaylist = newPlaylist;
+        await db.write();
+    }
+    return playlistChanged;
+};
+
+
 const broadcastLibraryUpdate = () => {
     const message = JSON.stringify({ type: 'library-update', payload: libraryState });
     clients.forEach((ws) => {
@@ -218,6 +272,10 @@ const refreshAndBroadcastLibrary = () => {
             const newChildren = await scanMediaToTree(mediaDir);
             libraryState.children = newChildren;
             broadcastLibraryUpdate();
+            const playlistWasUpdated = await syncPlaylistWithLibrary();
+            if (playlistWasUpdated) {
+                broadcastState(); // Broadcast updated playlist if it changed
+            }
         } catch (error) {
             console.error('[File Watcher] Failed to refresh and broadcast library:', error);
         }
@@ -326,6 +384,7 @@ let serverStreamStatus = 'inactive'; // 'inactive', 'connecting', 'streaming', '
 let serverStreamError = null;
 let metadataTimeoutId = null;
 const playlistFilePath = path.join(__dirname, 'playlist.txt');
+let playoutProgressInterval = null;
 
 
 const broadcastStreamStatus = () => {
@@ -376,20 +435,7 @@ const scheduleMetadataUpdates = (tracks, config) => {
         
         const track = tracks[trackIndex];
         
-        // Find the full track object from the library to ensure metadata is fresh
-        let fullTrackInfo = null;
-        const findInTree = (node) => {
-            if (fullTrackInfo) return;
-            for (const child of node.children) {
-                if (child.id === (track.originalId || track.id)) {
-                    fullTrackInfo = child;
-                    return;
-                }
-                if (child.type === 'folder') findInTree(child);
-            }
-        }
-        findInTree(libraryState);
-
+        let fullTrackInfo = findTrackInServerTree(libraryState, track.originalId || track.id);
         updateIcecastMetadata(fullTrackInfo || track, config);
         
         metadataTimeoutId = setTimeout(() => {
@@ -410,6 +456,10 @@ const stopPlayout = () => {
         clearTimeout(metadataTimeoutId);
         metadataTimeoutId = null;
     }
+    if (playoutProgressInterval) {
+        clearInterval(playoutProgressInterval);
+        playoutProgressInterval = null;
+    }
 };
 
 const startPlayout = async () => {
@@ -427,6 +477,49 @@ const startPlayout = async () => {
         broadcastState();
         return;
     }
+    
+    const playoutMap = tracksToPlay.map(track => ({
+        id: track.id,
+        duration: track.duration 
+    }));
+    let currentPlayoutTrackIndex = 0;
+    let startTime = Date.now();
+
+    playoutProgressInterval = setInterval(() => {
+        if (!sharedPlayerState.isPlaying) {
+            clearInterval(playoutProgressInterval);
+            return;
+        }
+
+        const elapsedTime = (Date.now() - startTime) / 1000;
+        
+        let cumulativeDuration = 0;
+        let foundTrack = false;
+        for (let i = 0; i < playoutMap.length; i++) {
+            const trackDuration = playoutMap[i].duration;
+            if (elapsedTime < cumulativeDuration + trackDuration) {
+                const trackProgress = elapsedTime - cumulativeDuration;
+                if (currentPlayoutTrackIndex !== i) {
+                    currentPlayoutTrackIndex = i;
+                    const newTrack = tracksToPlay[i];
+                    sharedPlayerState.currentPlayingItemId = newTrack.id;
+                    sharedPlayerState.currentTrackIndex = db.data.sharedPlaylist.findIndex(t => t.id === newTrack.id);
+                }
+                sharedPlayerState.trackProgress = trackProgress;
+                foundTrack = true;
+                break;
+            }
+            cumulativeDuration += trackDuration;
+        }
+        
+        if (!foundTrack) { // Playout has finished
+             sharedPlayerState.isPlaying = false;
+             stopPlayout();
+        }
+
+        broadcastState();
+    }, 250);
+
 
     const playlistFileContent = tracksToPlay.map(track => {
         const trackPath = path.join(mediaDir, track.originalId || track.id);
@@ -511,23 +604,13 @@ const startPlayout = async () => {
             broadcastState();
         })
         .on('progress', (progress) => {
-            // Note: Progress tracking is complex with concat. This is a simplification.
-            // It will show progress through the entire concatenated stream.
-            // For now, we update the first track's progress.
-            if (!progress.timemark) return;
-            const parts = progress.timemark.split(':');
-            const seconds = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
-            const flooredSeconds = Math.floor(seconds);
-             if (sharedPlayerState.trackProgress !== flooredSeconds) {
-                sharedPlayerState.trackProgress = flooredSeconds;
-                broadcastState(); 
-            }
+            // Progress is now handled by the setInterval for better accuracy with track changes
         })
         .on('end', async () => {
             console.log('[FFMPEG] Concatenated playlist finished.');
             currentFfmpegCommand = null;
             sharedPlayerState.isPlaying = false;
-            // Optionally, handle what happens when the whole playlist ends (e.g., auto-fill logic)
+            stopPlayout();
             await db.write();
             broadcastState();
         })
@@ -551,6 +634,7 @@ const startPlayout = async () => {
             }
             
             sharedPlayerState.isPlaying = false;
+            stopPlayout();
             await db.write();
             broadcastState();
         });
@@ -1034,16 +1118,17 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'voiceTrackAdd':
-                    if (studioClientEmail && clients.has(studioClientEmail)) {
+                    if (user && user.role === 'presenter' && studioClientEmail) {
+                        console.log(`[WebSocket] Received VT from presenter ${email}. Adding to playlist.`);
                         const { voiceTrack, beforeItemId } = data.payload;
-                        console.log(`[WebSocket] Forwarding VT from ${email} to studio.`);
-                        const studioWs = clients.get(studioClientEmail);
-                        if (studioWs && studioWs.readyState === ws.OPEN) {
-                            // The studio command handler will add this to the playlist
-                            studioWs.send(JSON.stringify({ type: 'voiceTrackAdd', payload: { voiceTrack, beforeItemId }, sender: email }));
+                        if (voiceTrack && voiceTrack.id) {
+                            const newPlaylist = [...db.data.sharedPlaylist];
+                            const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                            newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, voiceTrack);
+                            db.data.sharedPlaylist = newPlaylist;
+                            await db.write();
+                            broadcastState();
                         }
-                    } else {
-                        console.log(`[WebSocket] Received VT from ${email}, but no studio is connected.`);
                     }
                     break;
                 
@@ -1383,18 +1468,7 @@ app.get('/api/public-now-playing', async (req, res) => {
     }
     
     // Find full track info in the library for artwork URL
-    let fullTrackInfo = null;
-    const findInTree = (node) => {
-        if (fullTrackInfo) return;
-        for (const child of node.children) {
-            if (child.id === (currentItem.originalId || currentItem.id)) {
-                fullTrackInfo = child;
-                return;
-            }
-            if (child.type === 'folder') findInTree(child);
-        }
-    }
-    findInTree(libraryState);
+    let fullTrackInfo = findTrackInServerTree(libraryState, currentItem.originalId || currentItem.id);
     
     let artworkUrl = null;
     if (fullTrackInfo) {

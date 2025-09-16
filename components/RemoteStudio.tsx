@@ -320,34 +320,31 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
 
             {isStudio && (
                 onlinePresenters.filter(p => p.email !== currentUser?.email).length > 0 ? (
-                    <div>
-                        <h4 className="text-sm font-semibold text-neutral-800 dark:text-neutral-200 mb-2">Remote Presenters</h4>
-                        <div className="space-y-3 max-h-48 overflow-y-auto">
-                            {onlinePresenters.filter(p => p.email !== currentUser?.email).map(presenter => {
-                                const sourceId: AudioSourceId = `remote_${presenter.email}`;
-                                const isPresenterOnAir = mixerConfig[sourceId]?.sends.main.enabled || false;
-                                const presenterVolume = audioLevels[sourceId] || 0;
+                    <div className="space-y-3 max-h-48 overflow-y-auto">
+                        {onlinePresenters.filter(p => p.email !== currentUser?.email).map(presenter => {
+                            const sourceId: AudioSourceId = `remote_${presenter.email}`;
+                            const isPresenterOnAir = mixerConfig[sourceId]?.sends.main.enabled || false;
+                            const presenterVolume = audioLevels[sourceId] || 0;
 
-                                return (
-                                    <div key={presenter.email} className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                                        <div className="flex items-center justify-between">
-                                            <p className="font-medium text-black dark:text-white truncate">{presenter.nickname}</p>
-                                            <button
-                                                onClick={() => handleRemoteOnAirToggle(presenter.email)}
-                                                className={`px-3 py-1 text-sm font-semibold rounded-md transition-colors ${
-                                                    isPresenterOnAir ? 'bg-red-600 text-white hover:bg-red-700' : 'bg-neutral-300 dark:bg-neutral-700 hover:bg-neutral-400 dark:hover:bg-neutral-600'
-                                                }`}
-                                            >
-                                                {isPresenterOnAir ? 'ON AIR' : 'Off Air'}
-                                            </button>
-                                        </div>
-                                        <div className="mt-2 h-6">
-                                            <VolumeMeter volume={presenterVolume} />
-                                        </div>
+                            return (
+                                <div key={presenter.email} className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                                    <div className="flex items-center justify-between">
+                                        <p className="font-medium text-black dark:text-white truncate">{presenter.nickname}</p>
+                                        <button
+                                            onClick={() => handleRemoteOnAirToggle(presenter.email)}
+                                            className={`px-3 py-1 text-sm font-semibold rounded-md transition-colors ${
+                                                isPresenterOnAir ? 'bg-red-600 text-white hover:bg-red-700' : 'bg-neutral-300 dark:bg-neutral-700 hover:bg-neutral-400 dark:hover:bg-neutral-600'
+                                            }`}
+                                        >
+                                            {isPresenterOnAir ? 'ON AIR' : 'Off Air'}
+                                        </button>
                                     </div>
-                                );
-                            })}
-                        </div>
+                                    <div className="mt-2 h-6">
+                                        <VolumeMeter volume={presenterVolume} />
+                                    </div>
+                                </div>
+                            );
+                        })}
                     </div>
                 ) : (
                     <div className="text-center text-sm text-neutral-500 py-4">

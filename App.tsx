@@ -29,6 +29,7 @@ import UserManagement from './components/UserManagement';
 import { LogoIcon } from './components/icons/LogoIcon';
 import MobileApp from './components/MobileApp';
 import Chat from './components/Chat';
+import { UsersIcon } from './components/icons/UsersIcon';
 
 
 const createInitialLibrary = (): Folder => ({
@@ -1812,10 +1813,9 @@ const AppInternal: React.FC = () => {
                 if (activeRightColumnTabRef.current !== 'chat' && !isMobile) {
                     setHasUnreadChat(true);
                 }
-            } else if (playoutPolicyRef.current.playoutMode === 'studio' && data.type === 'voiceTrackAdd') {
-                const { voiceTrack, beforeItemId } = data.payload;
-                console.log('[Studio] Received and adding new VT from presenter.');
-                sendStudioCommand('insertTrack', { track: voiceTrack, beforeItemId });
+            } else if (data.type === 'voiceTrackAdd') {
+                // This message is now processed by the server, which then broadcasts a state-update.
+                // No client-side action needed here anymore.
             } else if (data.type === 'presenter-on-air-request') {
                 if (playoutPolicyRef.current.playoutMode === 'studio') {
                     const { presenterEmail, onAir } = data.payload;
@@ -1917,45 +1917,6 @@ const AppInternal: React.FC = () => {
             setChatMessages(prev => [...prev.slice(-100), message]);
         }
     }, []);
-
-    useEffect(() => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-    
-        let needsUpdate = false;
-        const newPlaylist = playlist.map(item => {
-            if ('markerType' in item) {
-                return item;
-            }
-    
-            const trackInPlaylist = item;
-            const libraryTrackId = trackInPlaylist.originalId || trackInPlaylist.id;
-            const libraryTrack = findTrackInTree(mediaLibrary, libraryTrackId);
-    
-            if (libraryTrack) {
-                const areTagsDifferent = JSON.stringify(trackInPlaylist.tags || []) !== JSON.stringify(libraryTrack.tags || []);
-                const areMetadataDifferent = trackInPlaylist.title !== libraryTrack.title ||
-                                           trackInPlaylist.artist !== libraryTrack.artist ||
-                                           trackInPlaylist.type !== libraryTrack.type;
-    
-                if (areTagsDifferent || areMetadataDifferent) {
-                    needsUpdate = true;
-                    return {
-                        ...libraryTrack,
-                        id: trackInPlaylist.id,
-                        originalId: libraryTrack.id,
-                        addedBy: trackInPlaylist.addedBy,
-                        vtMix: trackInPlaylist.vtMix,
-                    };
-                }
-            }
-            return trackInPlaylist;
-        });
-    
-        if (needsUpdate) {
-            console.log('[Sync] Media library changes detected. Updating playlist.');
-            setPlaylist(newPlaylist);
-        }
-    }, [mediaLibrary, playoutPolicy.playoutMode]);
 
 
     if (isLoadingSession) {
@@ -2135,8 +2096,8 @@ const AppInternal: React.FC = () => {
                                 aria-controls="mic-panel"
                             >
                                 <div className="flex items-center gap-2">
-                                    <MicrophoneIcon className="w-5 h-5" />
-                                    <h3 className="font-semibold text-black dark:text-white">Microphone</h3>
+                                    {isStudio ? <UsersIcon className="w-5 h-5" /> : <MicrophoneIcon className="w-5 h-5" />}
+                                    <h3 className="font-semibold text-black dark:text-white">{isStudio ? 'Presenters' : 'Microphone'}</h3>
                                 </div>
                                 <button className="text-black dark:text-white">
                                     {isMicPanelCollapsed ? <ChevronUpIcon className="w-5 h-5" /> : <ChevronDownIcon className="w-5 h-5" />}
