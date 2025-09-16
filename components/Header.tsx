@@ -310,7 +310,7 @@ const Header: React.FC<HeaderProps> = ({
                             )}
                         </div>
                         {playoutMode !== 'presenter' && (
-                            <div className={`absolute left-1/2 -translate-x-1/2 flex items-center gap-2 transition-opacity duration-300 ${!currentTrack ? 'opacity-0' : 'opacity-100'}`} title="Enable Auto mode to automatically start playback and enable all automation features.">
+                            <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2" title="Enable Auto mode to automatically start playback and enable all automation features.">
                                 <label htmlFor="auto-mode-toggle-deck" className={`font-bold text-sm cursor-pointer transition-colors ${isAutoModeEnabled ? 'text-green-500' : monoTextColorClass}`}>AUTO</label>
                                 <Toggle id="auto-mode-toggle-deck" checked={isAutoModeEnabled} onChange={onToggleAutoMode} />
                             </div>
@@ -388,7 +388,7 @@ const Header: React.FC<HeaderProps> = ({
                     {/* Center: Player */}
                     <div className="flex-grow min-w-0 flex items-center justify-center gap-4 sm:gap-6">
                         {playoutMode !== 'presenter' && (
-                            <div className={`flex items-center gap-2 transition-opacity duration-300 ${!currentTrack ? 'opacity-0 pointer-events-none' : 'opacity-100'}`} title="Enable Auto mode to automatically start playback and enable all automation features.">
+                            <div className="flex items-center gap-2" title="Enable Auto mode to automatically start playback and enable all automation features.">
                                 <label htmlFor="auto-mode-toggle-compact" className={`font-bold text-sm cursor-pointer transition-colors ${isAutoModeEnabled ? 'text-green-500' : monoTextColorClass}`}>AUTO</label>
                                 <Toggle id="auto-mode-toggle-compact" checked={isAutoModeEnabled} onChange={onToggleAutoMode} />
                             </div>
