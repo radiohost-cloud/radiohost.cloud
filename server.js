@@ -398,15 +398,16 @@ const broadcastState = () => {
   });
 };
 
-const broadcastPublicMetadata = async () => {
+const getCurrentPublicMetadata = async () => {
     await db.read();
     const settings = await getStationSettings();
     const { sharedPlayerState, sharedPlaylist } = db.data;
 
-    let metadataPayload = {
+    let nowPlaying = {
         title: 'Silence',
         artist: 'RadioHost.cloud',
-        artworkUrl: null
+        artworkUrl: null,
+        logoSrc: settings.logoSrc,
     };
 
     if (sharedPlayerState.isPlaying && sharedPlayerState.currentPlayingItemId) {
@@ -418,22 +419,27 @@ const broadcastPublicMetadata = async () => {
                 if (fullTrackInfo.remoteArtworkUrl) {
                     artworkUrl = fullTrackInfo.remoteArtworkUrl;
                 } else if (fullTrackInfo.hasEmbeddedArtwork) {
-                    const artworkPath = (fullTrackInfo.originalId || fullTrackInfo.id).replace(/\.[^/.]+$/, ".jpg");
+                    const artworkPath = (fullTrackInfo.id).replace(/\.[^/.]+$/, ".jpg");
                     artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
                 }
             }
-            metadataPayload = {
+            nowPlaying = {
                 title: currentItem.title,
                 artist: currentItem.artist,
                 artworkUrl: artworkUrl,
+                logoSrc: settings.logoSrc,
             };
         }
     }
+    return nowPlaying;
+};
 
+const broadcastPublicMetadata = async () => {
+    const nowPlaying = await getCurrentPublicMetadata();
     const message = JSON.stringify({
         type: 'metadataUpdate',
         payload: {
-            nowPlaying: { ...metadataPayload, logoSrc: settings.logoSrc }
+            nowPlaying: nowPlaying
         }
     });
 
@@ -861,34 +867,7 @@ const sendInitialPublicState = async (ws) => {
         return;
     }
 
-    await db.read();
-    const { sharedPlayerState, sharedPlaylist } = db.data;
-
-    let nowPlaying = {
-        title: 'Silence',
-        artist: 'RadioHost.cloud',
-        artworkUrl: null,
-        logoSrc: settings.logoSrc
-    };
-
-    if (sharedPlayerState.isPlaying && sharedPlayerState.currentPlayingItemId) {
-        const currentItem = sharedPlaylist.find(item => item.id === sharedPlayerState.currentPlayingItemId);
-        if (currentItem && currentItem.type !== 'marker') {
-            const fullTrackInfo = findTrackInServerTree(libraryState, currentItem.originalId || currentItem.id);
-            let artworkUrl = null;
-            if (fullTrackInfo) {
-                if (fullTrackInfo.remoteArtworkUrl) {
-                    artworkUrl = fullTrackInfo.remoteArtworkUrl;
-                } else if (fullTrackInfo.hasEmbeddedArtwork) {
-                    const artworkPath = (fullTrackInfo.originalId || fullTrackInfo.id).replace(/\.[^/.]+$/, ".jpg");
-                    artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
-                }
-            }
-            nowPlaying.title = currentItem.title;
-            nowPlaying.artist = currentItem.artist;
-            nowPlaying.artworkUrl = artworkUrl;
-        }
-    }
+    const nowPlaying = await getCurrentPublicMetadata();
 
     const initialState = {
         publicStreamUrl: config.publicStreamUrl,
