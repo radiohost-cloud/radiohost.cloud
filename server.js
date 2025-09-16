@@ -441,6 +441,8 @@ const startPlayout = () => {
             .audioBitrate(bitrate || 128)
             .format('mp3')
             .outputOptions([
+                '-loglevel', 'verbose',
+                '-metadata_encoding', 'utf-8',
                 '-content_type', 'audio/mpeg',
                 '-ice_name', stationName || 'RadioHost.cloud',
                 '-ice_genre', stationGenre || 'Various',
