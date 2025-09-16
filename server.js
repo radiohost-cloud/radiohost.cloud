@@ -422,7 +422,7 @@ const startPlayout = () => {
         .inputOptions('-re'); // Read input at native frame rate
 
     if (streamConfig && streamConfig.isEnabled) {
-        const { username, password, serverAddress, bitrate, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
+        const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
         
         if (!serverAddress) {
             console.error('[FFMPEG] Stream is enabled, but Server Address is not configured.');
@@ -438,8 +438,7 @@ const startPlayout = () => {
         broadcastStreamStatus();
 
         command
-            .audioCodec('libmp3lame')
-            .audioBitrate(bitrate || 128)
+            .outputOptions('-acodec', 'copy') // Directly copy the audio stream without re-encoding
             .format('mp3')
             .outputOptions([
                 '-loglevel', 'verbose',
