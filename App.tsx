@@ -411,7 +411,7 @@ const AppInternal: React.FC = () => {
     const [isAudioEngineInitializing, setIsAudioEngineInitializing] = useState(false);
 
     const busMonitorAudioRef = useRef<HTMLAudioElement>(null);
-    const streamMonitorAudioRef = useRef<HTMLAudioElement>(null);
+    const mainPlayerAudioRef = useRef<HTMLAudioElement>(null);
 
     // Refs to provide stable functions to useEffects
     const currentUserRef = useRef(currentUser);
@@ -843,7 +843,7 @@ const AppInternal: React.FC = () => {
     }, [playoutPolicy.playoutMode, sendStudioCommand]);
     
     const initializeAudioGraph = useCallback(async () => {
-       if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !pflAudioRef.current || !streamMonitorAudioRef.current) return;
+       if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !pflAudioRef.current || !mainPlayerAudioRef.current) return;
     
         try {
             setIsAudioEngineInitializing(true);
@@ -851,7 +851,7 @@ const AppInternal: React.FC = () => {
             audioGraphRef.current.context = context;
             
             const sources: AdvancedAudioGraph['sources'] = {
-                mainPlayer: context.createMediaElementSource(streamMonitorAudioRef.current),
+                mainPlayer: context.createMediaElementSource(mainPlayerAudioRef.current),
                 pfl: context.createMediaElementSource(pflAudioRef.current),
             };
             audioGraphRef.current.sources = sources;
@@ -922,11 +922,51 @@ const AppInternal: React.FC = () => {
     }, [audioBuses, isAudioEngineInitializing]);
 
     useEffect(() => {
-        if (streamMonitorAudioRef.current && playoutPolicy.streamingConfig.publicStreamUrl) {
-            streamMonitorAudioRef.current.src = playoutPolicy.streamingConfig.publicStreamUrl;
-            streamMonitorAudioRef.current.play().catch(e => console.warn("Autoplay for server monitor failed:", e));
-        }
-    }, [playoutPolicy.streamingConfig.publicStreamUrl]);
+        const player = mainPlayerAudioRef.current;
+        if (!player) return;
+
+        const syncPlayerState = () => {
+            // FIX: Check if the found playlist item is a track before accessing 'src' to prevent a TypeScript error. A playlist item could be a TimeMarker which doesn't have a 'src' property.
+            const currentItem = playlistRef.current.find(item => item.id === currentPlayingItemId);
+            const currentTrackSrc = currentItem && 'src' in currentItem ? currentItem.src : undefined;
+
+            if (currentTrackSrc && player.src !== window.location.origin + currentTrackSrc) {
+                player.src = currentTrackSrc;
+                // Defer play/seek until media is ready
+                return; 
+            }
+
+            // Sync play/pause state
+            if (isPlaying && player.paused) {
+                player.play().catch(e => console.warn("Autoplay failed, user interaction may be required.", e));
+            } else if (!isPlaying && !player.paused) {
+                player.pause();
+            }
+
+            // Sync progress
+            if (Math.abs(player.currentTime - trackProgress) > 0.5) { // 500ms tolerance
+                player.currentTime = trackProgress;
+            }
+        };
+
+        const handleLoadedData = () => {
+             // Now that data is loaded, we can safely seek and play.
+            if (Math.abs(player.currentTime - trackProgress) > 0.1) {
+                player.currentTime = trackProgress;
+            }
+            if (isPlaying) {
+                player.play().catch(e => console.warn("Autoplay after src change failed.", e));
+            }
+        };
+        
+        syncPlayerState();
+
+        player.addEventListener('loadeddata', handleLoadedData);
+        return () => {
+            player.removeEventListener('loadeddata', handleLoadedData);
+        };
+
+    }, [isPlaying, currentPlayingItemId, trackProgress]);
 
     const handleTogglePlay = useCallback(async () => {
         if (playlistRef.current.length === 0 || playoutPolicy.playoutMode === 'presenter') return;
@@ -2114,7 +2154,7 @@ const AppInternal: React.FC = () => {
             
             <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
             <audio ref={busMonitorAudioRef} autoPlay></audio>
-            <audio ref={streamMonitorAudioRef} crossOrigin="anonymous" autoPlay></audio>
+            <audio ref={mainPlayerAudioRef} crossOrigin="anonymous"></audio>
         </div>
     );
 };

@@ -556,15 +556,11 @@ const playoutTick = async () => {
 
     sharedPlayerState.trackProgress += PLAYBACK_TICK_RATE / 1000;
     
+    // Send frequent updates for low-latency client-side player sync
+    broadcastState();
+    
     if (sharedPlayerState.trackProgress >= currentTrack.duration) {
         await advanceTrack();
-    } else {
-        // Throttle progress updates
-        const now = Date.now();
-        if (now - (lastProgressBroadcast || 0) > 1000) {
-            broadcastState();
-            lastProgressBroadcast = now;
-        }
     }
 };
 
@@ -590,7 +586,6 @@ const startPlayoutEngine = () => {
 let currentFfmpegCommand = null;
 let serverStreamStatus = 'inactive';
 let serverStreamError = null;
-let lastProgressBroadcast = 0;
 
 const broadcastStreamStatus = () => {
     if (!studioClientEmail) return;
