@@ -49,7 +49,8 @@ await db.read();
 db.data ||= { ...defaultData };
 for (const key of Object.keys(defaultData)) {
     if (db.data[key] === undefined) {
-        db.data[key] = defaultData[key][key];
+        // FIX: Correctly assign the default value. The original `defaultData[key][key]` was incorrect and would cause properties to be `undefined`.
+        db.data[key] = defaultData[key];
     }
 }
 
@@ -1126,7 +1127,7 @@ const getPlayerPageHTML = (stationName) => `
     <style>
         :root { --bg-color: #000; --text-color: #fff; --subtext-color: #a0a0a0; --accent-color: #ef4444; }
         html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
-        body { background-color: var(--bg-color); color: var(--text-color); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px; box-sizing: border-box; }
+        body { background-color: var(--bg-color); color: var(--text-color); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px; box-sizing: border-box; overflow: hidden; }
         .player-container { max-width: 350px; width: 100%; background: rgba(255,255,255,0.05); border-radius: 20px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); backdrop-filter: blur(10px); }
         #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease; }
         #title { font-size: 1.5rem; font-weight: bold; margin: 0; min-height: 2.25rem; }
@@ -1135,6 +1136,31 @@ const getPlayerPageHTML = (stationName) => `
         .play-button:hover { background-color: #d03838; }
         .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; }
         .footer a { color: var(--text-color); text-decoration: none; }
+        
+        /* Chat Styles */
+        #chat-bubble { position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 15px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
+        #chat-bubble:hover { transform: scale(1.1); }
+        #chat-bubble svg { width: 32px; height: 32px; color: white; }
+        #chat-notification { position: absolute; top: 0; right: 0; width: 12px; height: 12px; background-color: #3b82f6; border-radius: 50%; border: 2px solid var(--accent-color); display: none; }
+        
+        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 320px; height: 450px; background-color: #1a1a1a; border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; }
+        #chat-window.open { display: flex; opacity: 1; transform: scale(1); }
+        #chat-window:not(.open) { opacity: 0; transform: scale(0.9); }
+        .chat-header { padding: 10px 15px; background-color: #2a2a2a; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+        .chat-header h3 { margin: 0; font-size: 1rem; }
+        .chat-header button { background: none; border: none; color: white; font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1; }
+        #chat-messages { flex-grow: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; }
+        .chat-message { max-width: 80%; padding: 8px 12px; border-radius: 18px; line-height: 1.4; word-wrap: break-word; }
+        .chat-message p { margin: 0; }
+        .chat-message .from { font-size: 0.75rem; font-weight: bold; margin-bottom: 2px; opacity: 0.8; }
+        .chat-message.me { background-color: #007bff; align-self: flex-end; border-bottom-right-radius: 4px; }
+        .chat-message.other { background-color: #3a3a3a; align-self: flex-start; border-bottom-left-radius: 4px; }
+        .chat-footer { padding: 10px; background-color: #2a2a2a; flex-shrink: 0; }
+        #chat-footer-form { display: flex; gap: 10px; }
+        #nickname-input { width: 80px; background-color: #3a3a3a; border: 1px solid #555; border-radius: 5px; color: white; font-size: 0.8rem; padding: 5px; }
+        #message-input { flex-grow: 1; background-color: #3a3a3a; border: 1px solid #555; border-radius: 15px; color: white; padding: 8px 12px; font-size: 0.9rem; }
+        #send-btn { background: var(--accent-color); border: none; color: white; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+        #send-btn svg { width: 20px; height: 20px; }
     </style>
 </head>
 <body>
@@ -1149,6 +1175,28 @@ const getPlayerPageHTML = (stationName) => `
     </div>
     <audio id="audioPlayer" preload="none" crossOrigin="anonymous"></audio>
 
+    <div id="chat-bubble">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.068.158 2.148.279 3.238.364.466.037.893.281 1.153.671L12 21l2.652-3.978c.26-.39.687-.634 1.153-.67 1.09-.086 2.17-.206 3.238-.365 1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>
+        <span id="chat-notification"></span>
+    </div>
+
+    <div id="chat-window">
+        <div class="chat-header">
+            <h3>Live Chat</h3>
+            <button id="close-chat-btn">&times;</button>
+        </div>
+        <div id="chat-messages"></div>
+        <div class="chat-footer">
+            <form id="chat-footer-form">
+                <input id="nickname-input" type="text" placeholder="Nick" required maxlength="20">
+                <input id="message-input" type="text" placeholder="Type a message..." required autocomplete="off" maxlength="280">
+                <button id="send-btn" type="submit" aria-label="Send">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+                </button>
+            </form>
+        </div>
+    </div>
+
     <script>
         const playBtn = document.getElementById('playBtn');
         const audioPlayer = document.getElementById('audioPlayer');
@@ -1156,8 +1204,19 @@ const getPlayerPageHTML = (stationName) => `
         const artistEl = document.getElementById('artist');
         const artworkEl = document.getElementById('artwork');
 
+        // Chat elements
+        const chatBubble = document.getElementById('chat-bubble');
+        const chatNotification = document.getElementById('chat-notification');
+        const chatWindow = document.getElementById('chat-window');
+        const closeChatBtn = document.getElementById('close-chat-btn');
+        const chatMessages = document.getElementById('chat-messages');
+        const chatForm = document.getElementById('chat-footer-form');
+        const nicknameInput = document.getElementById('nickname-input');
+        const messageInput = document.getElementById('message-input');
+
         let publicStreamUrl = '';
         let isPlaying = false;
+        let ws;
         
         const fetchConfig = async () => {
             try {
@@ -1217,10 +1276,81 @@ const getPlayerPageHTML = (stationName) => `
             navigator.mediaSession.setActionHandler('play', () => playBtn.click());
             navigator.mediaSession.setActionHandler('pause', () => playBtn.click());
         }
+
+        // Chat logic
+        const connectWs = () => {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/socket?clientType=playerPage`);
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'chatMessage') {
+                    addChatMessage(data.payload);
+                    if (!chatWindow.classList.contains('open')) {
+                        chatNotification.style.display = 'block';
+                    }
+                }
+            };
+            ws.onclose = () => setTimeout(connectWs, 5000);
+        };
+
+        const addChatMessage = (msg) => {
+            const isMe = msg.from === nicknameInput.value || msg.from === 'Studio' && nicknameInput.value === 'Studio';
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'chat-message ' + (isMe ? 'me' : 'other');
+            
+            let content = '';
+            if (!isMe) {
+                content += '<p class="from">' + escapeHtml(msg.from) + '</p>';
+            }
+            content += '<p>' + escapeHtml(msg.text) + '</p>';
+            msgDiv.innerHTML = content;
+            
+            chatMessages.appendChild(msgDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        };
+        
+        const escapeHtml = (text) => {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        chatBubble.addEventListener('click', () => {
+            chatWindow.classList.toggle('open');
+            chatNotification.style.display = 'none';
+            if (chatWindow.classList.contains('open')) {
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                messageInput.focus();
+            }
+        });
+
+        closeChatBtn.addEventListener('click', () => {
+            chatWindow.classList.remove('open');
+        });
+
+        nicknameInput.value = localStorage.getItem('chatNickname') || 'Listener' + Math.floor(Math.random() * 999);
+        nicknameInput.addEventListener('change', () => {
+            localStorage.setItem('chatNickname', nicknameInput.value);
+        });
+
+        chatForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const text = messageInput.value.trim();
+            if (text && ws && ws.readyState === WebSocket.OPEN) {
+                const message = {
+                    type: 'chatMessage',
+                    payload: { from: nicknameInput.value, text }
+                };
+                ws.send(JSON.stringify(message));
+                messageInput.value = '';
+            }
+        });
         
         fetchConfig().then(() => {
             updateMetadata();
             setInterval(updateMetadata, 5000);
+            connectWs();
         });
     </script>
 </body>
