@@ -485,7 +485,6 @@ let playoutInterval = null;
 const PLAYBACK_TICK_RATE = 250; // ms
 
 const advanceTrack = async () => {
-    await db.read();
     const { sharedPlayerState, sharedPlaylist } = db.data;
     const studioData = db.data.userdata[studioClientEmail];
     const policy = studioData?.settings?.playoutPolicy || {};
@@ -540,7 +539,6 @@ const advanceTrack = async () => {
 };
 
 const playoutTick = async () => {
-    await db.read();
     if (!db.data.sharedPlayerState.isPlaying) {
         stopPlayoutEngine();
         return;
