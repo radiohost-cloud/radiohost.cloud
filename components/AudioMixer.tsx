@@ -17,32 +17,31 @@ interface AudioMixerProps {
     policy: PlayoutPolicy;
     onUpdatePolicy: (newPolicy: PlayoutPolicy) => void;
     audioLevels: Partial<Record<AudioSourceId | AudioBusId, number>>;
+    playoutMode: 'studio' | 'presenter' | undefined;
 }
 
-const SOURCE_META: Partial<Record<AudioSourceId, { name: string; icon: React.ReactNode }>> = {
-    mainPlayer: { name: "Player", icon: <MusicNoteIcon className="w-5 h-5" /> },
-    mic: { name: "Microphone", icon: <MicrophoneIcon className="w-5 h-5" /> },
-    pfl: { name: "PFL", icon: <HeadphoneIcon className="w-5 h-5" /> },
-    cartwall: { name: "Cartwall", icon: <GridIcon className="w-5 h-5" /> },
+const SOURCE_META: Partial<Record<AudioSourceId, { defaultName: string; icon: React.ReactNode }>> = {
+    mainPlayer: { defaultName: "Player", icon: <MusicNoteIcon className="w-5 h-5" /> },
+    mic: { defaultName: "Microphone", icon: <MicrophoneIcon className="w-5 h-5" /> },
+    pfl: { defaultName: "PFL", icon: <HeadphoneIcon className="w-5 h-5" /> },
+    cartwall: { defaultName: "Cartwall", icon: <GridIcon className="w-5 h-5" /> },
 };
 
-const getSourceMeta = (sourceId: AudioSourceId) => {
+const getSourceMeta = (sourceId: AudioSourceId, playoutMode: 'studio' | 'presenter' | undefined) => {
+    if (sourceId === 'mainPlayer') {
+        return { 
+            name: playoutMode === 'studio' ? "Server Output" : "Player", 
+            icon: <MusicNoteIcon className="w-5 h-5" /> 
+        };
+    }
     if (SOURCE_META[sourceId]) {
-        return SOURCE_META[sourceId];
+        return { name: SOURCE_META[sourceId]!.defaultName, icon: SOURCE_META[sourceId]!.icon };
     }
     if (sourceId.startsWith('remote_')) {
         const presenterName = sourceId.replace('remote_', '').split('@')[0];
         return { name: `Remote: ${presenterName}`, icon: <UsersIcon className="w-5 h-5" /> };
     }
     return { name: 'Unknown Source', icon: <div className="w-5 h-5" /> };
-};
-
-
-const NORMALIZATION_PRESETS: Record<string, { name: string, target: number | null }> = {
-  custom: { name: 'Custom', target: null },
-  'radio-broadcast': { name: 'Radio Broadcast', target: -14 },
-  streaming: { name: 'Streaming', target: -18 },
-  'podcast-voice': { name: 'Podcast/Voice', target: -20 },
 };
 
 const EQ_PRESETS: Record<string, { name: string, bands: { bass: number, mid: number, treble: number } | null }> = {
@@ -52,16 +51,10 @@ const EQ_PRESETS: Record<string, { name: string, bands: { bass: number, mid: num
   'treble-boost': { name: 'Treble Boost', bands: { bass: 0, mid: 2, treble: 6 } },
 };
 
-const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, audioBuses, onBusChange, availableOutputDevices, policy, onUpdatePolicy, audioLevels }) => {
-    const [normalizationPreset, setNormalizationPreset] = useState('custom');
+const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, audioBuses, onBusChange, availableOutputDevices, policy, onUpdatePolicy, audioLevels, playoutMode }) => {
     const [eqPreset, setEqPreset] = useState('custom');
 
     useEffect(() => {
-        const matchingNormPreset = Object.entries(NORMALIZATION_PRESETS).find(
-            ([key, preset]) => key !== 'custom' && preset.target === policy.normalizationTargetDb
-        );
-        setNormalizationPreset(matchingNormPreset ? matchingNormPreset[0] : 'custom');
-
         const matchingEqPreset = Object.entries(EQ_PRESETS).find(
             ([key, preset]) => key !== 'custom' && preset.bands && 
             preset.bands.bass === policy.equalizerBands.bass &&
@@ -69,7 +62,7 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
             preset.bands.treble === policy.equalizerBands.treble
         );
         setEqPreset(matchingEqPreset ? matchingEqPreset[0] : 'custom');
-    }, [policy.normalizationTargetDb, policy.equalizerBands]);
+    }, [policy.equalizerBands]);
 
 
     const handleSourceGainChange = (sourceId: AudioSourceId, newGain: number) => {
@@ -107,6 +100,10 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
     const handlePolicyChange = (key: keyof PlayoutPolicy, value: any) => {
         onUpdatePolicy({ ...policy, [key]: value });
     };
+    
+    const handleCompressorChange = (field: keyof PlayoutPolicy['compressor'], value: number) => {
+        handlePolicyChange('compressor', { ...policy.compressor, [field]: value });
+    };
 
     const handleEqBandChange = (band: 'bass' | 'mid' | 'treble', value: number) => {
         onUpdatePolicy({
@@ -118,14 +115,6 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
         });
     };
     
-    const handleNormalizationPresetChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-        const presetKey = e.target.value;
-        const preset = NORMALIZATION_PRESETS[presetKey];
-        if (preset && preset.target !== null) {
-            handlePolicyChange('normalizationTargetDb', preset.target);
-        }
-    };
-    
     const handleEqPresetChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
         const presetKey = e.target.value;
         const preset = EQ_PRESETS[presetKey];
@@ -134,16 +123,24 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
         }
     };
 
+    const visibleSources = Object.entries(mixerConfig).filter(([sourceId]) => {
+        if (sourceId === 'pfl') return false;
+        if (playoutMode === 'studio') {
+            return sourceId !== 'mic';
+        }
+        if (playoutMode === 'presenter') {
+            return !sourceId.startsWith('remote_');
+        }
+        return true;
+    });
 
     return (
         <div className="p-4 space-y-6">
             <div>
                 <h3 className="text-lg font-semibold text-black dark:text-white">Input Channels</h3>
                 <div className="mt-2 space-y-4">
-                    {Object.entries(mixerConfig)
-                        .filter(([id]) => id !== 'pfl') // PFL is managed internally
-                        .map(([sourceId, config]) => {
-                            const meta = getSourceMeta(sourceId as AudioSourceId);
+                    {visibleSources.map(([sourceId, config]) => {
+                            const meta = getSourceMeta(sourceId as AudioSourceId, playoutMode);
                             return (
                                 <div key={sourceId} className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
                                     <div className="flex items-center justify-between mb-2">
@@ -228,7 +225,7 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
                                     ))}
                                 </select>
                              </div>
-                             {bus.id === 'monitor' && (
+                             {bus.id === 'monitor' && playoutMode === 'presenter' && (
                                 <div className="mt-4 pt-3 border-t border-neutral-300 dark:border-neutral-700 space-y-3">
                                     <label htmlFor="pfl-ducking" className="flex justify-between text-sm font-medium">
                                         <span>Monitor Ducking</span>
@@ -249,187 +246,135 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
                  </div>
             </div>
 
-             <hr className="border-neutral-200 dark:border-neutral-800" />
-            
-            <div>
-                <h3 className="text-lg font-semibold text-black dark:text-white">Automatic Ducking</h3>
-                <p className="text-xs text-neutral-500">Automatically lower music volume when speaking or playing a cart.</p>
-                <div className="mt-4 space-y-6">
-                    {/* Microphone Ducking */}
-                    <div className="space-y-4 p-3 border border-neutral-300 dark:border-neutral-700 rounded-lg">
-                        <div className="flex items-center gap-2">
-                            <MicrophoneIcon className="w-5 h-5"/>
-                            <h4 className="font-semibold">Microphone Ducking</h4>
+            {playoutMode === 'presenter' && (
+                <>
+                <hr className="border-neutral-200 dark:border-neutral-800" />
+                <div>
+                    <h3 className="text-lg font-semibold text-black dark:text-white">Automatic Ducking</h3>
+                    <p className="text-xs text-neutral-500">Automatically lower music volume when speaking or playing a cart.</p>
+                    <div className="mt-4 space-y-6">
+                        {/* Microphone Ducking */}
+                        <div className="space-y-4 p-3 border border-neutral-300 dark:border-neutral-700 rounded-lg">
+                            <div className="flex items-center gap-2">
+                                <MicrophoneIcon className="w-5 h-5"/>
+                                <h4 className="font-semibold">Microphone Ducking</h4>
+                            </div>
+                            <div className="space-y-3">
+                                <label htmlFor="mic-ducking" className="flex justify-between text-sm font-medium">
+                                    <span>Music Ducking Level</span>
+                                    <span className="font-mono">{Math.round(policy.micDuckingLevel * 100)}%</span>
+                                </label>
+                                <input id="mic-ducking" type="range" min="0" max="1" step="0.01" value={policy.micDuckingLevel} onChange={(e) => handlePolicyChange('micDuckingLevel', parseFloat(e.target.value))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"/>
+                            </div>
+                            <div className="space-y-3">
+                                <label htmlFor="mic-ducking-fade" className="flex justify-between text-sm font-medium">
+                                    <span>Fade Duration</span>
+                                    <span className="font-mono">{(policy.micDuckingFadeDuration ?? 0.5).toFixed(1)}s</span>
+                                </label>
+                                <input id="mic-ducking-fade" type="range" min="0.1" max="2" step="0.1" value={policy.micDuckingFadeDuration ?? 0.5} onChange={(e) => handlePolicyChange('micDuckingFadeDuration', parseFloat(e.target.value))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"/>
+                            </div>
                         </div>
-                        <div className="space-y-3">
-                            <label htmlFor="mic-ducking" className="flex justify-between text-sm font-medium">
-                                <span>Music Ducking Level</span>
-                                <span className="font-mono">{Math.round(policy.micDuckingLevel * 100)}%</span>
-                            </label>
-                            <input
-                                id="mic-ducking"
-                                type="range" min="0" max="1" step="0.01"
-                                value={policy.micDuckingLevel}
-                                onChange={(e) => handlePolicyChange('micDuckingLevel', parseFloat(e.target.value))}
-                                className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                            />
-                        </div>
-                        <div className="space-y-3">
-                            <label htmlFor="mic-ducking-fade" className="flex justify-between text-sm font-medium">
-                                <span>Fade Duration</span>
-                                <span className="font-mono">{(policy.micDuckingFadeDuration ?? 0.5).toFixed(1)}s</span>
-                            </label>
-                            <input
-                                id="mic-ducking-fade"
-                                type="range" min="0.1" max="2" step="0.1"
-                                value={policy.micDuckingFadeDuration ?? 0.5}
-                                onChange={(e) => handlePolicyChange('micDuckingFadeDuration', parseFloat(e.target.value))}
-                                className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                            />
+                        {/* Cartwall Ducking */}
+                        <div className="space-y-4 p-3 border border-neutral-300 dark:border-neutral-700 rounded-lg">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2"><GridIcon className="w-5 h-5"/><h4 className="font-semibold">Cartwall Ducking</h4></div>
+                                <Toggle id="cartwall-ducking-enabled" checked={policy.cartwallDuckingEnabled} onChange={(v) => handlePolicyChange('cartwallDuckingEnabled', v)} />
+                            </div>
+                            {policy.cartwallDuckingEnabled && (
+                                <div className="space-y-6 pt-2">
+                                    <div className="space-y-3">
+                                        <label htmlFor="cart-ducking" className="flex justify-between text-sm font-medium">
+                                            <span>Player Ducking Level</span>
+                                            <span className="font-mono">{Math.round(policy.cartwallDuckingLevel * 100)}%</span>
+                                        </label>
+                                        <input id="cart-ducking" type="range" min="0" max="1" step="0.01" value={policy.cartwallDuckingLevel} onChange={(e) => handlePolicyChange('cartwallDuckingLevel', parseFloat(e.target.value))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"/>
+                                    </div>
+                                    <div className="space-y-3">
+                                        <label htmlFor="cart-ducking-fade" className="flex justify-between text-sm font-medium">
+                                            <span>Fade Duration</span>
+                                            <span className="font-mono">{(policy.cartwallDuckingFadeDuration ?? 0.3).toFixed(1)}s</span>
+                                        </label>
+                                        <input id="cart-ducking-fade" type="range" min="0.1" max="2" step="0.1" value={policy.cartwallDuckingFadeDuration ?? 0.3} onChange={(e) => handlePolicyChange('cartwallDuckingFadeDuration', parseFloat(e.target.value))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"/>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
+                </div>
+                </>
+            )}
 
-                    {/* Cartwall Ducking */}
-                    <div className="space-y-4 p-3 border border-neutral-300 dark:border-neutral-700 rounded-lg">
+            {playoutMode === 'studio' && (
+                <>
+                <hr className="border-neutral-200 dark:border-neutral-800" />
+                <div>
+                     <h3 className="text-lg font-semibold text-black dark:text-white">Master Output Processing</h3>
+                     <p className="text-xs text-neutral-500">These settings only affect the Main Output bus.</p>
+                     <div className="mt-4 space-y-6">
                         <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                                <GridIcon className="w-5 h-5"/>
-                                <h4 className="font-semibold">Cartwall Ducking</h4>
+                            <div>
+                                <label htmlFor="compressor-enabled" className="text-sm font-medium block cursor-pointer">Compressor</label>
+                                <p className="text-xs text-neutral-500">Adjust track volumes for a consistent level.</p>
                             </div>
-                            <Toggle id="cartwall-ducking-enabled" checked={policy.cartwallDuckingEnabled} onChange={(v) => handlePolicyChange('cartwallDuckingEnabled', v)} />
+                            <Toggle id="compressor-enabled" checked={policy.compressorEnabled} onChange={(v) => handlePolicyChange('compressorEnabled', v)} />
                         </div>
-                        {policy.cartwallDuckingEnabled && (
-                            <div className="space-y-6 pt-2">
+                        {policy.compressorEnabled && (
+                            <div className="space-y-4 pt-2 pl-4 border-l-2 border-neutral-300 dark:border-neutral-700">
                                 <div className="space-y-3">
-                                    <label htmlFor="cart-ducking" className="flex justify-between text-sm font-medium">
-                                        <span>Player Ducking Level</span>
-                                        <span className="font-mono">{Math.round(policy.cartwallDuckingLevel * 100)}%</span>
-                                    </label>
-                                    <input
-                                        id="cart-ducking"
-                                        type="range" min="0" max="1" step="0.01"
-                                        value={policy.cartwallDuckingLevel}
-                                        onChange={(e) => handlePolicyChange('cartwallDuckingLevel', parseFloat(e.target.value))}
-                                        className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                                    />
+                                    <label htmlFor="comp-threshold" className="flex justify-between text-sm font-medium"><span>Threshold</span><span className="font-mono">{policy.compressor.threshold} dB</span></label>
+                                    <input id="comp-threshold" type="range" min="-100" max="0" step="1" value={policy.compressor.threshold} onChange={(e) => handleCompressorChange('threshold', parseInt(e.target.value, 10))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer" />
                                 </div>
                                 <div className="space-y-3">
-                                    <label htmlFor="cart-ducking-fade" className="flex justify-between text-sm font-medium">
-                                        <span>Fade Duration</span>
-                                        <span className="font-mono">{(policy.cartwallDuckingFadeDuration ?? 0.3).toFixed(1)}s</span>
-                                    </label>
-                                    <input
-                                        id="cart-ducking-fade"
-                                        type="range" min="0.1" max="2" step="0.1"
-                                        value={policy.cartwallDuckingFadeDuration ?? 0.3}
-                                        onChange={(e) => handlePolicyChange('cartwallDuckingFadeDuration', parseFloat(e.target.value))}
-                                        className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                                    />
+                                    <label htmlFor="comp-knee" className="flex justify-between text-sm font-medium"><span>Knee</span><span className="font-mono">{policy.compressor.knee} dB</span></label>
+                                    <input id="comp-knee" type="range" min="0" max="40" step="1" value={policy.compressor.knee} onChange={(e) => handleCompressorChange('knee', parseInt(e.target.value, 10))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer" />
+                                </div>
+                                <div className="space-y-3">
+                                    <label htmlFor="comp-ratio" className="flex justify-between text-sm font-medium"><span>Ratio</span><span className="font-mono">{policy.compressor.ratio}:1</span></label>
+                                    <input id="comp-ratio" type="range" min="1" max="20" step="1" value={policy.compressor.ratio} onChange={(e) => handleCompressorChange('ratio', parseInt(e.target.value, 10))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer" />
+                                </div>
+                                <div className="space-y-3">
+                                    <label htmlFor="comp-attack" className="flex justify-between text-sm font-medium"><span>Attack</span><span className="font-mono">{policy.compressor.attack.toFixed(3)}s</span></label>
+                                    <input id="comp-attack" type="range" min="0" max="1" step="0.001" value={policy.compressor.attack} onChange={(e) => handleCompressorChange('attack', parseFloat(e.target.value))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer" />
+                                </div>
+                                <div className="space-y-3">
+                                    <label htmlFor="comp-release" className="flex justify-between text-sm font-medium"><span>Release</span><span className="font-mono">{policy.compressor.release.toFixed(2)}s</span></label>
+                                    <input id="comp-release" type="range" min="0" max="1" step="0.01" value={policy.compressor.release} onChange={(e) => handleCompressorChange('release', parseFloat(e.target.value))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer" />
                                 </div>
                             </div>
                         )}
-                    </div>
-                </div>
-            </div>
-
-            <hr className="border-neutral-200 dark:border-neutral-800" />
-
-            <div>
-                 <h3 className="text-lg font-semibold text-black dark:text-white">Master Output Processing</h3>
-                 <p className="text-xs text-neutral-500">These settings only affect the Main Output bus.</p>
-                 <div className="mt-4 space-y-6">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <label htmlFor="normalization-enabled" className="text-sm font-medium block cursor-pointer">Audio Normalization (Compressor)</label>
-                            <p className="text-xs text-neutral-500">Adjust track volumes for a consistent level.</p>
-                        </div>
-                        <Toggle id="normalization-enabled" checked={policy.normalizationEnabled} onChange={(v) => handlePolicyChange('normalizationEnabled', v)} />
-                    </div>
-
-                    {policy.normalizationEnabled && (
-                        <div className="space-y-3 pt-2 pl-4 border-l-2 border-neutral-300 dark:border-neutral-700">
-                             <div>
-                                <label htmlFor="norm-preset" className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Preset</label>
-                                <select id="norm-preset" value={normalizationPreset} onChange={handleNormalizationPresetChange} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-1.5 text-sm">
-                                    {Object.entries(NORMALIZATION_PRESETS).map(([key, preset]) => (
-                                        <option key={key} value={key}>{preset.name}</option>
-                                    ))}
-                                </select>
-                            </div>
+                        <div className="flex items-center justify-between">
                             <div>
-                                <label htmlFor="normalization-target" className="flex justify-between text-sm font-medium">
-                                    <span>Target Loudness</span>
-                                    <span className="font-mono">{policy.normalizationTargetDb} dB</span>
-                                </label>
-                                <input
-                                    id="normalization-target"
-                                    type="range"
-                                    min="-40"
-                                    max="0"
-                                    step="1"
-                                    value={policy.normalizationTargetDb}
-                                    onChange={(e) => handlePolicyChange('normalizationTargetDb', parseInt(e.target.value, 10))}
-                                    className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer mt-1"
-                                />
+                                <label htmlFor="equalizer-enabled" className="text-sm font-medium block cursor-pointer">Equalizer</label>
+                                <p className="text-xs text-neutral-500">Shape the tone of your audio output.</p>
                             </div>
+                            <Toggle id="equalizer-enabled" checked={policy.equalizerEnabled} onChange={(v) => handlePolicyChange('equalizerEnabled', v)} />
                         </div>
-                    )}
-
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <label htmlFor="equalizer-enabled" className="text-sm font-medium block cursor-pointer">Equalizer</label>
-                            <p className="text-xs text-neutral-500">Shape the tone of your audio output.</p>
-                        </div>
-                        <Toggle id="equalizer-enabled" checked={policy.equalizerEnabled} onChange={(v) => handlePolicyChange('equalizerEnabled', v)} />
-                    </div>
-
-                    {policy.equalizerEnabled && (
-                        <div className="space-y-6 pt-2 pl-4 border-l-2 border-neutral-300 dark:border-neutral-700">
-                             <div>
-                                <label htmlFor="eq-preset" className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Preset</label>
-                                <select id="eq-preset" value={eqPreset} onChange={handleEqPresetChange} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-1.5 text-sm">
-                                    {Object.entries(EQ_PRESETS).map(([key, preset]) => (
-                                        <option key={key} value={key}>{preset.name}</option>
-                                    ))}
-                                </select>
+                        {policy.equalizerEnabled && (
+                            <div className="space-y-6 pt-2 pl-4 border-l-2 border-neutral-300 dark:border-neutral-700">
+                                 <div>
+                                    <label htmlFor="eq-preset" className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Preset</label>
+                                    <select id="eq-preset" value={eqPreset} onChange={handleEqPresetChange} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-1.5 text-sm">
+                                        {Object.entries(EQ_PRESETS).map(([key, preset]) => (<option key={key} value={key}>{preset.name}</option>))}
+                                    </select>
+                                </div>
+                                <div className="space-y-3">
+                                    <label htmlFor="eq-bass" className="flex justify-between text-sm font-medium"><span>Bass</span><span className="font-mono">{policy.equalizerBands.bass > 0 ? '+' : ''}{policy.equalizerBands.bass} dB</span></label>
+                                    <input id="eq-bass" type="range" min="-12" max="12" step="1" value={policy.equalizerBands.bass} onChange={(e) => handleEqBandChange('bass', parseInt(e.target.value, 10))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"/>
+                                </div>
+                                <div className="space-y-3">
+                                    <label htmlFor="eq-mid" className="flex justify-between text-sm font-medium"><span>Mid</span><span className="font-mono">{policy.equalizerBands.mid > 0 ? '+' : ''}{policy.equalizerBands.mid} dB</span></label>
+                                    <input id="eq-mid" type="range" min="-12" max="12" step="1" value={policy.equalizerBands.mid} onChange={(e) => handleEqBandChange('mid', parseInt(e.target.value, 10))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"/>
+                                </div>
+                                <div className="space-y-3">
+                                    <label htmlFor="eq-treble" className="flex justify-between text-sm font-medium"><span>Treble</span><span className="font-mono">{policy.equalizerBands.treble > 0 ? '+' : ''}{policy.equalizerBands.treble} dB</span></label>
+                                    <input id="eq-treble" type="range" min="-12" max="12" step="1" value={policy.equalizerBands.treble} onChange={(e) => handleEqBandChange('treble', parseInt(e.target.value, 10))} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"/>
+                                </div>
                             </div>
-                            <div className="space-y-3">
-                                <label htmlFor="eq-bass" className="flex justify-between text-sm font-medium">
-                                    <span>Bass</span>
-                                    <span className="font-mono">{policy.equalizerBands.bass > 0 ? '+' : ''}{policy.equalizerBands.bass} dB</span>
-                                </label>
-                                <input id="eq-bass" type="range" min="-12" max="12" step="1"
-                                    value={policy.equalizerBands.bass}
-                                    onChange={(e) => handleEqBandChange('bass', parseInt(e.target.value, 10))}
-                                    className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                                />
-                            </div>
-                            <div className="space-y-3">
-                                <label htmlFor="eq-mid" className="flex justify-between text-sm font-medium">
-                                    <span>Mid</span>
-                                    <span className="font-mono">{policy.equalizerBands.mid > 0 ? '+' : ''}{policy.equalizerBands.mid} dB</span>
-                                </label>
-                                <input id="eq-mid" type="range" min="-12" max="12" step="1"
-                                    value={policy.equalizerBands.mid}
-                                    onChange={(e) => handleEqBandChange('mid', parseInt(e.target.value, 10))}
-                                    className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                                />
-                            </div>
-                            <div className="space-y-3">
-                                <label htmlFor="eq-treble" className="flex justify-between text-sm font-medium">
-                                    <span>Treble</span>
-                                    <span className="font-mono">{policy.equalizerBands.treble > 0 ? '+' : ''}{policy.equalizerBands.treble} dB</span>
-                                </label>
-                                <input id="eq-treble" type="range" min="-12" max="12" step="1"
-                                    value={policy.equalizerBands.treble}
-                                    onChange={(e) => handleEqBandChange('treble', parseInt(e.target.value, 10))}
-                                    className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                                />
-                            </div>
-                        </div>
-                    )}
-                 </div>
-            </div>
+                        )}
+                     </div>
+                </div>
+                </>
+            )}
         </div>
     );
 };

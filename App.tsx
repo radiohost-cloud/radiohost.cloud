@@ -45,6 +45,14 @@ const defaultPlayoutPolicy: PlayoutPolicy = {
     removePlayedTracks: false,
     normalizationEnabled: false,
     normalizationTargetDb: -24,
+    compressorEnabled: false,
+    compressor: {
+        threshold: -24,
+        knee: 30,
+        ratio: 12,
+        attack: 0.003,
+        release: 0.25,
+    },
     equalizerEnabled: false,
     equalizerBands: {
         bass: 0,
@@ -89,7 +97,7 @@ const initialBuses: AudioBus[] = [
 ];
 
 const initialMixerConfig: MixerConfig = {
-    mainPlayer: { gain: 1, muted: false, sends: { main: { enabled: true, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
+    mainPlayer: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
     mic: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: false, gain: 1 } } },
     pfl: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
     cartwall: { gain: 1, muted: false, sends: { main: { enabled: true, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
@@ -402,7 +410,8 @@ const AppInternal: React.FC = () => {
     const [audioLevels, setAudioLevels] = useState<Partial<Record<AudioSourceId | AudioBusId, number>>>({});
     const [isAudioEngineInitializing, setIsAudioEngineInitializing] = useState(false);
 
-    const monitorBusAudioRef = useRef<HTMLAudioElement>(null);
+    const busMonitorAudioRef = useRef<HTMLAudioElement>(null);
+    const streamMonitorAudioRef = useRef<HTMLAudioElement>(null);
 
     // Refs to provide stable functions to useEffects
     const currentUserRef = useRef(currentUser);
@@ -457,7 +466,7 @@ const AppInternal: React.FC = () => {
     type AdvancedAudioGraph = {
         context: AudioContext | null;
         sources: {
-            // Main player sources are removed as playout is now server-side
+            mainPlayer?: MediaElementAudioSourceNode;
             mic?: MediaStreamAudioSourceNode;
             pfl?: MediaElementAudioSourceNode;
             [key: `remote_${string}`]: MediaStreamAudioSourceNode; // For remote contributors
@@ -679,9 +688,8 @@ const AppInternal: React.FC = () => {
     }, [isStudio]);
 
     useEffect(() => {
-        // If the user is no longer a studio admin (e.g., switched to presenter mode)
-        // and they are on a tab they shouldn't see, move them to a default tab.
-        if (!isStudio && (activeRightColumnTab === 'scheduler' || activeRightColumnTab === 'users' || activeRightColumnTab === 'stream' || activeRightColumnTab === 'mixer' || activeRightColumnTab === 'settings' || activeRightColumnTab === 'chat')) {
+        // If the user is a presenter and they are on a tab they shouldn't see, move them to a default tab.
+        if (!isStudio && (activeRightColumnTab === 'scheduler' || activeRightColumnTab === 'users' || activeRightColumnTab === 'stream' || activeRightColumnTab === 'settings' || activeRightColumnTab === 'chat')) {
             setActiveRightColumnTab('cartwall');
         }
     }, [isStudio, activeRightColumnTab]);
@@ -847,16 +855,15 @@ const AppInternal: React.FC = () => {
     }, [playoutPolicy.playoutMode, sendStudioCommand]);
     
     const initializeAudioGraph = useCallback(async () => {
-       // Only initialize for PFL, Mic, and Cartwall. Main player is server-side.
-       if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !pflAudioRef.current) return;
+       if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !pflAudioRef.current || !streamMonitorAudioRef.current) return;
     
         try {
             setIsAudioEngineInitializing(true);
             const context = new AudioContext();
             audioGraphRef.current.context = context;
             
-            // This is now simplified, no PlayerA/B
             const sources: AdvancedAudioGraph['sources'] = {
+                mainPlayer: context.createMediaElementSource(streamMonitorAudioRef.current),
                 pfl: context.createMediaElementSource(pflAudioRef.current),
             };
             audioGraphRef.current.sources = sources;
@@ -868,8 +875,6 @@ const AppInternal: React.FC = () => {
             const busDestinations: AdvancedAudioGraph['busDestinations'] = {};
             const analysers: AdvancedAudioGraph['analysers'] = {};
 
-            // We still need a mainPlayer gain node for ducking, but it won't have a source.
-            // Server will duck audio, but we can simulate it for monitor bus.
             const sourceIds: AudioSourceId[] = ['mainPlayer', 'mic', 'pfl', 'cartwall'];
             sourceIds.forEach(id => {
                 sourceGains[id] = context.createGain();
@@ -878,6 +883,7 @@ const AppInternal: React.FC = () => {
                 sourceGains[id]!.connect(analysers[id]!);
             });
 
+            sources.mainPlayer.connect(sourceGains.mainPlayer!);
             sources.pfl.connect(sourceGains.pfl!);
 
             audioBuses.forEach(bus => {
@@ -888,7 +894,6 @@ const AppInternal: React.FC = () => {
 
                 if (bus.id === 'main') {
                     // Main bus is now virtual, it has no destination.
-                    // We can keep the processing nodes for consistency if needed, but they won't be audible.
                 } else {
                     analysers[bus.id]!.connect(busGains[bus.id]!);
                 }
@@ -918,14 +923,21 @@ const AppInternal: React.FC = () => {
                 ...audioGraphRef.current, sourceGains, routingGains, duckingGains, busGains, busDestinations, analysers, isInitialized: true,
             };
             
-            if(monitorBusAudioRef.current && busDestinations.monitor) monitorBusAudioRef.current.srcObject = busDestinations.monitor.stream;
+            if(busMonitorAudioRef.current && busDestinations.monitor) busMonitorAudioRef.current.srcObject = busDestinations.monitor.stream;
 
 
             if (context.state === 'suspended') await context.resume();
 
         } catch (error) { console.error("Failed to initialize Audio graph:", error); }
         finally { setIsAudioEngineInitializing(false); }
-    }, [audioBuses]);
+    }, [audioBuses, isAudioEngineInitializing]);
+
+    useEffect(() => {
+        if (streamMonitorAudioRef.current && playoutPolicy.streamingConfig.publicStreamUrl) {
+            streamMonitorAudioRef.current.src = playoutPolicy.streamingConfig.publicStreamUrl;
+            streamMonitorAudioRef.current.play().catch(e => console.warn("Autoplay for server monitor failed:", e));
+        }
+    }, [playoutPolicy.streamingConfig.publicStreamUrl]);
 
     const handleTogglePlay = useCallback(async () => {
         if (playlistRef.current.length === 0 || playoutPolicy.playoutMode === 'presenter') return;
@@ -943,7 +955,7 @@ const AppInternal: React.FC = () => {
     }, []);
 
     useEffect(() => {
-        if (activeRightColumnTab === 'stream') {
+        if (activeRightColumnTab === 'mixer') {
             initializeAudioGraph();
         }
     }, [activeRightColumnTab, initializeAudioGraph]);
@@ -1221,7 +1233,7 @@ const AppInternal: React.FC = () => {
     }, [mixerConfig, audioBuses]);
     
     useEffect(() => {
-        const busPlayers = { monitor: monitorBusAudioRef.current };
+        const busPlayers = { monitor: busMonitorAudioRef.current };
         audioBuses.forEach(bus => {
             if (bus.id === 'monitor') {
                 const player = busPlayers[bus.id];
@@ -1242,13 +1254,22 @@ const AppInternal: React.FC = () => {
         const RAMP_TIME = 0.05;
 
         if (graph.mainBusCompressor) {
-            const { normalizationEnabled, normalizationTargetDb } = playoutPolicy;
-            const compressor = graph.mainBusCompressor;
-            compressor.threshold.linearRampToValueAtTime(normalizationEnabled ? normalizationTargetDb : 0, now + RAMP_TIME);
-            compressor.knee.linearRampToValueAtTime(normalizationEnabled ? 5 : 0, now + RAMP_TIME);
-            compressor.ratio.linearRampToValueAtTime(normalizationEnabled ? 12 : 1, now + RAMP_TIME);
-            compressor.attack.setValueAtTime(0.003, now);
-            compressor.release.setValueAtTime(0.25, now);
+            const { compressorEnabled, compressor } = playoutPolicy;
+            const comp = graph.mainBusCompressor;
+
+            if (compressorEnabled) {
+                comp.threshold.linearRampToValueAtTime(compressor.threshold, now + RAMP_TIME);
+                comp.knee.linearRampToValueAtTime(compressor.knee, now + RAMP_TIME);
+                comp.ratio.linearRampToValueAtTime(compressor.ratio, now + RAMP_TIME);
+                comp.attack.setValueAtTime(compressor.attack, now);
+                comp.release.setValueAtTime(compressor.release, now);
+            } else {
+                comp.threshold.linearRampToValueAtTime(0, now + RAMP_TIME);
+                comp.knee.linearRampToValueAtTime(0, now + RAMP_TIME);
+                comp.ratio.linearRampToValueAtTime(1, now + RAMP_TIME);
+                comp.attack.setValueAtTime(0.003, now);
+                comp.release.setValueAtTime(0.25, now);
+            }
         }
         
         if (graph.mainBusEq) {
@@ -2005,7 +2026,7 @@ const AppInternal: React.FC = () => {
                                     {isStudio && <button onClick={() => setActiveRightColumnTab('scheduler')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'scheduler' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Scheduler">Scheduler</button>}
                                     {isStudio && <button onClick={() => { setActiveRightColumnTab('chat'); setHasUnreadChat(false); }} className={`px-3 py-2 w-full text-sm font-semibold transition-colors relative ${activeRightColumnTab === 'chat' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Chat">{hasUnreadChat && <span className="absolute top-1 right-2 w-2 h-2 bg-red-500 rounded-full"></span>}Chat</button>}
                                     <button onClick={() => setActiveRightColumnTab('lastfm')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'lastfm' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Last.fm Info">Last.fm</button>
-                                    {isStudio && <button onClick={() => setActiveRightColumnTab('mixer')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'mixer' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Mixer">Mixer</button>}
+                                    <button onClick={() => setActiveRightColumnTab('mixer')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'mixer' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Mixer">Mixer</button>
                                     {isStudio && <button onClick={() => setActiveRightColumnTab('users')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'users' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Users">Users</button>}
                                     {isStudio && <button onClick={() => setActiveRightColumnTab('stream')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'stream' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Stream">Stream</button>}
                                     {isStudio && <button onClick={() => setActiveRightColumnTab('settings')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'settings' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Settings">Settings</button>}
@@ -2017,7 +2038,7 @@ const AppInternal: React.FC = () => {
                                     {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
                                     {isStudio && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
                                     {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} apiKey={playoutPolicy.lastFmApiKey} />}
-                                    {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} />}
+                                    {activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} playoutMode={playoutPolicy.playoutMode}/>}
                                     {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
                                     {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
                                         policy={playoutPolicy}
@@ -2103,7 +2124,8 @@ const AppInternal: React.FC = () => {
             />
             
             <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
-            <audio ref={monitorBusAudioRef} autoPlay></audio>
+            <audio ref={busMonitorAudioRef} autoPlay></audio>
+            <audio ref={streamMonitorAudioRef} crossOrigin="anonymous" autoPlay></audio>
         </div>
     );
 };

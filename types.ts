@@ -96,8 +96,16 @@ export interface PlayoutPolicy {
   artistSeparation: number; // in minutes
   titleSeparation: number; // in minutes
   removePlayedTracks: boolean;
-  normalizationEnabled: boolean;
+  normalizationEnabled: boolean; // Kept for backward compatibility, but UI will use compressorEnabled
   normalizationTargetDb: number; // in dB
+  compressorEnabled: boolean;
+  compressor: {
+    threshold: number;
+    knee: number;
+    ratio: number;
+    attack: number;
+    release: number;
+  };
   equalizerEnabled: boolean;
   equalizerBands: {
     bass: number; // in dB
