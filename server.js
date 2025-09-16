@@ -322,7 +322,8 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
 let currentFfmpegCommand = null;
 let serverStreamStatus = 'inactive'; // 'inactive', 'connecting', 'streaming', 'error'
 let serverStreamError = null;
-let playoutHistory = []; // { trackId, playedAt }
+const playlistFilePath = path.join(__dirname, 'playlist.txt');
+
 
 const broadcastStreamStatus = () => {
     if (!studioClientEmail) return;
@@ -338,88 +339,49 @@ const broadcastStreamStatus = () => {
 const stopPlayout = () => {
     if (currentFfmpegCommand) {
         console.log('[FFMPEG] Stopping current playout command.');
-        // Don't nullify the command here. Let the 'error' event handler do it.
-        // This prevents a race condition where the command is nulled before its event fires.
         currentFfmpegCommand.kill('SIGTERM');
+        currentFfmpegCommand = null;
     }
 };
 
-const advanceTrackAndPlay = async (fromCommand = false) => {
-    console.log(`[Playback] Advancing track. Called from command: ${fromCommand}`);
-    const { sharedPlaylist: playlist, sharedPlayerState: playerState } = db.data;
-    
-    if (playlist.length === 0) {
-        playerState.isPlaying = false;
-        await db.write();
-        broadcastState();
-        return;
-    }
-
-    const endedItem = playlist[playerState.currentTrackIndex];
-
-    if (endedItem && !endedItem.markerType) {
-        if (playerState.stopAfterTrackId && playerState.stopAfterTrackId === endedItem.id) {
-            playerState.isPlaying = false;
-            playerState.stopAfterTrackId = null;
-            console.log(`[Playback] stopAfterTrackId reached. Stopping playback.`);
-            stopPlayout();
-            await db.write();
-            broadcastState();
-            return;
-        }
-    }
-
-    const nextIndex = findNextPlayableIndex(playlist, playerState.currentTrackIndex, 1);
-    if (nextIndex !== -1) {
-        playerState.currentTrackIndex = nextIndex;
-        playerState.trackProgress = 0;
-        const nextItem = playlist[nextIndex];
-        playerState.currentPlayingItemId = nextItem.id;
-        console.log(`[Playback] Next track is index ${nextIndex}: "${nextItem.title}"`);
-        await db.write();
-        broadcastState();
-        startPlayout(); // Start the next track
-    } else {
-        playerState.isPlaying = false;
-        console.log('[Playback] End of playlist reached. Stopping playback.');
-        stopPlayout();
-        await db.write();
-        broadcastState();
-    }
-};
-
-
-const startPlayout = () => {
-    stopPlayout(); // Ensure any previous command is stopped
+const startPlayout = async () => {
+    stopPlayout(); 
 
     const { sharedPlaylist, sharedPlayerState } = db.data;
-    const track = sharedPlaylist[sharedPlayerState.currentTrackIndex];
+    const tracksToPlay = sharedPlaylist
+        .slice(sharedPlayerState.currentTrackIndex)
+        .filter(item => !item.markerType);
 
-    if (!track || track.markerType) {
-        console.log('[FFMPEG] Current item is not a track, trying to advance.');
-        advanceTrackAndPlay(true);
+    if (tracksToPlay.length === 0) {
+        console.log('[FFMPEG] No more tracks to play in the current sequence.');
+        sharedPlayerState.isPlaying = false;
+        await db.write();
+        broadcastState();
         return;
     }
-    
-    // Add to playout history
-    const trackIdForHistory = track.originalId || track.id;
-    playoutHistory.push({ trackId: trackIdForHistory, artist: track.artist, title: track.title, playedAt: Date.now() });
 
-    // FIX: Use the originalId for playlist items to find the correct file.
-    const trackRelativePath = track.originalId || track.id;
-    const trackPath = path.join(mediaDir, trackRelativePath);
+    const playlistFileContent = tracksToPlay.map(track => {
+        const trackPath = path.join(mediaDir, track.originalId || track.id);
+        return `file '${trackPath.replace(/'/g, "'\\''")}'`;
+    }).join('\n');
 
-    if (!fs.existsSync(trackPath)) {
-        console.error(`[FFMPEG] File not found: ${trackPath}. Skipping.`);
-        advanceTrackAndPlay(true);
+    try {
+        await fsPromises.writeFile(playlistFilePath, playlistFileContent);
+    } catch (err) {
+        console.error('[FFMPEG] Failed to write temporary playlist file:', err);
         return;
     }
     
     const studioData = db.data.userdata[studioClientEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
 
-    const command = ffmpeg(trackPath)
-        .inputOptions('-re'); // Read input at native frame rate
+    const command = ffmpeg()
+        .input(playlistFilePath)
+        .inputOptions([
+            '-f', 'concat',
+            '-safe', '0',
+            '-re'
+        ]);
 
     if (streamConfig && streamConfig.isEnabled) {
         const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
@@ -438,7 +400,7 @@ const startPlayout = () => {
         broadcastStreamStatus();
 
         command
-            .outputOptions('-acodec', 'copy') // Directly copy the audio stream without re-encoding
+            .outputOptions('-acodec', 'copy')
             .format('mp3')
             .outputOptions([
                 '-loglevel', 'verbose',
@@ -449,13 +411,11 @@ const startPlayout = () => {
                 '-ice_description', stationDescription || 'Powered by RadioHost.cloud',
                 '-ice_public', '1',
                 '-reconnect', '1',
-                '-reconnect_at_eof', '0',
                 '-reconnect_streamed', '1',
                 '-reconnect_delay_max', '5',
             ])
             .save(outputUrl);
     } else {
-        // Not streaming, output to null sink to keep timing
         command.output('-f', 'null', '-');
         serverStreamStatus = 'inactive';
         broadcastStreamStatus();
@@ -463,9 +423,14 @@ const startPlayout = () => {
         
     command
         .on('start', (commandLine) => {
-            console.log('[FFMPEG] Spawned: ' + commandLine);
+            console.log('[FFMPEG] Spawned with concat playlist: ' + commandLine);
             sharedPlayerState.isPlaying = true;
             sharedPlayerState.trackProgress = 0;
+            // Update the current playing item to the first in our list
+            const currentTrack = tracksToPlay[0];
+            sharedPlayerState.currentPlayingItemId = currentTrack.id;
+            sharedPlayerState.currentTrackIndex = sharedPlaylist.findIndex(t => t.id === currentTrack.id);
+
             if (streamConfig && streamConfig.isEnabled) {
                 serverStreamStatus = 'broadcasting';
                 serverStreamError = null;
@@ -475,66 +440,48 @@ const startPlayout = () => {
             broadcastState();
         })
         .on('progress', (progress) => {
+            // Note: Progress tracking is complex with concat. This is a simplification.
+            // It will show progress through the entire concatenated stream.
+            // For now, we update the first track's progress.
             if (!progress.timemark) return;
             const parts = progress.timemark.split(':');
             const seconds = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
             const flooredSeconds = Math.floor(seconds);
-            if (sharedPlayerState.trackProgress !== flooredSeconds) {
+             if (sharedPlayerState.trackProgress !== flooredSeconds) {
                 sharedPlayerState.trackProgress = flooredSeconds;
-                broadcastState(); // Broadcast every second
+                broadcastState(); 
             }
         })
-        .on('end', () => {
-            console.log(`[FFMPEG] Track finished: ${track.title}`);
+        .on('end', async () => {
+            console.log('[FFMPEG] Concatenated playlist finished.');
+            currentFfmpegCommand = null;
+            sharedPlayerState.isPlaying = false;
+            // Optionally, handle what happens when the whole playlist ends (e.g., auto-fill logic)
+            await db.write();
+            broadcastState();
+        })
+        .on('error', async (err, stdout, stderr) => {
             if (currentFfmpegCommand !== command) {
-                console.log(`[FFMPEG] Ignoring stale "end" event for "${track.title}".`);
+                 console.log(`[FFMPEG] Ignoring stale error.`);
                 return;
             }
             currentFfmpegCommand = null;
 
-            const studioData = db.data.userdata[studioClientEmail];
-            if (studioData?.settings?.isAutoModeEnabled) {
-                advanceTrackAndPlay(false);
-            } else {
-                sharedPlayerState.isPlaying = false;
-                db.write();
-                broadcastState();
-            }
-        })
-        .on('error', (err, stdout, stderr) => {
-            // If the error is for a command that is no longer the active one, ignore it.
-            // This prevents race conditions when quickly skipping tracks.
-            if (currentFfmpegCommand !== command) {
-                console.log(`[FFMPEG] Ignoring stale error for "${track.title}".`);
-                return;
-            }
-
-            // The command has now officially stopped, so clear the global reference.
-            currentFfmpegCommand = null;
-
-            // Log genuine errors, but not intentional stops.
             if (err.message.includes('SIGTERM')) {
-                console.log(`[FFMPEG] Playout for "${track.title}" was stopped intentionally.`);
-                return; // Do not advance, the next track is already handled.
+                console.log(`[FFMPEG] Concat playout was stopped intentionally.`);
+                return; 
             }
 
-            console.error(`[FFMPEG] Error playing ${track.title}: ffmpeg exited with code ${err.code}:`, stderr || err.message);
+            console.error(`[FFMPEG] Concat playlist error: ffmpeg exited with code ${err.code}:`, stderr || err.message);
             if (streamConfig && streamConfig.isEnabled) {
                 serverStreamStatus = 'error';
                 serverStreamError = stderr || err.message;
                 broadcastStreamStatus();
             }
             
-            // If there was a real error and auto mode is on, advance to the next track.
-            const studioData = db.data.userdata[studioClientEmail];
-            if (studioData?.settings?.isAutoModeEnabled) {
-                advanceTrackAndPlay(false);
-            } else {
-                // If not in automode, just stop.
-                sharedPlayerState.isPlaying = false;
-                db.write();
-                broadcastState();
-            }
+            sharedPlayerState.isPlaying = false;
+            await db.write();
+            broadcastState();
         });
         
     currentFfmpegCommand = command;
@@ -769,20 +716,18 @@ wss.on('connection', async (ws, req) => {
                                 }
                                 break;
                             }
-                            case 'next': {
-                                advanceTrackAndPlay(true);
-                                break;
-                            }
+                            case 'next':
                             case 'previous': {
-                                const prevIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, -1);
-                                if (prevIndex !== -1) {
-                                    sharedPlayerState.currentTrackIndex = prevIndex;
-                                    sharedPlayerState.trackProgress = 0;
-                                    const prevItem = sharedPlaylist[prevIndex];
-                                    sharedPlayerState.currentPlayingItemId = prevItem.id;
+                                const direction = command === 'next' ? 1 : -1;
+                                const nextIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, direction);
+                                if (nextIndex !== -1) {
+                                    sharedPlayerState.currentTrackIndex = nextIndex;
+                                    const nextItem = sharedPlaylist[nextIndex];
+                                    sharedPlayerState.currentPlayingItemId = nextItem.id;
                                     if (sharedPlayerState.isPlaying) {
                                         startPlayout();
                                     } else {
+                                        sharedPlayerState.trackProgress = 0;
                                         stateChanged = true;
                                     }
                                 }
@@ -822,8 +767,6 @@ wss.on('connection', async (ws, req) => {
                                     const newTrack = sharedPlaylist[targetIndex];
                                     if (!newTrack.markerType) {
                                         sharedPlayerState.currentTrackIndex = targetIndex;
-                                        sharedPlayerState.currentPlayingItemId = newTrack.id;
-                                        sharedPlayerState.trackProgress = 0;
                                         sharedPlayerState.isPlaying = true;
                                         startPlayout();
                                     }
@@ -874,7 +817,6 @@ wss.on('connection', async (ws, req) => {
                                 if (sharedPlayerState.currentPlayingItemId === itemId) {
                                     const wasPlaying = sharedPlayerState.isPlaying;
                                     sharedPlayerState.isPlaying = false;
-                                    stopPlayout();
                                     const firstPlayable = findNextPlayableIndex(newPlaylist, -1, 1);
                                     sharedPlayerState.currentTrackIndex = firstPlayable > -1 ? firstPlayable : 0;
                                     const nextItem = newPlaylist[sharedPlayerState.currentTrackIndex];
@@ -882,6 +824,8 @@ wss.on('connection', async (ws, req) => {
                                     if(wasPlaying) { // if it was playing, start the next one
                                        sharedPlayerState.isPlaying = true;
                                        startPlayout();
+                                    } else {
+                                       stopPlayout();
                                     }
                                 } else {
                                     const newIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
