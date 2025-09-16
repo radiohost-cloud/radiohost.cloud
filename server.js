@@ -423,19 +423,15 @@ const startPlayout = () => {
     if (streamConfig && streamConfig.isEnabled) {
         const { username, password, serverUrl, port, mountPoint, bitrate, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
         
-        // FINAL FIX: Explicitly remove any protocol from the serverUrl before constructing the Icecast URL.
-        const cleanServerUrl = serverUrl.replace(/^https?:\/\//, '');
+        // FINAL ROBUST FIX: Isolate hostname and clean mount point to build a guaranteed-valid URL.
+        const cleanHostname = serverUrl.replace(/^https?:\/\//, '').split('/')[0];
 
-        const host = `${cleanServerUrl}:${port}`;
-        let mount = mountPoint ? String(mountPoint).trim() : '';
-
-        if (mount === '/' || mount === '') {
-            mount = 'live';
+        let cleanMount = (mountPoint || '').trim().replace(/^\/+|\/+$/g, '');
+        if (cleanMount === '') {
+            cleanMount = 'live';
         }
 
-        const cleanHost = host.replace(/\/+$/, '');
-        const cleanMount = mount.replace(/^\/+/, '');
-        const outputUrl = `icecast://${username}:${password}@${cleanHost}/${cleanMount}`;
+        const outputUrl = `icecast://${username}:${password}@${cleanHostname}:${port}/${cleanMount}`;
 
         serverStreamStatus = 'connecting';
         broadcastStreamStatus();
