@@ -1,26 +1,35 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { type Track, type Folder } from '../types';
+import { type Track, type Folder, type LibraryItem } from '../types';
 import { CloseIcon } from './icons/CloseIcon';
 
+// FIX: Changed props to accept an array of 'items' and specific save handlers for tracks and folders.
 interface TagEditorModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onSave: (tags: string[]) => void;
-    item: Track | Folder;
+    items: LibraryItem[];
     allTags: string[];
+    onSaveFolderTags: (folderId: string, tags: string[]) => void;
+    onSaveTrackTags: (itemIds: string[], tags: string[]) => void;
 }
 
-const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, onSave, item, allTags }) => {
+// FIX: Updated component signature and logic to handle multiple items.
+const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, items, allTags, onSaveFolderTags, onSaveTrackTags }) => {
     const [tags, setTags] = useState<string[]>([]);
     const [inputValue, setInputValue] = useState('');
     const inputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
-        if (isOpen) {
-            setTags(item.tags || []);
+        if (isOpen && items.length > 0) {
+            // Find common tags among all selected items
+            const allTagsSets = items.map(item => new Set(item.tags || []));
+            const commonTags = allTagsSets.reduce((acc, currentSet) => {
+                return new Set([...acc].filter(tag => currentSet.has(tag)));
+            }, allTagsSets[0] || new Set<string>());
+            
+            setTags(Array.from(commonTags));
             setInputValue('');
         }
-    }, [isOpen, item]);
+    }, [isOpen, items]);
 
     const handleAddTag = (tagToAdd: string) => {
         const trimmedTag = tagToAdd.trim();
@@ -47,23 +56,37 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, onSave
         if (trimmedInput && !finalTags.includes(trimmedInput)) {
             finalTags.push(trimmedInput);
         }
-        onSave(finalTags);
+        
+        const trackIds = items.filter(i => i.type !== 'folder').map(i => i.id);
+        const folders = items.filter(i => i.type === 'folder') as Folder[];
+
+        if (trackIds.length > 0) {
+            onSaveTrackTags(trackIds, finalTags);
+        }
+        for (const folder of folders) {
+            onSaveFolderTags(folder.id, finalTags);
+        }
+        onClose();
     };
 
-    if (!isOpen) return null;
+    if (!isOpen || items.length === 0) return null;
 
     const filteredSuggestions = allTags.filter(
         tag => tag.toLowerCase().includes(inputValue.toLowerCase()) && !tags.includes(tag)
     );
 
+    const titleText = items.length === 1 
+        ? `"${'name' in items[0] ? items[0].name : items[0].title}"`
+        : `${items.length} items`;
+
     return (
         <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50" onClick={onClose}>
             <div className="bg-neutral-100 dark:bg-neutral-900 rounded-lg shadow-xl border border-neutral-300 dark:border-neutral-800 w-full max-w-md m-4 flex flex-col" onClick={e => e.stopPropagation()}>
                 <div className="p-6">
-                    <h3 className="text-lg font-semibold text-black dark:text-white">Edit Tags for "{'name' in item ? item.name : item.title}"</h3>
-                    {item.type === 'folder' && (
+                    <h3 className="text-lg font-semibold text-black dark:text-white">Edit Tags for {titleText}</h3>
+                    {items.some(i => i.type === 'folder') && (
                         <p className="mt-2 text-sm text-yellow-600 dark:text-yellow-400 p-2 bg-yellow-400/10 rounded-md border border-yellow-500/20">
-                            <strong>Note:</strong> Tag changes will be applied to all tracks and subfolders within this folder.
+                            <strong>Note:</strong> Tag changes will be applied to all tracks and subfolders within any selected folders.
                         </p>
                     )}
                     <div className="mt-4">

@@ -264,7 +264,7 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                 <div className="flex-grow flex min-h-0">
                     {/* Left: Media Library */}
                     <div className="w-1/3 border-r border-neutral-300 dark:border-neutral-700">
-                        {/* FIX: Removed non-existent props from MediaLibrary. */}
+                        {/* FIX: Corrected prop names and added missing props to satisfy MediaLibraryProps. */}
                         <MediaLibrary
                             rootFolder={mediaLibrary}
                             onAddToPlaylist={(track) => handleInsertTrack(track, null)}
@@ -272,9 +272,10 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                             onRemoveFromLibrary={() => {}}
                             onCreateFolder={() => {}}
                             onMoveItem={() => {}}
+                            onRenameItem={() => {}}
                             onOpenMetadataSettings={() => {}}
                             onOpenTrackMetadataEditor={() => {}}
-                            onUpdateTrackTags={() => {}}
+                            onUpdateMultipleItemsTags={() => {}}
                             onUpdateFolderTags={() => {}}
                             onPflTrack={() => {}}
                             pflTrackId={null}

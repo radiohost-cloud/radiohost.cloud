@@ -1,5 +1,3 @@
-
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -1382,16 +1380,20 @@ const AppInternal: React.FC = () => {
         sendStudioCommand('addUrlTrackToLibrary', { track, destinationFolderId });
     }, [sendStudioCommand]);
     
-    const handleRemoveFromLibrary = useCallback(async (id: string) => {
-        sendStudioCommand('removeFromLibrary', { id });
+    const handleRemoveFromLibrary = useCallback(async (ids: string[]) => {
+        sendStudioCommand('removeFromLibrary', { ids });
     }, [sendStudioCommand]);
 
     const handleCreateFolder = useCallback(async (parentId: string, folderName: string) => {
         sendStudioCommand('createFolder', { parentId, folderName });
     }, [sendStudioCommand]);
 
-    const handleMoveItemInLibrary = useCallback((itemId: string, destinationFolderId: string) => {
-        sendStudioCommand('moveItemInLibrary', { itemId, destinationFolderId });
+    const handleMoveItemInLibrary = useCallback((itemIds: string[], destinationFolderId: string) => {
+        sendStudioCommand('moveItemInLibrary', { itemIds, destinationFolderId });
+    }, [sendStudioCommand]);
+
+    const handleRenameItemInLibrary = useCallback((itemId: string, newName: string) => {
+        sendStudioCommand('renameItemInLibrary', { itemId, newName });
     }, [sendStudioCommand]);
 
     const handleUpdateFolderMetadataSettings = useCallback((folderId: string, settings: { enabled: boolean; customText?: string; suppressDuplicateWarning?: boolean }) => {
@@ -1402,8 +1404,8 @@ const AppInternal: React.FC = () => {
         sendStudioCommand('updateTrackMetadata', { trackId, newMetadata });
     }, [sendStudioCommand]);
 
-    const handleUpdateTrackTags = useCallback((trackId: string, tags: string[]) => {
-        sendStudioCommand('updateTrackTags', { trackId, tags });
+    const handleUpdateMultipleItemsTags = useCallback((itemIds: string[], tags: string[]) => {
+        sendStudioCommand('updateMultipleItemsTags', { itemIds, tags });
     }, [sendStudioCommand]);
     
     const handleUpdateFolderTags = useCallback((folderId: string, newTags: string[]) => {
@@ -1950,11 +1952,12 @@ const AppInternal: React.FC = () => {
                             onAddToPlaylist={(track) => handleInsertTrackInPlaylist(track, null)}
                             onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
                             onRemoveFromLibrary={handleRemoveFromLibrary}
-                            onCreateFolder={handleCreateFolder}
                             onMoveItem={handleMoveItemInLibrary}
+                            onRenameItem={handleRenameItemInLibrary}
+                            onCreateFolder={handleCreateFolder}
                             onOpenMetadataSettings={(folder) => setEditingMetadataFolder(folder)}
                             onOpenTrackMetadataEditor={(track) => setEditingTrack(track)}
-                            onUpdateTrackTags={handleUpdateTrackTags}
+                            onUpdateMultipleItemsTags={handleUpdateMultipleItemsTags}
                             onUpdateFolderTags={handleUpdateFolderTags}
                             onPflTrack={handlePflTrack}
                             pflTrackId={pflTrackId}

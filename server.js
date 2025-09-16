@@ -1,4 +1,3 @@
-
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
 // To run: `npm install express cors multer lowdb ws node-id3 fluent-ffmpeg` then `node server.js`
@@ -303,34 +302,24 @@ const broadcastLibraryUpdate = () => {
     console.log('[WebSocket] Library update broadcasted to all clients.');
 };
 
-const refreshAndBroadcastLibrary = () => {
-    clearTimeout(watchTimeout);
-    watchTimeout = setTimeout(async () => {
-        console.log('[File Watcher] Change detected. Re-scanning media library...');
-        try {
-            await db.read();
-            const newChildren = await scanMediaToTree(mediaDir);
-            libraryState.children = newChildren;
-            
-            await db.write(); // IMPORTANT: Write cache updates
-            
-            broadcastLibraryUpdate();
-            const playlistWasUpdated = await syncPlaylistWithLibrary();
-            if (playlistWasUpdated) {
-                broadcastState();
-            }
-        } catch (error) {
-            console.error('[File Watcher] Failed to refresh and broadcast library:', error);
+const refreshAndBroadcastLibrary = async () => {
+    console.log('[FS Operation] Re-scanning media library...');
+    try {
+        await db.read();
+        const newChildren = await scanMediaToTree(mediaDir);
+        libraryState.children = newChildren;
+        
+        await db.write(); // IMPORTANT: Write cache updates
+        
+        broadcastLibraryUpdate();
+        const playlistWasUpdated = await syncPlaylistWithLibrary();
+        if (playlistWasUpdated) {
+            broadcastState();
         }
-    }, 2000);
-};
-
-fs.watch(mediaDir, { recursive: true }, (eventType, filename) => {
-    if (filename) {
-        console.log(`[File Watcher] Event '${eventType}' on: ${filename}`);
-        refreshAndBroadcastLibrary();
+    } catch (error) {
+        console.error('[FS Operation] Failed to refresh and broadcast library:', error);
     }
-});
+};
 
 
 const getStationSettings = async () => {
@@ -908,13 +897,41 @@ wss.on('connection', async (ws, req) => {
                         const { sharedPlaylist, sharedPlayerState } = db.data;
                 
                         switch (command) {
+                            case 'renameItemInLibrary': {
+                                const { itemId, newName } = payload;
+                                if (!itemId || !newName) break;
+                                const oldPath = path.join(mediaDir, itemId);
+                                const newPath = path.join(path.dirname(oldPath), newName);
+                                try {
+                                    await fsPromises.rename(oldPath, newPath);
+                                    const oldArtworkPath = path.join(artworkDir, itemId.replace(/\.[^/.]+$/, ".jpg"));
+                                    if (fs.existsSync(oldArtworkPath)) {
+                                        const newArtworkPath = path.join(path.dirname(oldArtworkPath), newName.replace(/\.[^/.]+$/, ".jpg"));
+                                        await fsPromises.rename(oldArtworkPath, newArtworkPath);
+                                    }
+                                    await refreshAndBroadcastLibrary();
+                                } catch (e) {
+                                    console.error(`[FS] Failed to rename ${itemId}:`, e);
+                                }
+                                break;
+                            }
+                            case 'updateMultipleItemsTags': {
+                                const { itemIds, tags } = payload;
+                                if (!itemIds || !tags) break;
+                                for (const itemId of itemIds) {
+                                    const fullPath = path.join(mediaDir, itemId);
+                                    NodeID3.update({ userDefinedText: [{ description: "RH_TAGS", value: tags.join(', ') }] }, fullPath);
+                                }
+                                await refreshAndBroadcastLibrary();
+                                break;
+                            }
                             case 'updateFolderTags': {
                                 const { folderId, newTags } = payload;
                                 if (!folderId || !newTags) break;
                                 if (!db.data.folderMetadata) db.data.folderMetadata = {};
                                 db.data.folderMetadata[folderId] = { ...(db.data.folderMetadata[folderId] || {}), tags: newTags };
                                 await db.write();
-                                refreshAndBroadcastLibrary();
+                                await refreshAndBroadcastLibrary();
                                 break;
                             }
                             case 'updateFolderMetadata': {
@@ -923,58 +940,36 @@ wss.on('connection', async (ws, req) => {
                                 if (!db.data.folderMetadata) db.data.folderMetadata = {};
                                 db.data.folderMetadata[folderId] = { ...(db.data.folderMetadata[folderId] || {}), suppressMetadata: settings };
                                 await db.write();
-                                refreshAndBroadcastLibrary();
+                                await refreshAndBroadcastLibrary();
                                 break;
                             }
-                            case 'updateTrackTags': {
-                                const { trackId, tags } = payload;
-                                const fullPath = path.join(mediaDir, trackId);
-                                const success = NodeID3.update({
-                                    userDefinedText: [{
-                                        description: "RH_TAGS",
-                                        value: tags.join(', ')
-                                    }]
-                                }, fullPath);
-                                if (success) {
-                                    console.log(`[Tags] Updated tags for ${trackId}`);
-                                    refreshAndBroadcastLibrary();
-                                }
-                                break;
-                            }
-                             case 'updateTrackMetadata': {
+                            case 'updateTrackMetadata': {
                                 const { trackId, newMetadata } = payload;
                                 const fullPath = path.join(mediaDir, trackId);
-                                const success = NodeID3.update({
-                                    title: newMetadata.title,
-                                    artist: newMetadata.artist,
-                                }, fullPath);
+                                const success = NodeID3.update({ title: newMetadata.title, artist: newMetadata.artist }, fullPath);
                                 if (success) {
                                     console.log(`[Metadata] Updated metadata for ${trackId}`);
-                                    refreshAndBroadcastLibrary();
+                                    await refreshAndBroadcastLibrary();
                                 }
                                 break;
                             }
                             case 'removeFromLibrary': {
-                                const { id } = payload;
-                                if (!id) break;
-                                const itemPath = path.join(mediaDir, id);
-                                try {
-                                    const stats = await fsPromises.stat(itemPath).catch(() => null);
-                                    if (stats) {
-                                        await fsPromises.rm(itemPath, { recursive: true, force: true });
-                                        console.log(`[FS] Deleted item: ${itemPath}`);
-                                        if (stats.isFile()) {
-                                            const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
-                                            if (fs.existsSync(artworkPath)) {
-                                                await fsPromises.unlink(artworkPath);
-                                                console.log(`[FS] Deleted artwork: ${artworkPath}`);
+                                const { ids } = payload;
+                                if (!ids || !Array.isArray(ids)) break;
+                                for (const id of ids) {
+                                    const itemPath = path.join(mediaDir, id);
+                                    try {
+                                        const stats = await fsPromises.stat(itemPath).catch(() => null);
+                                        if (stats) {
+                                            await fsPromises.rm(itemPath, { recursive: true, force: true });
+                                            if (stats.isFile()) {
+                                                const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
+                                                if (fs.existsSync(artworkPath)) await fsPromises.unlink(artworkPath);
                                             }
                                         }
-                                        refreshAndBroadcastLibrary();
-                                    }
-                                } catch (e) {
-                                    console.error(`[FS] Failed to delete item at ${itemPath}:`, e);
+                                    } catch (e) { console.error(`[FS] Failed to delete item at ${itemPath}:`, e); }
                                 }
+                                await refreshAndBroadcastLibrary();
                                 break;
                             }
                             case 'createFolder': {
@@ -982,40 +977,32 @@ wss.on('connection', async (ws, req) => {
                                 if (!folderName) break;
                                 const basePath = parentId === 'root' ? mediaDir : path.join(mediaDir, parentId);
                                 const fullPath = path.join(basePath, folderName);
-                                try {
-                                    if (!fs.existsSync(fullPath)) {
-                                        await fsPromises.mkdir(fullPath, { recursive: true });
-                                        console.log(`[FS] Created folder: ${fullPath}`);
-                                        refreshAndBroadcastLibrary();
-                                    }
-                                } catch (e) {
-                                    console.error(`[FS] Failed to create folder at ${fullPath}:`, e);
+                                if (!fs.existsSync(fullPath)) {
+                                    await fsPromises.mkdir(fullPath, { recursive: true });
+                                    await refreshAndBroadcastLibrary();
                                 }
                                 break;
                             }
                             case 'moveItemInLibrary': {
-                                const { itemId, destinationFolderId } = payload;
-                                if (!itemId || !destinationFolderId) break;
-                                const sourcePath = path.join(mediaDir, itemId);
-                                const destDir = destinationFolderId === 'root' ? mediaDir : path.join(mediaDir, destinationFolderId);
-                                const destPath = path.join(destDir, path.basename(itemId));
-                                const artworkSourcePath = path.join(artworkDir, itemId.replace(/\.[^/.]+$/, ".jpg"));
-                                const artworkDestDir = destinationFolderId === 'root' ? artworkDir : path.join(artworkDir, destinationFolderId);
-                                const artworkDestPath = path.join(artworkDestDir, path.basename(itemId).replace(/\.[^/.]+$/, ".jpg"));
-                                try {
-                                    const sourceStats = await fsPromises.stat(sourcePath).catch(() => null);
-                                    if (!sourceStats) break;
-                                    if (sourceStats.isFile() && fs.existsSync(artworkSourcePath)) {
-                                        await fsPromises.mkdir(path.dirname(artworkDestPath), { recursive: true });
-                                        await fsPromises.rename(artworkSourcePath, artworkDestPath);
-                                        console.log(`[FS] Moved artwork from ${artworkSourcePath} to ${artworkDestPath}`);
-                                    }
-                                    await fsPromises.rename(sourcePath, destPath);
-                                    console.log(`[FS] Moved item from ${sourcePath} to ${destPath}`);
-                                    refreshAndBroadcastLibrary();
-                                } catch (e) {
-                                    console.error(`[FS] Failed to move item:`, e);
+                                const { itemIds, destinationFolderId } = payload;
+                                if (!itemIds || !Array.isArray(itemIds) || !destinationFolderId) break;
+                                for (const itemId of itemIds) {
+                                    const sourcePath = path.join(mediaDir, itemId);
+                                    const destDir = destinationFolderId === 'root' ? mediaDir : path.join(mediaDir, destinationFolderId);
+                                    const destPath = path.join(destDir, path.basename(itemId));
+                                    const artworkSourcePath = path.join(artworkDir, itemId.replace(/\.[^/.]+$/, ".jpg"));
+                                    const artworkDestDir = destinationFolderId === 'root' ? artworkDir : path.join(artworkDir, destinationFolderId);
+                                    const artworkDestPath = path.join(artworkDestDir, path.basename(itemId).replace(/\.[^/.]+$/, ".jpg"));
+                                    try {
+                                        const sourceStats = await fsPromises.stat(sourcePath).catch(() => null);
+                                        if (sourceStats && sourceStats.isFile() && fs.existsSync(artworkSourcePath)) {
+                                            await fsPromises.mkdir(path.dirname(artworkDestPath), { recursive: true });
+                                            await fsPromises.rename(artworkSourcePath, artworkDestPath);
+                                        }
+                                        if (sourceStats) await fsPromises.rename(sourcePath, destPath);
+                                    } catch (e) { console.error(`[FS] Failed to move item ${itemId}:`, e); }
                                 }
+                                await refreshAndBroadcastLibrary();
                                 break;
                             }
                             case 'next':
@@ -1728,7 +1715,7 @@ app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
         const clientDuration = req.body.duration;
         const trackObject = await createTrackObject(req.file.path, relativePath.replace(/\\/g, '/'), req.file.originalname, clientDuration);
         res.status(201).json(trackObject);
-        refreshAndBroadcastLibrary();
+        await refreshAndBroadcastLibrary();
     } catch (error) {
         console.error('Error processing uploaded file:', error);
         res.status(500).json({ message: 'Error processing file.' });
@@ -1779,6 +1766,7 @@ app.post('/api/folder', async (req, res) => {
             await fsPromises.mkdir(fullPath, { recursive: true });
         }
         res.status(201).json({ success: true, message: `Folder created at ${folderPath}` });
+        await refreshAndBroadcastLibrary();
     } catch (error) {
         console.error(`Failed to create folder ${folderPath}:`, error);
         res.status(500).json({ message: 'Failed to create folder.' });
