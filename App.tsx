@@ -69,15 +69,15 @@ const defaultPlayoutPolicy: PlayoutPolicy = {
     voiceTrackEditorPreviewDuration: 5, // 5 seconds default
     streamingConfig: {
         isEnabled: false,
-        serverAddress: 'stream.radiohost.cloud:8000/live',
-        username: 'source',
-        password: 'yourpassword',
-        bitrate: 128,
+        serverAddress: '', // Legacy, can be removed later
         stationName: 'RadioHost.cloud',
         stationGenre: 'Various',
         stationUrl: 'https://radiohost.cloud',
         stationDescription: 'Powered by RadioHost.cloud',
         metadataHeader: '',
+        icecastStreamUrl: '',
+        icecastStatsUrl: '',
+        icecastMountpoint: '',
     },
 };
 
@@ -2120,11 +2120,6 @@ const AppInternal: React.FC = () => {
                                     {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
                                         policy={playoutPolicy}
                                         onUpdatePolicy={setPlayoutPolicy}
-                                        serverStreamStatus={serverStreamStatus}
-                                        serverStreamError={serverStreamError}
-                                        isAudioEngineReady={audioGraphRef.current.isInitialized} 
-                                        isAudioEngineInitializing={isAudioEngineInitializing}
-                                        isSecureContext={isSecureContext}
                                     />}
                                     {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isNowPlayingExportEnabled={isNowPlayingExportEnabled} onSetIsNowPlayingExportEnabled={setIsNowPlayingExportEnabled} onSetNowPlayingFile={handleSetNowPlayingFile} nowPlayingFileName={nowPlayingFileName} metadataFormat={metadataFormat} onSetMetadataFormat={setMetadataFormat} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} onSetAutoBackupFolder={handleSetAutoBackupFolder} autoBackupFolderPath={autoBackupFolderPath} allFolders={allFolders} allTags={allTags} />}
                                 </div>
