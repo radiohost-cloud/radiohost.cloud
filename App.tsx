@@ -2097,7 +2097,7 @@ const AppInternal: React.FC = () => {
                             >
                                 <div className="flex items-center gap-2">
                                     {isStudio ? <UsersIcon className="w-5 h-5" /> : <MicrophoneIcon className="w-5 h-5" />}
-                                    <h3 className="font-semibold text-black dark:text-white">{isStudio ? 'Presenters' : 'Microphone'}</h3>
+                                    <h3 className="font-semibold text-black dark:text-white">{isStudio ? 'Remote Presenters' : 'Microphone'}</h3>
                                 </div>
                                 <button className="text-black dark:text-white">
                                     {isMicPanelCollapsed ? <ChevronUpIcon className="w-5 h-5" /> : <ChevronDownIcon className="w-5 h-5" />}

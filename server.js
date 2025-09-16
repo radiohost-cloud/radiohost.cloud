@@ -110,9 +110,11 @@ const fetchArtwork = async (artist, title) => {
 
 
 // --- NEW: Filesystem-based Media Library Logic ---
-const createTrackObject = async (entryFullPath, entryRelativePath, entryName) => {
+const createTrackObject = async (entryFullPath, entryRelativePath, entryName, clientDuration) => {
     try {
-        const durationInSeconds = await getDuration(entryFullPath);
+        // Use client-provided duration if available, otherwise probe the file.
+        // This makes ffmpeg optional on the server for uploads.
+        const durationInSeconds = clientDuration ? parseFloat(clientDuration) : await getDuration(entryFullPath);
         const tags = NodeID3.read(entryFullPath);
         let hasArtwork = false;
         let remoteArtworkUrl = null;
@@ -1591,7 +1593,8 @@ app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
 
     try {
         const relativePath = req.body.webkitRelativePath || req.file.originalname;
-        const trackObject = await createTrackObject(req.file.path, relativePath.replace(/\\/g, '/'), req.file.originalname);
+        const clientDuration = req.body.duration;
+        const trackObject = await createTrackObject(req.file.path, relativePath.replace(/\\/g, '/'), req.file.originalname, clientDuration);
         res.status(201).json(trackObject);
     } catch (error) {
         console.error('Error processing uploaded file:', error);
