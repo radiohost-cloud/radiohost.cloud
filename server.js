@@ -381,16 +381,6 @@ let currentLogoSrc = null;
 
 const browserPlayerClients = new Set();
 const directStreamListeners = new Set();
-let streamHeader = null;
-
-let currentMimeType = 'audio/webm; codecs=opus';
-let currentMetadata = {
-    title: "Silence",
-    artist: "RadioHost.cloud",
-    artworkUrl: null,
-    nextTrackTitle: null
-};
-const MSG_TYPE_PUBLIC_STREAM_CHUNK = 1;
 
 
 const broadcastState = () => {
@@ -407,6 +397,50 @@ const broadcastState = () => {
     }
   });
 };
+
+const broadcastPublicMetadata = async () => {
+    await db.read();
+    const { sharedPlayerState, sharedPlaylist } = db.data;
+
+    let metadataPayload = {
+        title: 'Silence',
+        artist: 'RadioHost.cloud',
+        artworkUrl: null
+    };
+
+    if (sharedPlayerState.isPlaying && sharedPlayerState.currentPlayingItemId) {
+        const currentItem = sharedPlaylist.find(item => item.id === sharedPlayerState.currentPlayingItemId);
+        if (currentItem && currentItem.type !== 'marker') {
+            const fullTrackInfo = findTrackInServerTree(libraryState, currentItem.originalId || currentItem.id);
+            let artworkUrl = null;
+            if (fullTrackInfo) {
+                if (fullTrackInfo.remoteArtworkUrl) {
+                    artworkUrl = fullTrackInfo.remoteArtworkUrl;
+                } else if (fullTrackInfo.hasEmbeddedArtwork) {
+                    const artworkPath = (fullTrackInfo.originalId || fullTrackInfo.id).replace(/\.[^/.]+$/, ".jpg");
+                    artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
+                }
+            }
+            metadataPayload = {
+                title: currentItem.title,
+                artist: currentItem.artist,
+                artworkUrl: artworkUrl,
+            };
+        }
+    }
+
+    const message = JSON.stringify({
+        type: 'metadataUpdate',
+        payload: { ...metadataPayload, logoSrc: currentLogoSrc }
+    });
+
+    browserPlayerClients.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(message);
+        }
+    });
+};
+
 
 const broadcastPresenterList = async () => {
     if (!studioClientEmail) return;
@@ -489,10 +523,12 @@ const stopPlayout = (shouldBroadcast = true) => {
     }
     db.data.sharedPlayerState.isPlaying = false;
     db.data.sharedPlayerState.trackProgress = 0;
+    db.data.sharedPlayerState.currentPlayingItemId = null;
     db.write();
     if (shouldBroadcast) {
         broadcastState();
     }
+    broadcastPublicMetadata();
 };
 
 const startPlayoutFromIndex = async (startIndex) => {
@@ -508,6 +544,7 @@ const startPlayoutFromIndex = async (startIndex) => {
         db.data.sharedPlayerState.isPlaying = false;
         await db.write();
         broadcastState();
+        broadcastPublicMetadata();
         return;
     }
 
@@ -601,9 +638,12 @@ const startPlayoutFromIndex = async (startIndex) => {
                 sharedPlayerState.currentPlayingItemId = currentTrackId;
                 sharedPlayerState.trackProgress = currentTrackProgress;
 
-                if (trackChanged && streamConfig && streamConfig.isEnabled) {
-                    const currentTrack = sharedPlaylist[currentTrackPlaylistIndex];
-                    if(currentTrack) updateIcecastMetadata(currentTrack, streamConfig);
+                if (trackChanged) {
+                    if (streamConfig && streamConfig.isEnabled) {
+                        const currentTrack = sharedPlaylist[currentTrackPlaylistIndex];
+                        if(currentTrack) updateIcecastMetadata(currentTrack, streamConfig);
+                    }
+                    broadcastPublicMetadata();
                 }
 
                 const now = Date.now();
@@ -620,6 +660,7 @@ const startPlayoutFromIndex = async (startIndex) => {
             db.data.sharedPlayerState.isPlaying = false;
             await db.write();
             broadcastState();
+            broadcastPublicMetadata();
             // Here you could trigger autofill or other end-of-playlist logic
         })
         .on('error', (err) => {
@@ -636,6 +677,7 @@ const startPlayoutFromIndex = async (startIndex) => {
             db.data.sharedPlayerState.isPlaying = false;
             db.write();
             broadcastState();
+            broadcastPublicMetadata();
         });
 };
 
@@ -818,11 +860,6 @@ wss.on('connection', async (ws, req) => {
         ws.req = req;
         browserPlayerClients.add(ws);
         
-        if (ws.readyState === ws.OPEN) {
-            ws.send(JSON.stringify({ type: 'streamConfig', payload: { mimeType: currentMimeType } }));
-            ws.send(JSON.stringify({ type: 'metadataUpdate', payload: { ...currentMetadata, logoSrc: currentLogoSrc } }));
-        }
-        
         ws.on('message', (message) => {
             try {
                 const data = JSON.parse(message.toString());
@@ -899,19 +936,6 @@ wss.on('connection', async (ws, req) => {
 
     ws.on('message', async (message) => {
         try {
-             if (message instanceof Buffer && message.length > 1) {
-                const messageType = message.readUInt8(0);
-                if (messageType === MSG_TYPE_PUBLIC_STREAM_CHUNK && studioClientEmail && studioClientEmail === email) {
-                    const audioData = message.slice(1);
-                    if (!streamHeader) {
-                        streamHeader = audioData;
-                        console.log(`[Audio Stream] Header received (${streamHeader.length} bytes).`);
-                    }
-                    directStreamListeners.forEach(res => res.write(audioData));
-                    return;
-                }
-            }
-
             const data = JSON.parse(message.toString());
             
             if (data.type !== 'ping') {
@@ -1263,32 +1287,6 @@ wss.on('connection', async (ws, req) => {
                     }
                     break;
 
-                case 'streamConfigUpdate':
-                    if (studioClientEmail && studioClientEmail === email) {
-                        currentMimeType = data.payload.mimeType;
-                        console.log(`[Audio Stream] Mime type updated to: ${currentMimeType}. Resetting stream.`);
-                        directStreamListeners.forEach(res => res.end());
-                        directStreamListeners.clear();
-                        streamHeader = null;
-                        browserPlayerClients.forEach(clientWs => {
-                             if (clientWs.readyState === ws.OPEN) {
-                                clientWs.send(JSON.stringify({ type: 'streamConfig', payload: { mimeType: currentMimeType } }));
-                            }
-                        });
-                    }
-                    break;
-
-                case 'metadataUpdate':
-                    if (studioClientEmail && studioClientEmail === email) {
-                        currentMetadata = data.payload;
-                        browserPlayerClients.forEach(clientWs => {
-                            if (clientWs.readyState === ws.OPEN) {
-                                clientWs.send(JSON.stringify({ type: 'metadataUpdate', payload: { ...currentMetadata, logoSrc: currentLogoSrc } }));
-                            }
-                        });
-                    }
-                    break;
-                
                 case 'webrtc-signal':
                     const targetClient = clients.get(data.target);
                     if (targetClient && targetClient.readyState === ws.OPEN) {
@@ -1339,14 +1337,6 @@ wss.on('connection', async (ws, req) => {
         let listChanged = false;
         if (studioClientEmail === email) {
             studioClientEmail = null;
-            console.log('[WebSocket] Studio client disconnected. Ending public stream.');
-            directStreamListeners.forEach(res => res.end());
-            directStreamListeners.clear();
-            browserPlayerClients.forEach(clientWs => {
-                if (clientWs.readyState === ws.OPEN) {
-                    clientWs.send(JSON.stringify({ type: 'streamEnded' }));
-                }
-            });
         }
         if (presenterEmails.has(email)) {
             presenterEmails.delete(email);
@@ -1480,15 +1470,16 @@ const getPlayerPageHTML = (stationName) => `
         const messageInput = document.getElementById('message-input');
 
         let publicStreamUrl = '';
-        let isPlaying = false;
+        let stationName = ${JSON.stringify(stationName || 'Live Stream')};
         let ws;
         
-        const fetchConfig = async () => {
+        const fetchInitialState = async () => {
             try {
-                const response = await fetch('/api/public-config');
-                const config = await response.json();
-                if (config.publicPlayerEnabled) {
-                    publicStreamUrl = config.publicStreamUrl;
+                const response = await fetch('/api/public-initial-state');
+                const data = await response.json();
+                if (data.publicPlayerEnabled) {
+                    publicStreamUrl = data.publicStreamUrl;
+                    updateMetadataDisplay(data.nowPlaying);
                 } else {
                     document.body.innerHTML = '<h1>Stream is currently offline.</h1>';
                 }
@@ -1497,24 +1488,19 @@ const getPlayerPageHTML = (stationName) => `
             }
         };
 
-        const updateMetadata = async () => {
-            try {
-                const response = await fetch('/api/public-now-playing');
-                const data = await response.json();
-                titleEl.textContent = data.title || '...';
-                artistEl.textContent = data.artist || '...';
-                artworkEl.src = data.artworkUrl || 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
+        const updateMetadataDisplay = (metadata) => {
+            if (!metadata) return;
+            titleEl.textContent = metadata.title || '...';
+            artistEl.textContent = metadata.artist || '...';
+            artworkEl.src = metadata.artworkUrl || metadata.logoSrc || 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
 
-                if ('mediaSession' in navigator) {
-                    navigator.mediaSession.metadata = new MediaMetadata({
-                        title: data.title || '...',
-                        artist: data.artist || 'RadioHost.cloud',
-                        album: ${JSON.stringify(stationName || 'Live Stream')},
-                        artwork: data.artworkUrl ? [{ src: data.artworkUrl, sizes: '512x512' }] : []
-                    });
-                }
-            } catch (e) {
-                console.error('Failed to fetch metadata', e);
+            if ('mediaSession' in navigator) {
+                navigator.mediaSession.metadata = new MediaMetadata({
+                    title: metadata.title || '...',
+                    artist: metadata.artist || 'RadioHost.cloud',
+                    album: stationName,
+                    artwork: metadata.artworkUrl ? [{ src: metadata.artworkUrl, sizes: '512x512' }] : []
+                });
             }
         };
 
@@ -1534,8 +1520,8 @@ const getPlayerPageHTML = (stationName) => `
             }
         });
         
-        audioPlayer.onplaying = () => { isPlaying = true; playBtn.innerHTML = '&#10074;&#10074;'; artworkEl.style.transform = 'scale(1.05)'; };
-        audioPlayer.onpause = () => { isPlaying = false; playBtn.innerHTML = '&#9658;'; artworkEl.style.transform = 'scale(1)'; };
+        audioPlayer.onplaying = () => { playBtn.innerHTML = '&#10074;&#10074;'; artworkEl.style.transform = 'scale(1.05)'; };
+        audioPlayer.onpause = () => { playBtn.innerHTML = '&#9658;'; artworkEl.style.transform = 'scale(1)'; };
         
         if ('mediaSession' in navigator) {
             navigator.mediaSession.setActionHandler('play', () => playBtn.click());
@@ -1553,6 +1539,8 @@ const getPlayerPageHTML = (stationName) => `
                     if (!chatWindow.classList.contains('open')) {
                         chatNotification.style.display = 'block';
                     }
+                } else if (data.type === 'metadataUpdate') {
+                    updateMetadataDisplay(data.payload);
                 }
             };
             ws.onclose = () => setTimeout(connectWs, 5000);
@@ -1611,56 +1599,50 @@ const getPlayerPageHTML = (stationName) => `
             }
         });
         
-        fetchConfig().then(() => {
-            updateMetadata();
-            setInterval(updateMetadata, 5000);
+        fetchInitialState().then(() => {
             connectWs();
         });
     </script>
 </body>
 </html>`;
 
-app.get('/api/public-config', async (req, res) => {
+app.get('/api/public-initial-state', async (req, res) => {
     const settings = await getStationSettings();
-    if (settings && settings.streamingConfig) {
-        res.json({
-            publicPlayerEnabled: settings.streamingConfig.publicPlayerEnabled,
-            publicStreamUrl: settings.streamingConfig.publicStreamUrl,
-        });
-    } else {
-        res.json({ publicPlayerEnabled: false, publicStreamUrl: '' });
-    }
-});
+    const config = settings?.streamingConfig || {};
 
-app.get('/api/public-now-playing', async (req, res) => {
     await db.read();
     const { sharedPlayerState, sharedPlaylist } = db.data;
-    
-    if (!sharedPlayerState.isPlaying || !sharedPlayerState.currentPlayingItemId) {
-        return res.json({ title: 'Silence', artist: 'RadioHost.cloud', artworkUrl: null });
-    }
-    
-    const currentItem = sharedPlaylist.find(item => item.id === sharedPlayerState.currentPlayingItemId);
-    if (!currentItem || currentItem.type === 'marker') {
-        return res.json({ title: 'Silence', artist: 'RadioHost.cloud', artworkUrl: null });
-    }
-    
-    let fullTrackInfo = findTrackInServerTree(libraryState, currentItem.originalId || currentItem.id);
-    
-    let artworkUrl = null;
-    if (fullTrackInfo) {
-        if (fullTrackInfo.remoteArtworkUrl) {
-            artworkUrl = fullTrackInfo.remoteArtworkUrl;
-        } else if (fullTrackInfo.hasEmbeddedArtwork) {
-            const artworkPath = (fullTrackInfo.originalId || fullTrackInfo.id).replace(/\.[^/.]+$/, ".jpg");
-            artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
+
+    let nowPlaying = {
+        title: 'Silence',
+        artist: 'RadioHost.cloud',
+        artworkUrl: null,
+        logoSrc: settings.logoSrc
+    };
+
+    if (sharedPlayerState.isPlaying && sharedPlayerState.currentPlayingItemId) {
+        const currentItem = sharedPlaylist.find(item => item.id === sharedPlayerState.currentPlayingItemId);
+        if (currentItem && currentItem.type !== 'marker') {
+            const fullTrackInfo = findTrackInServerTree(libraryState, currentItem.originalId || currentItem.id);
+            let artworkUrl = null;
+            if (fullTrackInfo) {
+                if (fullTrackInfo.remoteArtworkUrl) {
+                    artworkUrl = fullTrackInfo.remoteArtworkUrl;
+                } else if (fullTrackInfo.hasEmbeddedArtwork) {
+                    const artworkPath = (fullTrackInfo.originalId || fullTrackInfo.id).replace(/\.[^/.]+$/, ".jpg");
+                    artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
+                }
+            }
+            nowPlaying.title = currentItem.title;
+            nowPlaying.artist = currentItem.artist;
+            nowPlaying.artworkUrl = artworkUrl;
         }
     }
 
     res.json({
-        title: currentItem.title,
-        artist: currentItem.artist,
-        artworkUrl: artworkUrl,
+        publicPlayerEnabled: config.publicPlayerEnabled,
+        publicStreamUrl: config.publicStreamUrl,
+        nowPlaying: nowPlaying
     });
 });
 
