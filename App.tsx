@@ -1772,13 +1772,23 @@ const AppInternal: React.FC = () => {
                     setBroadcasts(serverBroadcasts);
                 }
                 if (playerState) {
+                    // FIX: When the currently playing track ID from the server is different from the one in our current state,
+                    // it means the track has just changed. We must force the progress to 0 on the client-side
+                    // to prevent the progress from the old track from briefly appearing on the new track's progress bar.
+                    if (playerState.currentPlayingItemId !== undefined && playerState.currentPlayingItemId !== currentPlayingItemId) {
+                        setTrackProgress(0);
+                    } else if (playerState.trackProgress !== undefined) {
+                        setTrackProgress(playerState.trackProgress);
+                    }
+
                     if (playerState.isPlaying && !isPlaying) {
                         // Reset audio stream player when server starts playing
                         audioStreamPlayerRef.current.nextPlayTime = 0;
                     }
+                    
+                    // Apply the rest of the server state
                     if (playerState.currentTrackIndex !== undefined) setCurrentTrackIndex(playerState.currentTrackIndex);
                     if (playerState.isPlaying !== undefined) setIsPlaying(playerState.isPlaying);
-                    if (playerState.trackProgress !== undefined) setTrackProgress(playerState.trackProgress);
                     if (playerState.currentPlayingItemId !== undefined) setCurrentPlayingItemId(playerState.currentPlayingItemId);
                     if (playerState.stopAfterTrackId !== undefined) setStopAfterTrackId(playerState.stopAfterTrackId);
                 }
@@ -1836,7 +1846,7 @@ const AppInternal: React.FC = () => {
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
             ws.close();
         };
-    }, [currentUser, sendStudioCommand, isMobile, isPlaying]);
+    }, [currentUser, sendStudioCommand, isMobile, isPlaying, currentPlayingItemId]);
     
     // Effect to clean up resources for departed presenters
     useEffect(() => {
