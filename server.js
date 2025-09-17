@@ -1002,7 +1002,16 @@ const loadBroadcastIntoPlaylist = async (broadcast) => {
         };
     });
 
-    db.data.sharedPlaylist.unshift(...newPlaylistItems);
+    const { isPlaying, currentTrackIndex } = db.data.sharedPlayerState;
+
+    if (isPlaying && currentTrackIndex >= 0 && currentTrackIndex < db.data.sharedPlaylist.length) {
+        const insertPosition = currentTrackIndex + 1;
+        db.data.sharedPlaylist.splice(insertPosition, 0, ...newPlaylistItems);
+        console.log(`[Scheduler] Player is active. Inserting broadcast after current track at index ${insertPosition}.`);
+    } else {
+        db.data.sharedPlaylist.unshift(...newPlaylistItems);
+        console.log('[Scheduler] Player is inactive. Inserting broadcast at the start of the playlist.');
+    }
     
     const studioData = db.data.userdata[studioClientEmail];
     const isAutoMode = studioData?.settings?.isAutoModeEnabled;
