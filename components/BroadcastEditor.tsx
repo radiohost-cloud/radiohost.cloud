@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { type Broadcast, type Folder, type SequenceItem, type Track, type TimeMarker, TimeMarkerType, PlayoutPolicy, VtMixDetails, TrackType, RepeatSettings } from '../types';
 import { CloseIcon } from './icons/CloseIcon';
@@ -368,8 +369,8 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                                                 {(showAddMarkerButton || showAddVtButton) && <li className="flex justify-center items-center h-4 my-1 group">
                                                     <div className="w-full h-px bg-neutral-300 dark:bg-neutral-700 relative">
                                                         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-2">
-                                                            {showAddMarkerButton && <button onClick={() => setMarkerModalState({ beforeItemId: item.id })} className="p-1 bg-neutral-100 dark:bg-neutral-900 rounded-full text-neutral-500 hover:bg-red-500 hover:text-white" title="Insert Time Marker"><ClockPlusIcon className="w-5 h-5"/></button>}
-                                                            {showAddVtButton && <button onClick={() => setVtEditorState({ isOpen: true, prevTrack: (prevItem as Track), nextTrack: item, beforeItemId: item.id })} className="p-1 bg-neutral-100 dark:bg-neutral-900 rounded-full text-neutral-500 hover:bg-red-500 hover:text-white" title="Insert Voice Track"><VoiceTrackIcon className="w-5 h-5"/></button>}
+                                                            {showAddMarkerButton && <button onClick={() => setMarkerModalState({ beforeItemId: item.id, existingMarker: undefined })} className="p-1 bg-neutral-100 dark:bg-neutral-900 rounded-full text-neutral-500 hover:bg-red-500 hover:text-white" title="Insert Time Marker"><ClockPlusIcon className="w-5 h-5"/></button>}
+                                                            {showAddVtButton && <button onClick={() => setVtEditorState({ isOpen: true, prevTrack: (prevItem as Track), nextTrack: item as Track, beforeItemId: item.id })} className="p-1 bg-neutral-100 dark:bg-neutral-900 rounded-full text-neutral-500 hover:bg-red-500 hover:text-white" title="Insert Voice Track"><VoiceTrackIcon className="w-5 h-5"/></button>}
                                                         </div>
                                                     </div>
                                                 </li>}
@@ -399,11 +400,12 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                 isOpen={!!markerModalState}
                 onClose={() => setMarkerModalState(null)}
                 onAddMarker={(marker) => {
-                    if (markerModalState?.existingMarker) {
-// FIX: Correctly map over the playlist to update an existing marker with type safety.
+                    const currentMarkerState = markerModalState; // Capture state for use in closure
+                    if (currentMarkerState?.existingMarker) {
                         setPlaylist(p => p.map(item => {
-                           if (item.id === markerModalState.existingMarker?.id && item.type === 'marker') {
-                               const updatedMarker: TimeMarker = { ...item, ...marker };
+                           // FIX: Correctly map over the playlist to update an existing marker with type safety.
+                           if (item.id === currentMarkerState.existingMarker.id && item.type === 'marker') {
+                               const updatedMarker: TimeMarker = { ...(item as TimeMarker), ...marker };
                                return updatedMarker;
                            }
                            return item;
@@ -412,7 +414,7 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                         const newMarker = marker as TimeMarker;
                         setPlaylist(prev => {
                             const newPlaylist = [...prev];
-                            const insertIndex = markerModalState?.beforeItemId ? newPlaylist.findIndex(item => item.id === markerModalState.beforeItemId) : newPlaylist.length;
+                            const insertIndex = currentMarkerState?.beforeItemId ? newPlaylist.findIndex(item => item.id === currentMarkerState.beforeItemId) : newPlaylist.length;
                             newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, newMarker);
                             return newPlaylist;
                         });
