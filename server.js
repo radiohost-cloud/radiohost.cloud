@@ -114,9 +114,9 @@ const fetchArtwork = async (artist, title) => {
 
 
 // --- Filesystem-based Media Library Logic ---
-const createTrackObject = async (entryFullPath, entryRelativePath, entryName, clientDuration) => {
+const createTrackObject = async (entryFullPath, entryRelativePath, entryName, clientMetadata = {}) => {
     try {
-        const durationInSeconds = clientDuration ? parseFloat(clientDuration) : await getDuration(entryFullPath);
+        const durationInSeconds = clientMetadata.duration ? parseFloat(clientMetadata.duration) : await getDuration(entryFullPath);
         const tags = NodeID3.read(entryFullPath);
         let hasArtwork = false;
         let remoteArtworkUrl = null;
@@ -130,8 +130,9 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, cl
             hasArtwork = true;
         }
 
-        const title = tags.title || entryName.replace(/\.[^/.]+$/, "");
-        const artist = tags.artist || 'Unknown Artist';
+        const title = clientMetadata.title || tags.title || entryName.replace(/\.[^/.]+$/, "");
+        const artist = clientMetadata.artist || tags.artist || 'Unknown Artist';
+        const type = clientMetadata.type || 'Song';
 
         if (!hasArtwork && fs.existsSync(artworkFullPath)) {
              hasArtwork = true;
@@ -148,7 +149,7 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, cl
             title: title,
             artist: artist,
             duration: durationInSeconds,
-            type: 'Song',
+            type: type,
             src: `/media/${encodeURIComponent(entryRelativePath)}`,
             originalFilename: entryName,
             hasEmbeddedArtwork: hasArtwork,
@@ -159,10 +160,10 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, cl
         console.error(`Error processing metadata for ${entryName}:`, tagError);
         return {
             id: entryRelativePath,
-            title: entryName.replace(/\.[^/.]+$/, ""),
-            artist: 'Unknown Artist',
-            duration: 180, // Default duration on error
-            type: 'Song',
+            title: clientMetadata.title || entryName.replace(/\.[^/.]+$/, ""),
+            artist: clientMetadata.artist || 'Unknown Artist',
+            duration: clientMetadata.duration ? parseFloat(clientMetadata.duration) : 180, // Default duration on error
+            type: clientMetadata.type || 'Song',
             src: `/media/${encodeURIComponent(entryRelativePath)}`,
             originalFilename: entryName,
             tags: [],
@@ -1751,8 +1752,13 @@ app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
     }
     try {
         const relativePath = req.body.webkitRelativePath || req.file.originalname;
-        const clientDuration = req.body.duration;
-        const trackObject = await createTrackObject(req.file.path, relativePath.replace(/\\/g, '/'), req.file.originalname, clientDuration);
+        const clientMetadata = {
+            duration: req.body.duration,
+            artist: req.body.artist,
+            title: req.body.title,
+            type: req.body.type,
+        };
+        const trackObject = await createTrackObject(req.file.path, relativePath.replace(/\\/g, '/'), req.file.originalname, clientMetadata);
         res.status(201).json(trackObject);
         await refreshAndBroadcastLibrary();
     } catch (error) {
