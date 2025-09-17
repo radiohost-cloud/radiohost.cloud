@@ -22,7 +22,6 @@ interface AudioMixerProps {
 }
 
 const SOURCE_META: Partial<Record<AudioSourceId, { defaultName: string; icon: React.ReactNode }>> = {
-    mainPlayer: { defaultName: "Player", icon: <MusicNoteIcon className="w-5 h-5" /> },
     serverPlayer: { defaultName: "Server Output", icon: <ServerIcon className="w-5 h-5" /> },
     mic: { defaultName: "Microphone", icon: <MicrophoneIcon className="w-5 h-5" /> },
     pfl: { defaultName: "PFL", icon: <HeadphoneIcon className="w-5 h-5" /> },

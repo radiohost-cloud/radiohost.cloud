@@ -97,7 +97,6 @@ const initialBuses: AudioBus[] = [
 ];
 
 const initialMixerConfig: MixerConfig = {
-    mainPlayer: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
     serverPlayer: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
     mic: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: false, gain: 1 } } },
     pfl: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
@@ -412,7 +411,6 @@ const AppInternal: React.FC = () => {
     const [isAudioEngineInitializing, setIsAudioEngineInitializing] = useState(false);
 
     const busMonitorAudioRef = useRef<HTMLAudioElement>(null);
-    const mainPlayerAudioRef = useRef<HTMLAudioElement>(null);
 
     // Refs to provide stable functions to useEffects
     const currentUserRef = useRef(currentUser);
@@ -460,7 +458,6 @@ const AppInternal: React.FC = () => {
     type AdvancedAudioGraph = {
         context: AudioContext | null;
         sources: {
-            mainPlayer?: MediaElementAudioSourceNode;
             mic?: MediaStreamAudioSourceNode;
             pfl?: MediaElementAudioSourceNode;
             [key: `remote_${string}`]: MediaStreamAudioSourceNode; // For remote contributors
@@ -849,7 +846,7 @@ const AppInternal: React.FC = () => {
     }, [playoutPolicy.playoutMode, sendStudioCommand]);
     
     const initializeAudioGraph = useCallback(async () => {
-       if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !pflAudioRef.current || !mainPlayerAudioRef.current) return;
+       if (audioGraphRef.current.isInitialized || isAudioEngineInitializing || !pflAudioRef.current) return;
     
         try {
             setIsAudioEngineInitializing(true);
@@ -857,7 +854,6 @@ const AppInternal: React.FC = () => {
             audioGraphRef.current.context = context;
             
             const sources: AdvancedAudioGraph['sources'] = {
-                mainPlayer: context.createMediaElementSource(mainPlayerAudioRef.current),
                 pfl: context.createMediaElementSource(pflAudioRef.current),
             };
             audioGraphRef.current.sources = sources;
@@ -869,7 +865,7 @@ const AppInternal: React.FC = () => {
             const busDestinations: AdvancedAudioGraph['busDestinations'] = {};
             const analysers: AdvancedAudioGraph['analysers'] = {};
 
-            const sourceIds: AudioSourceId[] = ['mainPlayer', 'serverPlayer', 'mic', 'pfl', 'cartwall'];
+            const sourceIds: AudioSourceId[] = ['serverPlayer', 'mic', 'pfl', 'cartwall'];
             sourceIds.forEach(id => {
                 sourceGains[id] = context.createGain();
                 analysers[id] = context.createAnalyser();
@@ -877,7 +873,6 @@ const AppInternal: React.FC = () => {
                 sourceGains[id]!.connect(analysers[id]!);
             });
 
-            sources.mainPlayer.connect(sourceGains.mainPlayer!);
             sources.pfl.connect(sourceGains.pfl!);
 
             audioBuses.forEach(bus => {
@@ -903,7 +898,7 @@ const AppInternal: React.FC = () => {
                     sourceGains[sourceId]!.connect(routingGain);
 
                     const busesWithDucking: AudioBusId[] = ['main', 'monitor'];
-                    if ((sourceId === 'mainPlayer' || sourceId === 'cartwall') && busesWithDucking.includes(bus.id)) {
+                    if ((sourceId === 'serverPlayer' || sourceId === 'cartwall') && busesWithDucking.includes(bus.id)) {
                         const duckingGain = context.createGain();
                         duckingGains[`${sourceId}_to_${bus.id}`] = duckingGain;
                         routingGain.connect(duckingGain);
@@ -926,61 +921,6 @@ const AppInternal: React.FC = () => {
         } catch (error) { console.error("Failed to initialize Audio graph:", error); }
         finally { setIsAudioEngineInitializing(false); }
     }, [audioBuses, isAudioEngineInitializing]);
-
-    useEffect(() => {
-        const player = mainPlayerAudioRef.current;
-        if (!player) return;
-    
-        const currentItem = playlistRef.current.find(item => item.id === currentPlayingItemId);
-        const currentTrackSrc = currentItem && 'src' in currentItem ? currentItem.src : undefined;
-    
-        // 1. Handle changing the audio source
-        if (currentTrackSrc && player.src !== window.location.origin + currentTrackSrc) {
-            player.src = currentTrackSrc;
-            // When src changes, we must wait for `loadeddata` to fire before seeking or playing.
-            return;
-        }
-    
-        // 2. Handle play/pause commands
-        if (isPlaying && player.paused) {
-            player.play().catch(e => console.warn("Autoplay was prevented.", e));
-        } else if (!isPlaying && !player.paused) {
-            player.pause();
-        }
-    
-        // 3. Handle time synchronization (Robust version)
-        if (isPlaying) {
-            const drift = player.currentTime - trackProgress;
-            // Only sync if the player has drifted by more than 1.5 seconds.
-            if (Math.abs(drift) > 1.5) {
-                // To prevent restarts, DO NOT sync if the server's time is very low (<2s)
-                // and the client is ahead (drift is positive). This allows for startup latency.
-                const isStartupJumpBack = drift > 0 && trackProgress < 2.0;
-                if (!isStartupJumpBack) {
-                    console.log(`[PlayerSync] Correcting drift. Server: ${trackProgress.toFixed(2)}, Client: ${player.currentTime.toFixed(2)}`);
-                    player.currentTime = trackProgress;
-                }
-            }
-        } else {
-            // When paused, be more precise.
-            if (Math.abs(player.currentTime - trackProgress) > 0.1) {
-                player.currentTime = trackProgress;
-            }
-        }
-    
-        const handleLoadedData = () => {
-            player.currentTime = trackProgress;
-            if (isPlaying) {
-                player.play().catch(e => console.warn("Autoplay after src change failed.", e));
-            }
-        };
-    
-        player.addEventListener('loadeddata', handleLoadedData);
-        return () => {
-            player.removeEventListener('loadeddata', handleLoadedData);
-        };
-    
-    }, [isPlaying, currentPlayingItemId, trackProgress]);
 
     const handleTogglePlay = useCallback(async () => {
         if (playlistRef.current.length === 0 || playoutPolicy.playoutMode === 'presenter') return;
@@ -1146,8 +1086,8 @@ const AppInternal: React.FC = () => {
             const micFadeDuration = playoutPolicy.micDuckingFadeDuration ?? 0.5;
             const cartwallFadeDuration = playoutPolicy.cartwallDuckingFadeDuration ?? 0.3;
 
-            const mainPlayerDuckingNode = graph.duckingGains[`mainPlayer_to_${busId}`];
-            if (mainPlayerDuckingNode) {
+            const playerDuckingNode = graph.duckingGains[`serverPlayer_to_${busId}`];
+            if (playerDuckingNode) {
                 const micTargetGain = isMicOnAir ? playoutPolicy.micDuckingLevel : 1.0;
                 const cartwallTargetGain = isCartwallActive && playoutPolicy.cartwallDuckingEnabled ? playoutPolicy.cartwallDuckingLevel : 1.0;
                 
@@ -1161,9 +1101,9 @@ const AppInternal: React.FC = () => {
                     fadeDuration = Math.max(micFadeDuration, cartwallFadeDuration);
                 }
 
-                if (Math.abs(mainPlayerDuckingNode.gain.value - finalTargetGain) > 0.01) {
-                    mainPlayerDuckingNode.gain.cancelScheduledValues(now);
-                    mainPlayerDuckingNode.gain.linearRampToValueAtTime(finalTargetGain, now + fadeDuration);
+                if (Math.abs(playerDuckingNode.gain.value - finalTargetGain) > 0.01) {
+                    playerDuckingNode.gain.cancelScheduledValues(now);
+                    playerDuckingNode.gain.linearRampToValueAtTime(finalTargetGain, now + fadeDuration);
                 }
             }
             
@@ -1182,8 +1122,8 @@ const AppInternal: React.FC = () => {
         setMixerConfig(prev => {
             const newConfig = JSON.parse(JSON.stringify(prev));
             const monitorGain = isPflPlaying ? playoutPolicy.pflDuckingLevel : 1.0;
-            newConfig.mainPlayer.sends.monitor.gain = monitorGain;
-            newConfig.cartwall.sends.monitor.gain = monitorGain;
+            if (newConfig.serverPlayer) newConfig.serverPlayer.sends.monitor.gain = monitorGain;
+            if (newConfig.cartwall) newConfig.cartwall.sends.monitor.gain = monitorGain;
             return newConfig;
         })
     }, [isPflPlaying, playoutPolicy.pflDuckingLevel]);
@@ -2207,7 +2147,6 @@ const AppInternal: React.FC = () => {
             
             <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
             <audio ref={busMonitorAudioRef} autoPlay></audio>
-            <audio ref={mainPlayerAudioRef} crossOrigin="anonymous"></audio>
         </div>
     );
 };
