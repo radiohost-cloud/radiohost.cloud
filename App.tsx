@@ -436,8 +436,6 @@ const AppInternal: React.FC = () => {
     logoSrcRef.current = logoSrc;
     const activeRightColumnTabRef = useRef(activeRightColumnTab);
     activeRightColumnTabRef.current = activeRightColumnTab;
-    const isPlayingRef = useRef(isPlaying);
-    isPlayingRef.current = isPlaying;
 
     // --- NEW: WebSocket and WebRTC state for real-time collaboration ---
     const wsRef = useRef<WebSocket | null>(null);
@@ -1781,18 +1779,30 @@ const AppInternal: React.FC = () => {
                 }
                 if (serverPlayerState) {
                     setPlayerState(prev => {
-                        const isNewTrack = serverPlayerState.currentPlayingItemId !== undefined && serverPlayerState.currentPlayingItemId !== prev.currentPlayingItemId;
-                
-                        const newState = { ...prev, ...serverPlayerState };
-                
+                        // Case 1: A new track is starting. We identify this by the change in currentPlayingItemId.
+                        const isNewTrack = serverPlayerState.currentPlayingItemId && serverPlayerState.currentPlayingItemId !== prev.currentPlayingItemId;
+
                         if (isNewTrack) {
-                            newState.trackProgress = 0; // Force progress to 0 on new track
-                            if (newState.isPlaying && !isPlayingRef.current) {
-                                 audioStreamPlayerRef.current.nextPlayTime = 0;
-                            }
+                            // When a new track starts, we accept the new state from the server,
+                            // but critically, we FORCE trackProgress to 0. This prevents any stale
+                            // progress value that might have been packaged in the server's update from appearing.
+                            audioStreamPlayerRef.current.nextPlayTime = 0; // Also reset the audio buffer schedule
+                            return {
+                                ...prev,
+                                ...serverPlayerState,
+                                trackProgress: 0
+                            };
                         }
-                        
-                        return newState;
+
+                        // Case 2: This is a progress update for the track we already think is playing.
+                        // We only accept the update if the item ID from the server matches our current item ID.
+                        if (serverPlayerState.currentPlayingItemId === prev.currentPlayingItemId) {
+                            return { ...prev, ...serverPlayerState }; // Apply the new progress
+                        }
+
+                        // Case 3: The update is for a different track, but it's not a "new track" start (e.g., a late update for a finished track).
+                        // We ignore this update entirely by returning the previous state unchanged.
+                        return prev;
                     });
                 }
             } else if (data.type === 'library-update') {
