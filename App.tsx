@@ -932,7 +932,6 @@ const AppInternal: React.FC = () => {
         if (currentTrackSrc && player.src !== window.location.origin + currentTrackSrc) {
             player.src = currentTrackSrc;
             // When src changes, we must wait for `loadeddata` to fire before seeking or playing.
-            // The `handleLoadedData` handler will ensure the correct state.
             return;
         }
     
@@ -943,25 +942,27 @@ const AppInternal: React.FC = () => {
             player.pause();
         }
     
-        // 3. Handle time synchronization
-        // This is a correction mechanism for drift. It should not be overly aggressive.
+        // 3. Handle time synchronization (Robust version)
         if (isPlaying) {
-            // Only correct if drift is significant AND we are not at the very beginning of a track.
-            // This prevents the "restarting" issue.
-            if (Math.abs(player.currentTime - trackProgress) > 1.5 && trackProgress > 1.5) {
-                console.log(`[PlayerSync] Correcting significant drift. Server: ${trackProgress}, Client: ${player.currentTime}`);
-                player.currentTime = trackProgress;
+            const drift = player.currentTime - trackProgress;
+            // Only sync if the player has drifted by more than 1.5 seconds.
+            if (Math.abs(drift) > 1.5) {
+                // To prevent restarts, DO NOT sync if the server's time is very low (<2s)
+                // and the client is ahead (drift is positive). This allows for startup latency.
+                const isStartupJumpBack = drift > 0 && trackProgress < 2.0;
+                if (!isStartupJumpBack) {
+                    console.log(`[PlayerSync] Correcting drift. Server: ${trackProgress.toFixed(2)}, Client: ${player.currentTime.toFixed(2)}`);
+                    player.currentTime = trackProgress;
+                }
             }
         } else {
-            // When paused, we can be more precise as buffering is not an issue.
+            // When paused, be more precise.
             if (Math.abs(player.currentTime - trackProgress) > 0.1) {
                 player.currentTime = trackProgress;
             }
         }
     
         const handleLoadedData = () => {
-            // This event fires after a new `src` is loaded.
-            // Sync to the server's time for this new track and play if needed.
             player.currentTime = trackProgress;
             if (isPlaying) {
                 player.play().catch(e => console.warn("Autoplay after src change failed.", e));
