@@ -1,8 +1,6 @@
 
 
 
-
-
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { type User, type Track, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, type VtMixDetails, ChatMessage } from '../types';
 import RemoteStudio from './RemoteStudio';
@@ -106,8 +104,7 @@ const MobilePlayer: React.FC<{
             </div>
             
             <div className="flex-shrink-0 w-full max-w-sm px-4 space-y-4 pb-4">
-                {/* FIX: Corrected property access on audioLevels. The property `mainPlayer` does not exist. The correct property for the server audio stream is `serverPlayer`. */}
-                <VolumeMeter volume={audioLevels.serverPlayer || 0} />
+                <VolumeMeter volume={audioLevels.mainPlayer || 0} />
                 {nextTrack && (
                     <div>
                         <p className="text-sm text-neutral-500">Up Next:</p>
