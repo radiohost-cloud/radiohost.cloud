@@ -1,4 +1,5 @@
 
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -1039,11 +1040,10 @@ const AppInternal: React.FC = () => {
     
         let playhead = Date.now();
     
-        // Main loop to process items
         for (let i = 0; i < playlist.length; i++) {
             const item = playlist[i];
     
-            if (timelineMap.has(item.id)) { // Already processed (e.g., skipped by a soft marker)
+            if (timelineMap.has(item.id)) {
                 continue;
             }
     
@@ -1051,18 +1051,18 @@ const AppInternal: React.FC = () => {
                 if (item.markerType === TimeMarkerType.HARD) {
                     playhead = Math.max(playhead, item.time);
                 }
-                // Soft markers are handled by the track that precedes them
                 continue;
             }
+            
+            const track = item as Track & { isSkipped?: boolean };
+            let isSkipped = track.isSkipped || false;
     
-            const track = item;
             const startTime = playhead;
             const naturalEndTime = startTime + track.duration * 1000;
             let finalEndTime = naturalEndTime;
             let shortenedBy = 0;
-            let isSkipped = false;
     
-            // Check for hard marker interruption
+            // Hard marker logic remains, as it can also cause a track to be effectively skipped.
             for (let j = i + 1; j < playlist.length; j++) {
                 const nextItem = playlist[j];
                 if ('markerType' in nextItem && nextItem.markerType === TimeMarkerType.HARD) {
@@ -1070,10 +1070,11 @@ const AppInternal: React.FC = () => {
                         finalEndTime = nextItem.time;
                         shortenedBy = (naturalEndTime - finalEndTime) / 1000;
                     }
-                    break; // Only the next hard marker matters
+                    break; 
                 }
             }
     
+            // If a hard marker completely eclipses this track, it's also considered skipped.
             if (finalEndTime <= startTime) {
                 isSkipped = true;
             }
@@ -1088,32 +1089,6 @@ const AppInternal: React.FC = () => {
     
             if (!isSkipped) {
                 playhead = finalEndTime;
-    
-                // Now check for soft markers that occurred during this track's playback
-                let lastSoftMarkerIndex = -1;
-                for (let j = i + 1; j < playlist.length; j++) {
-                    const nextItem = playlist[j];
-                    if ('markerType' in nextItem && nextItem.markerType === TimeMarkerType.SOFT && nextItem.time > startTime && nextItem.time <= finalEndTime) {
-                        lastSoftMarkerIndex = j;
-                    }
-                }
-    
-                if (lastSoftMarkerIndex > -1) {
-                    // Mark items between this track and the marker as skipped
-                    for (let k = i + 1; k <= lastSoftMarkerIndex; k++) {
-                        const itemToSkip = playlist[k];
-                        if (!('markerType' in itemToSkip) && !timelineMap.has(itemToSkip.id)) {
-                            timelineMap.set(itemToSkip.id, {
-                                startTime: new Date(finalEndTime), // They are skipped at the end of the current track
-                                endTime: new Date(finalEndTime),
-                                duration: 0,
-                                isSkipped: true,
-                                shortenedBy: itemToSkip.duration,
-                            });
-                        }
-                    }
-                    i = lastSoftMarkerIndex; // Jump the main loop to the marker's index
-                }
             }
         }
     

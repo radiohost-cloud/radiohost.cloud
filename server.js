@@ -379,19 +379,55 @@ const browserPlayerClients = new Set();
 const directStreamListeners = new Set();
 
 
-const broadcastState = () => {
-  const statePayload = {
-    playlist: db.data.sharedPlaylist,
-    playerState: db.data.sharedPlayerState,
-    broadcasts: db.data.userdata[studioClientEmail]?.broadcasts || [],
-  };
-  const message = JSON.stringify({ type: 'state-update', payload: statePayload });
-  clients.forEach((ws, email) => {
-    const user = db.data.users.find(u => u.email === email);
-    if (user && ws.readyState === ws.OPEN) {
-      ws.send(message);
+const getPlaylistWithSkipStatus = () => {
+    const { sharedPlaylist, sharedPlayerState } = db.data;
+    const { currentTrackIndex, isPlaying } = sharedPlayerState;
+    
+    const playlistWithStatus = sharedPlaylist.map(item => ({ ...item, isSkipped: false }));
+
+    if (!isPlaying) {
+        return playlistWithStatus;
     }
-  });
+
+    const currentTrack = playlistWithStatus[currentTrackIndex];
+    if (currentTrack && !currentTrack.markerType) {
+        const trackStartTime = playheadAnchorTime;
+        const trackEndTime = trackStartTime + (currentTrack.duration * 1000);
+        
+        let lastSoftMarkerIndex = -1;
+        for (let i = currentTrackIndex + 1; i < playlistWithStatus.length; i++) {
+            const item = playlistWithStatus[i];
+            if (item.markerType === 'soft' && item.time > trackStartTime && item.time <= trackEndTime) {
+                lastSoftMarkerIndex = i;
+            }
+        }
+
+        if (lastSoftMarkerIndex > -1) {
+            for (let i = currentTrackIndex + 1; i < lastSoftMarkerIndex; i++) {
+                const itemToSkip = playlistWithStatus[i];
+                if (itemToSkip && !itemToSkip.markerType) {
+                    itemToSkip.isSkipped = true;
+                }
+            }
+        }
+    }
+    
+    return playlistWithStatus;
+}
+
+const broadcastState = () => {
+    const statePayload = {
+        playlist: getPlaylistWithSkipStatus(),
+        playerState: db.data.sharedPlayerState,
+        broadcasts: db.data.userdata[studioClientEmail]?.broadcasts || [],
+    };
+    const message = JSON.stringify({ type: 'state-update', payload: statePayload });
+    clients.forEach((ws, email) => {
+        const user = db.data.users.find(u => u.email === email);
+        if (user && ws.readyState === ws.OPEN) {
+            ws.send(message);
+        }
+    });
 };
 
 const broadcastPresenterList = async () => {
@@ -692,11 +728,6 @@ const advanceTrack = async (jumpToIndex = -1) => {
 const playoutTick = async () => {
     if (!db.data.sharedPlayerState.isPlaying) return;
     const { sharedPlayerState, sharedPlaylist } = db.data;
-    const currentTrack = sharedPlaylist[sharedPlayerState.currentTrackIndex];
-    if (!currentTrack) {
-        stopPlayoutEngine();
-        return;
-    }
     const progress = (Date.now() - playheadAnchorTime) / 1000;
     sharedPlayerState.trackProgress = progress;
     for (let i = sharedPlayerState.currentTrackIndex + 1; i < sharedPlaylist.length; i++) {
@@ -710,6 +741,7 @@ const playoutTick = async () => {
             break;
         }
     }
+    const currentTrack = sharedPlaylist[sharedPlayerState.currentTrackIndex];
     if (currentTrack && !currentTrack.markerType && progress > currentTrack.duration + 5) { // 5 second grace period
         console.warn(`[Playout] Watchdog: Track has overrun its duration by 5s. Forcing advance.`);
         advanceTrack();
@@ -1000,14 +1032,7 @@ wss.on('connection', async (ws, req) => {
 
     if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'library-update', payload: libraryState }));
-        ws.send(JSON.stringify({
-            type: 'state-update',
-            payload: {
-                playlist: db.data.sharedPlaylist,
-                playerState: db.data.sharedPlayerState,
-                broadcasts: db.data.userdata[studioClientEmail]?.broadcasts || [],
-            }
-        }));
+        broadcastState();
     }
 
     ws.on('message', async (message) => {
