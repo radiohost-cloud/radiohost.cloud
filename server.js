@@ -579,12 +579,26 @@ const startPlayoutForTrack = async (trackIndex) => {
     
     try {
         const command = ffmpeg().input(trackPath).inputOptions(['-re']);
+
+        const bitrateK = streamConfig.bitrate || 128;
+        const metadataTitle = `${track.artist || 'Unknown Artist'} - ${track.title || 'Untitled Track'}`;
+        
         command.audioCodec('libmp3lame')
-            .audioBitrate(streamConfig.bitrate || 128)
+            .audioBitrate(`${bitrateK}k`)
             .audioFrequency(44100)
             .audioChannels(2)
             .format('mp3')
-            .outputOptions(['-loglevel', 'error', '-content_type', 'audio/mpeg']);
+            .outputOptions([
+                '-loglevel', 'error',
+                '-content_type', 'audio/mpeg',
+                // Force Constant Bitrate (CBR) for better Icecast compatibility
+                '-minrate', `${bitrateK}k`,
+                '-maxrate', `${bitrateK}k`,
+                '-bufsize', `${bitrateK * 2}k`,
+                // Embed track metadata directly into the stream
+                '-metadata', `title=${metadataTitle}`
+            ]);
+
         const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
         const outputUrl = `icecast://${username}:${password}@${serverAddress}`;
         command.outputOptions([
@@ -597,6 +611,7 @@ const startPlayoutForTrack = async (trackIndex) => {
             '-reconnect_streamed', '1',
             '-reconnect_delay_max', '5'
         ]);
+
         command.on('start', (cmdLine) => {
             console.log(`[FFMPEG] Started streaming: ${track.title}`);
             serverStreamStatus = 'broadcasting';
@@ -631,7 +646,6 @@ const startPlayoutForTrack = async (trackIndex) => {
         });
         currentFfmpegCommand = command;
         command.save(outputUrl);
-        updateIcecastMetadata(track, streamConfig);
     } catch(e) {
         console.error('[FFMPEG] Failed to initialize command:', e);
         serverStreamStatus = 'error';
