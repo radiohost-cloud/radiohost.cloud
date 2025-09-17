@@ -353,13 +353,19 @@ const AppInternal: React.FC = () => {
     const [broadcasts, setBroadcasts] = useState<Broadcast[]>([]);
     const [activeCartwallPageId, setActiveCartwallPageId] = useState<string>('default');
     const [activeCartwallPlayerCount, setActiveCartwallPlayerCount] = useState(0);
-    const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
-    const [currentPlayingItemId, setCurrentPlayingItemId] = useState<string | null>(null);
-    const [isPlaying, setIsPlaying] = useState(false);
-    const [trackProgress, setTrackProgress] = useState(0);
+    
+    // --- Player State Refactor ---
+    const [playerState, setPlayerState] = useState({
+        currentTrackIndex: 0,
+        currentPlayingItemId: null as string | null,
+        isPlaying: false,
+        trackProgress: 0,
+        stopAfterTrackId: null as string | null,
+    });
+    const { currentTrackIndex, currentPlayingItemId, isPlaying, trackProgress, stopAfterTrackId } = playerState;
+
     const [activeRightColumnTab, setActiveRightColumnTab] = useState<'cartwall' | 'lastfm' | 'mixer' | 'settings' | 'scheduler' | 'stream' | 'users' | 'chat'>('cartwall');
     const [isMicPanelCollapsed, setIsMicPanelCollapsed] = useState(false);
-    const [stopAfterTrackId, setStopAfterTrackId] = useState<string | null>(null);
     const [playoutPolicy, setPlayoutPolicy] = useState<PlayoutPolicy>(defaultPlayoutPolicy);
     const [playoutHistory, setPlayoutHistory] = useState<PlayoutHistoryEntry[]>([]);
     const [logoSrc, setLogoSrc] = useState<string | null>(null);
@@ -430,6 +436,8 @@ const AppInternal: React.FC = () => {
     logoSrcRef.current = logoSrc;
     const activeRightColumnTabRef = useRef(activeRightColumnTab);
     activeRightColumnTabRef.current = activeRightColumnTab;
+    const isPlayingRef = useRef(isPlaying);
+    isPlayingRef.current = isPlaying;
 
     // --- NEW: WebSocket and WebRTC state for real-time collaboration ---
     const wsRef = useRef<WebSocket | null>(null);
@@ -1764,33 +1772,28 @@ const AppInternal: React.FC = () => {
             if (data.type === 'pong') return;
 
             if (data.type === 'state-update') {
-                const { playlist: serverPlaylist, playerState, broadcasts: serverBroadcasts } = data.payload;
+                const { playlist: serverPlaylist, playerState: serverPlayerState, broadcasts: serverBroadcasts } = data.payload;
                 if (serverPlaylist && JSON.stringify(serverPlaylist) !== JSON.stringify(playlistRef.current)) {
                     setPlaylist(serverPlaylist);
                 }
                 if (serverBroadcasts && JSON.stringify(serverBroadcasts) !== JSON.stringify(broadcastsRef.current)) {
                     setBroadcasts(serverBroadcasts);
                 }
-                if (playerState) {
-                    // FIX: When the currently playing track ID from the server is different from the one in our current state,
-                    // it means the track has just changed. We must force the progress to 0 on the client-side
-                    // to prevent the progress from the old track from briefly appearing on the new track's progress bar.
-                    if (playerState.currentPlayingItemId !== undefined && playerState.currentPlayingItemId !== currentPlayingItemId) {
-                        setTrackProgress(0);
-                    } else if (playerState.trackProgress !== undefined) {
-                        setTrackProgress(playerState.trackProgress);
-                    }
-
-                    if (playerState.isPlaying && !isPlaying) {
-                        // Reset audio stream player when server starts playing
-                        audioStreamPlayerRef.current.nextPlayTime = 0;
-                    }
-                    
-                    // Apply the rest of the server state
-                    if (playerState.currentTrackIndex !== undefined) setCurrentTrackIndex(playerState.currentTrackIndex);
-                    if (playerState.isPlaying !== undefined) setIsPlaying(playerState.isPlaying);
-                    if (playerState.currentPlayingItemId !== undefined) setCurrentPlayingItemId(playerState.currentPlayingItemId);
-                    if (playerState.stopAfterTrackId !== undefined) setStopAfterTrackId(playerState.stopAfterTrackId);
+                if (serverPlayerState) {
+                    setPlayerState(prev => {
+                        const isNewTrack = serverPlayerState.currentPlayingItemId !== undefined && serverPlayerState.currentPlayingItemId !== prev.currentPlayingItemId;
+                
+                        const newState = { ...prev, ...serverPlayerState };
+                
+                        if (isNewTrack) {
+                            newState.trackProgress = 0; // Force progress to 0 on new track
+                            if (newState.isPlaying && !isPlayingRef.current) {
+                                 audioStreamPlayerRef.current.nextPlayTime = 0;
+                            }
+                        }
+                        
+                        return newState;
+                    });
                 }
             } else if (data.type === 'library-update') {
                 if (JSON.stringify(data.payload) !== JSON.stringify(mediaLibraryRef.current)) {
@@ -1846,7 +1849,7 @@ const AppInternal: React.FC = () => {
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
             ws.close();
         };
-    }, [currentUser, sendStudioCommand, isMobile, isPlaying, currentPlayingItemId]);
+    }, [currentUser, sendStudioCommand, isMobile]);
     
     // Effect to clean up resources for departed presenters
     useEffect(() => {
