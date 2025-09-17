@@ -836,17 +836,6 @@ const performAutofill = async () => {
         await db.write();
         broadcastState();
         console.log(`[Auto-Fill] Added ${tracksToAdd.length} tracks to the playlist.`);
-        
-        // If playback was stopped because playlist ended, start it again
-        if (!db.data.sharedPlayerState.isPlaying) {
-            const studioData = db.data.userdata[studioClientEmail];
-            if(studioData?.settings?.isAutoModeEnabled) {
-                 const newStartIndex = db.data.sharedPlaylist.length - newPlaylistItems.length;
-                 db.data.sharedPlayerState.currentTrackIndex = newStartIndex;
-                 db.data.sharedPlayerState.currentPlayingItemId = db.data.sharedPlaylist[newStartIndex]?.id || null;
-                 startPlayoutFromIndex(newStartIndex);
-            }
-        }
     } else {
         console.log('[Auto-Fill] No tracks could be added in this cycle due to separation rules.');
     }
@@ -902,6 +891,15 @@ const setupAutoMode = async () => {
         if (db.data.sharedPlaylist.length === 0) {
             console.log('[Auto-Mode] Playlist is empty on startup with Auto mode on. Triggering initial fill.');
             await performAutofill();
+            // After fill, if playlist is now populated, start playback.
+            await db.read(); // Re-read to get the updated playlist
+            if (db.data.sharedPlaylist.length > 0 && !db.data.sharedPlayerState.isPlaying) {
+                console.log('[Auto-Mode] Starting playback after initial fill.');
+                db.data.sharedPlayerState.currentTrackIndex = 0;
+                db.data.sharedPlayerState.currentPlayingItemId = db.data.sharedPlaylist[0].id;
+                db.data.sharedPlayerState.trackProgress = 0;
+                startPlayoutEngine();
+            }
         }
     } else {
         console.log('[Auto-Mode] Auto mode is disabled.');

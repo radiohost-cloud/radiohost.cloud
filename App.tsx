@@ -925,46 +925,48 @@ const AppInternal: React.FC = () => {
         const player = mainPlayerAudioRef.current;
         if (!player) return;
     
-        const syncPlayerState = () => {
-            const currentItem = playlistRef.current.find(item => item.id === currentPlayingItemId);
-            const currentTrackSrc = currentItem && 'src' in currentItem ? currentItem.src : undefined;
+        const currentItem = playlistRef.current.find(item => item.id === currentPlayingItemId);
+        const currentTrackSrc = currentItem && 'src' in currentItem ? currentItem.src : undefined;
     
-            if (currentTrackSrc && player.src !== window.location.origin + currentTrackSrc) {
-                player.src = currentTrackSrc;
-                return; 
+        // 1. Handle changing the audio source
+        if (currentTrackSrc && player.src !== window.location.origin + currentTrackSrc) {
+            player.src = currentTrackSrc;
+            // When src changes, we must wait for `loadeddata` to fire before seeking or playing.
+            // The `handleLoadedData` handler will ensure the correct state.
+            return;
+        }
+    
+        // 2. Handle play/pause commands
+        if (isPlaying && player.paused) {
+            player.play().catch(e => console.warn("Autoplay was prevented.", e));
+        } else if (!isPlaying && !player.paused) {
+            player.pause();
+        }
+    
+        // 3. Handle time synchronization
+        // This is a correction mechanism for drift. It should not be overly aggressive.
+        if (isPlaying) {
+            // Only correct if drift is significant AND we are not at the very beginning of a track.
+            // This prevents the "restarting" issue.
+            if (Math.abs(player.currentTime - trackProgress) > 1.5 && trackProgress > 1.5) {
+                console.log(`[PlayerSync] Correcting significant drift. Server: ${trackProgress}, Client: ${player.currentTime}`);
+                player.currentTime = trackProgress;
             }
-    
-            if (isPlaying) {
-                if (player.paused) {
-                    player.play().catch(e => console.warn("Autoplay failed, user interaction may be required.", e));
-                }
-                // When playing, only correct time if there is a significant drift.
-                // This prevents constant seeking which breaks buffering.
-                if (Math.abs(player.currentTime - trackProgress) > 1.5) {
-                    console.log(`[PlayerSync] Correcting significant drift. Server: ${trackProgress}, Client: ${player.currentTime}`);
-                    player.currentTime = trackProgress;
-                }
-            } else {
-                if (!player.paused) {
-                    player.pause();
-                }
-                // When paused, we can be more precise with syncing the time.
-                if (Math.abs(player.currentTime - trackProgress) > 0.1) {
-                    player.currentTime = trackProgress;
-                }
-            }
-        };
-    
-        const handleLoadedData = () => {
+        } else {
+            // When paused, we can be more precise as buffering is not an issue.
             if (Math.abs(player.currentTime - trackProgress) > 0.1) {
                 player.currentTime = trackProgress;
             }
+        }
+    
+        const handleLoadedData = () => {
+            // This event fires after a new `src` is loaded.
+            // Sync to the server's time for this new track and play if needed.
+            player.currentTime = trackProgress;
             if (isPlaying) {
                 player.play().catch(e => console.warn("Autoplay after src change failed.", e));
             }
         };
-        
-        syncPlayerState();
     
         player.addEventListener('loadeddata', handleLoadedData);
         return () => {
