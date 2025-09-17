@@ -842,6 +842,8 @@ const performAutofill = async () => {
             const studioData = db.data.userdata[studioClientEmail];
             if(studioData?.settings?.isAutoModeEnabled) {
                  const newStartIndex = db.data.sharedPlaylist.length - newPlaylistItems.length;
+                 db.data.sharedPlayerState.currentTrackIndex = newStartIndex;
+                 db.data.sharedPlayerState.currentPlayingItemId = db.data.sharedPlaylist[newStartIndex]?.id || null;
                  startPlayoutFromIndex(newStartIndex);
             }
         }
@@ -895,6 +897,12 @@ const setupAutoMode = async () => {
     if (studioData?.settings?.isAutoModeEnabled) {
         console.log('[Auto-Mode] Auto mode is enabled. Starting automation checks.');
         autoFillInterval = setInterval(checkAndTriggerAutofill, 15000);
+        
+        // Initial check on startup if playlist is empty
+        if (db.data.sharedPlaylist.length === 0) {
+            console.log('[Auto-Mode] Playlist is empty on startup with Auto mode on. Triggering initial fill.');
+            await performAutofill();
+        }
     } else {
         console.log('[Auto-Mode] Auto mode is disabled.');
     }

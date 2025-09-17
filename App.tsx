@@ -924,33 +924,38 @@ const AppInternal: React.FC = () => {
     useEffect(() => {
         const player = mainPlayerAudioRef.current;
         if (!player) return;
-
+    
         const syncPlayerState = () => {
-            // FIX: Check if the found playlist item is a track before accessing 'src' to prevent a TypeScript error. A playlist item could be a TimeMarker which doesn't have a 'src' property.
             const currentItem = playlistRef.current.find(item => item.id === currentPlayingItemId);
             const currentTrackSrc = currentItem && 'src' in currentItem ? currentItem.src : undefined;
-
+    
             if (currentTrackSrc && player.src !== window.location.origin + currentTrackSrc) {
                 player.src = currentTrackSrc;
-                // Defer play/seek until media is ready
                 return; 
             }
-
-            // Sync play/pause state
-            if (isPlaying && player.paused) {
-                player.play().catch(e => console.warn("Autoplay failed, user interaction may be required.", e));
-            } else if (!isPlaying && !player.paused) {
-                player.pause();
-            }
-
-            // Sync progress
-            if (Math.abs(player.currentTime - trackProgress) > 0.5) { // 500ms tolerance
-                player.currentTime = trackProgress;
+    
+            if (isPlaying) {
+                if (player.paused) {
+                    player.play().catch(e => console.warn("Autoplay failed, user interaction may be required.", e));
+                }
+                // When playing, only correct time if there is a significant drift.
+                // This prevents constant seeking which breaks buffering.
+                if (Math.abs(player.currentTime - trackProgress) > 1.5) {
+                    console.log(`[PlayerSync] Correcting significant drift. Server: ${trackProgress}, Client: ${player.currentTime}`);
+                    player.currentTime = trackProgress;
+                }
+            } else {
+                if (!player.paused) {
+                    player.pause();
+                }
+                // When paused, we can be more precise with syncing the time.
+                if (Math.abs(player.currentTime - trackProgress) > 0.1) {
+                    player.currentTime = trackProgress;
+                }
             }
         };
-
+    
         const handleLoadedData = () => {
-             // Now that data is loaded, we can safely seek and play.
             if (Math.abs(player.currentTime - trackProgress) > 0.1) {
                 player.currentTime = trackProgress;
             }
@@ -960,12 +965,12 @@ const AppInternal: React.FC = () => {
         };
         
         syncPlayerState();
-
+    
         player.addEventListener('loadeddata', handleLoadedData);
         return () => {
             player.removeEventListener('loadeddata', handleLoadedData);
         };
-
+    
     }, [isPlaying, currentPlayingItemId, trackProgress]);
 
     const handleTogglePlay = useCallback(async () => {
