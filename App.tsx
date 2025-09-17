@@ -1142,6 +1142,41 @@ const AppInternal: React.FC = () => {
             }
         }
     
+        // Post-adjustment pass to re-enforce hard marker constraints, which may have been violated by the anchor offset.
+        for (let i = 0; i < playlist.length; i++) {
+            const item = playlist[i];
+            if ('markerType' in item && item.markerType === TimeMarkerType.HARD) {
+                const markerTime = item.time;
+                // Find the next track item to check its start time.
+                for (let j = i + 1; j < playlist.length; j++) {
+                    const nextItem = playlist[j];
+                    if (!('markerType' in nextItem)) { // Found the next track
+                        const trackData = timelineMap.get(nextItem.id);
+                        if (trackData && trackData.startTime.getTime() < markerTime) {
+                            // Violation found! The track starts before its hard marker.
+                            const shiftRequired = markerTime - trackData.startTime.getTime();
+                            
+                            // Correct this track and all subsequent items in the timeline.
+                            for (let k = j; k < playlist.length; k++) {
+                                const itemToShift = playlist[k];
+                                const dataToShift = timelineMap.get(itemToShift.id);
+                                if (dataToShift) {
+                                    timelineMap.set(itemToShift.id, {
+                                        ...dataToShift,
+                                        startTime: new Date(dataToShift.startTime.getTime() + shiftRequired),
+                                        endTime: new Date(dataToShift.endTime.getTime() + shiftRequired),
+                                    });
+                                }
+                            }
+                        }
+                        // Once we've checked (and possibly corrected) the first track after the marker,
+                        // our job for this marker is done. The correction will propagate.
+                        break; 
+                    }
+                }
+            }
+        }
+    
         return timelineMap;
     }, [playlist, currentPlayingItemId, trackProgress, isPlaying, currentTrackIndex]);
     timelineRef.current = timeline;
