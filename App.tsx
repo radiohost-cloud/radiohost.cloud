@@ -1901,6 +1901,16 @@ const AppInternal: React.FC = () => {
         }
     }, []);
 
+    const handleStreamingConfigChange = useCallback((newPolicy: PlayoutPolicy) => {
+        setPlayoutPolicy(newPolicy);
+        if (isStudio && wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+                type: 'updateStreamingConfig',
+                payload: newPolicy.streamingConfig
+            }));
+        }
+    }, [isStudio]);
+
 
     if (isLoadingSession) {
         return (
@@ -2064,7 +2074,7 @@ const AppInternal: React.FC = () => {
                                     {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
                                     {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
                                         policy={playoutPolicy}
-                                        onUpdatePolicy={setPlayoutPolicy}
+                                        onUpdatePolicy={handleStreamingConfigChange}
                                         serverStreamStatus={serverStreamStatus}
                                         serverStreamError={serverStreamError}
                                     />}

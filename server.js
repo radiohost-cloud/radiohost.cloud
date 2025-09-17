@@ -15,6 +15,8 @@ import http from 'http';
 import { WebSocketServer } from 'ws';
 import NodeID3 from 'node-id3';
 import ffmpeg from 'fluent-ffmpeg';
+import { spawn } from 'child_process';
+
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -467,13 +469,98 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
     return -1;
 };
 
-// --- Playout Engine ---
-let ffmpegCommand = null;
+// --- Playout & Streaming Engine ---
+let ffmpegPlayoutProcess = null;
+let icecastProcess = null;
+let streamingStatus = { status: 'inactive', error: null };
+
+const broadcastStreamStatus = () => {
+    const message = JSON.stringify({ type: 'stream-status-update', payload: streamingStatus });
+    clients.forEach((ws) => {
+        if (ws.readyState === ws.OPEN) {
+            ws.send(message);
+        }
+    });
+};
+
+const startStreaming = (config) => {
+    if (icecastProcess) {
+        console.log('[Streaming] Stream already running. Ignoring start request.');
+        return;
+    }
+
+    console.log('[Streaming] Starting Icecast stream with config:', config);
+    streamingStatus = { status: 'connecting', error: null };
+    broadcastStreamStatus();
+    
+    const ffmpegPath = ffmpeg.path || 'ffmpeg'; // Use fluent-ffmpeg's path or system's ffmpeg
+    const args = [
+        '-re',
+        '-f', 's16le',
+        '-ar', '44100',
+        '-ac', '1',
+        '-i', 'pipe:0',
+        '-acodec', 'libmp3lame',
+        '-b:a', `${config.bitrate}k`,
+        '-content_type', 'audio/mpeg',
+        '-f', 'mp3',
+        `icecast://${config.username}:${config.password}@${config.serverAddress}`
+    ];
+    
+    icecastProcess = spawn(ffmpegPath, args);
+
+    let stderrOutput = '';
+    icecastProcess.stderr.on('data', (data) => {
+        const line = data.toString();
+        stderrOutput += line;
+        if (line.includes('Connection refused')) {
+            streamingStatus = { status: 'error', error: 'Connection refused by server.' };
+            broadcastStreamStatus();
+            stopStreaming();
+        } else if (line.includes('icy-pub:1')) { // A common indicator of a successful Icecast connection
+            if (streamingStatus.status !== 'broadcasting') {
+                console.log('[Streaming] Successfully connected to Icecast server.');
+                streamingStatus = { status: 'broadcasting', error: null };
+                broadcastStreamStatus();
+            }
+        }
+    });
+
+    icecastProcess.on('close', (code) => {
+        console.log(`[Streaming] FFMPEG process exited with code ${code}`);
+        if (streamingStatus.status !== 'inactive') {
+            if (streamingStatus.status !== 'error') {
+                 streamingStatus = { status: 'error', error: `Stream disconnected. Code: ${code}` };
+                 broadcastStreamStatus();
+            }
+        }
+        icecastProcess = null;
+    });
+
+    icecastProcess.on('error', (err) => {
+        console.error('[Streaming] FFMPEG process error:', err);
+        streamingStatus = { status: 'error', error: err.message };
+        broadcastStreamStatus();
+        icecastProcess = null;
+    });
+};
+
+const stopStreaming = () => {
+    if (icecastProcess) {
+        icecastProcess.kill('SIGKILL');
+        icecastProcess = null;
+    }
+    if (streamingStatus.status !== 'inactive') {
+        console.log('[Streaming] Icecast stream stopped.');
+        streamingStatus = { status: 'inactive', error: null };
+        broadcastStreamStatus();
+    }
+};
 
 const stopPlayout = () => {
-    if (ffmpegCommand) {
-        ffmpegCommand.kill('SIGKILL');
-        ffmpegCommand = null;
+    if (ffmpegPlayoutProcess) {
+        ffmpegPlayoutProcess.kill('SIGKILL');
+        ffmpegPlayoutProcess = null;
     }
     if (db.data.sharedPlayerState.isPlaying) {
         db.data.sharedPlayerState.isPlaying = false;
@@ -488,7 +575,6 @@ const advanceTrackAndPlay = async () => {
     const finishedTrackIndex = sharedPlayerState.currentTrackIndex;
     const finishedTrack = sharedPlaylist[finishedTrackIndex];
 
-    // Log to history before potentially removing
     if (finishedTrack && !finishedTrack.markerType) {
         db.data.playoutHistory.push({
             trackId: finishedTrack.originalId || finishedTrack.id,
@@ -517,7 +603,7 @@ const advanceTrackAndPlay = async () => {
 };
 
 const startPlayoutFromIndex = async (index) => {
-    stopPlayout(); // Ensure any existing process is stopped
+    stopPlayout();
     await db.read();
 
     const track = db.data.sharedPlaylist[index];
@@ -547,48 +633,44 @@ const startPlayoutFromIndex = async (index) => {
     broadcastState();
     broadcastPublicMetadata();
     
-    const studioWs = clients.get(studioClientEmail);
-
-    ffmpegCommand = ffmpeg(trackPath)
+    ffmpegPlayoutProcess = ffmpeg(trackPath)
         .noVideo()
         .audioCodec('pcm_s16le')
         .audioFrequency(44100)
         .audioChannels(1)
         .format('s16le')
         .on('start', (commandLine) => {
-            console.log('[FFmpeg] Spawned: ' + commandLine);
+            console.log('[FFmpeg Playout] Spawned: ' + commandLine);
         })
         .on('progress', (progress) => {
             db.data.sharedPlayerState.trackProgress = progress.timemark.split(':').reduce((acc, time) => (60 * acc) + +time, 0);
-            broadcastState(); // Send progress updates
+            broadcastState();
         })
         .on('end', async () => {
-            console.log(`[FFmpeg] Finished processing ${track.title}`);
-            ffmpegCommand = null;
+            console.log(`[FFmpeg Playout] Finished processing ${track.title}`);
+            ffmpegPlayoutProcess = null;
             await advanceTrackAndPlay();
         })
         .on('error', (err) => {
-            if (err.message.includes('SIGKILL')) {
-                console.log('[FFmpeg] Process killed intentionally.');
-            } else {
-                console.error('[FFmpeg] Error:', err.message);
+            if (!err.message.includes('SIGKILL')) {
+                console.error('[FFmpeg Playout] Error:', err.message);
             }
-            ffmpegCommand = null;
+            ffmpegPlayoutProcess = null;
         });
 
-    const ffmpegStream = ffmpegCommand.pipe();
+    const ffmpegStream = ffmpegPlayoutProcess.pipe();
     
-    if (studioWs && studioWs.readyState === WebSocket.OPEN) {
-        console.log('[Playout] Piping PCM stream to studio client.');
-        ffmpegStream.on('data', (chunk) => {
-            if (studioWs.readyState === WebSocket.OPEN) {
-                studioWs.send(chunk);
-            }
-        });
-    } else {
-        console.log('[Playout] Studio client not connected, not piping audio.');
-    }
+    ffmpegStream.on('data', (chunk) => {
+        const studioWs = clients.get(studioClientEmail);
+        if (studioWs && studioWs.readyState === WebSocket.OPEN) {
+            studioWs.send(chunk);
+        }
+        if (icecastProcess && icecastProcess.stdin && !icecastProcess.stdin.writableEnded) {
+            icecastProcess.stdin.write(chunk);
+        }
+    });
 };
+
 
 let autoFillInterval = null;
 
@@ -750,12 +832,10 @@ const setupAutoMode = async () => {
         console.log('[Auto-Mode] Auto mode is enabled. Starting automation checks.');
         autoFillInterval = setInterval(checkAndTriggerAutofill, 15000);
         
-        // Initial check on startup if playlist is empty
         if (db.data.sharedPlaylist.length === 0) {
             console.log('[Auto-Mode] Playlist is empty on startup with Auto mode on. Triggering initial fill.');
             await performAutofill();
-            // After fill, if playlist is now populated, start playback.
-            await db.read(); // Re-read to get the updated playlist
+            await db.read();
             if (db.data.sharedPlaylist.length > 0 && !db.data.sharedPlayerState.isPlaying) {
                  console.log('[Auto-Mode] Starting playback after initial fill.');
                  const firstPlayableIndex = findNextPlayableIndex(db.data.sharedPlaylist, -1, 1);
@@ -877,6 +957,7 @@ wss.on('connection', async (ws, req) => {
                 broadcasts: db.data.userdata[studioClientEmail]?.broadcasts || [],
             }
         }));
+        ws.send(JSON.stringify({ type: 'stream-status-update', payload: streamingStatus }));
     }
 
     ws.on('message', async (message) => {
@@ -891,7 +972,23 @@ wss.on('connection', async (ws, req) => {
                 case 'ping':
                     ws.send(JSON.stringify({ type: 'pong' }));
                     break;
-                
+                case 'updateStreamingConfig':
+                    if (studioClientEmail && studioClientEmail === email) {
+                        const newConfig = data.payload;
+                        const studioData = db.data.userdata[studioClientEmail];
+                        if (studioData && studioData.settings && studioData.settings.playoutPolicy) {
+                            const oldConfig = studioData.settings.playoutPolicy.streamingConfig;
+                            studioData.settings.playoutPolicy.streamingConfig = newConfig;
+                            await db.write();
+                    
+                            if (newConfig.isEnabled && !oldConfig.isEnabled) {
+                                startStreaming(newConfig);
+                            } else if (!newConfig.isEnabled && oldConfig.isEnabled) {
+                                stopStreaming();
+                            }
+                        }
+                    }
+                    break;
                 case 'studio-command':
                     if (studioClientEmail && studioClientEmail === email) {
                         const { command, payload } = data.payload;
