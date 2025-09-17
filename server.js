@@ -1,3 +1,4 @@
+
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -580,6 +581,8 @@ const startPlayoutForTrack = async (trackIndex) => {
         const command = ffmpeg().input(trackPath).inputOptions(['-re']);
         command.audioCodec('libmp3lame')
             .audioBitrate(streamConfig.bitrate || 128)
+            .audioFrequency(44100)
+            .audioChannels(2)
             .format('mp3')
             .outputOptions(['-loglevel', 'error', '-content_type', 'audio/mpeg']);
         const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
