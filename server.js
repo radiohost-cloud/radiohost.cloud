@@ -683,7 +683,7 @@ const startPlayoutFromIndex = async (startIndex) => {
             '-reconnect_delay_max', '5'
         ]).save(outputUrl);
     } else {
-        command.save('-f null -'); // Play to null output if streaming is disabled
+        command.format('null').save('-'); // Play to null output if streaming is disabled
     }
 
     currentFfmpegCommand = command;
