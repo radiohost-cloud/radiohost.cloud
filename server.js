@@ -1,4 +1,3 @@
-
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -481,22 +480,46 @@ const updateIcecastMetadata = async (track, config) => {
 };
 
 const startPlayoutForTrack = async (trackIndex) => {
-    const { sharedPlaylist } = db.data;
-    if (trackIndex < 0 || trackIndex >= sharedPlaylist.length) {
-        console.log('[Playout] Invalid track index, stopping playout.');
+    const { sharedPlaylist, sharedPlayerState } = db.data;
+
+    // --- Marker Cleanup Logic ---
+    let effectiveTrackIndex = trackIndex;
+    let markerCleanupIndex = -1;
+    // Look for a marker in the items *before* the one we're about to play.
+    for (let i = effectiveTrackIndex - 1; i >= 0; i--) {
+        if (sharedPlaylist[i]?.markerType) {
+            markerCleanupIndex = i;
+            break;
+        }
+    }
+    
+    if (markerCleanupIndex !== -1) {
+        const itemsToRemove = markerCleanupIndex + 1;
+        console.log(`[Playout] Cleaning playlist after marker. Removing ${itemsToRemove} items.`);
+        sharedPlaylist.splice(0, itemsToRemove);
+        
+        // After splicing, the track we want to play is now at index 0.
+        effectiveTrackIndex = 0; 
+        
+        // Also update the global state's track index to reflect the change
+        sharedPlayerState.currentTrackIndex = 0; 
+    }
+
+    if (effectiveTrackIndex < 0 || effectiveTrackIndex >= sharedPlaylist.length) {
+        console.log('[Playout] Invalid track index after cleanup, stopping playout.');
         stopPlayoutEngine();
         return;
     }
-    const track = sharedPlaylist[trackIndex];
+    const track = sharedPlaylist[effectiveTrackIndex];
     if (!track || track.markerType) {
-        console.warn(`[Playout] Attempted to play invalid item at index ${trackIndex}. Skipping.`);
-        advanceTrack(trackIndex + 1); // Jump past the invalid item
+        console.warn(`[Playout] Attempted to play invalid item at index ${effectiveTrackIndex}. Skipping.`);
+        advanceTrack(effectiveTrackIndex + 1); // Jump past the invalid item
         return;
     }
     const trackPath = path.join(mediaDir, track.originalId || track.id);
     if (!fs.existsSync(trackPath)) {
         console.error(`[FFMPEG] File not found: ${trackPath}. Skipping track.`);
-        advanceTrack(trackIndex + 1);
+        advanceTrack();
         return;
     }
     
@@ -514,7 +537,7 @@ const startPlayoutForTrack = async (trackIndex) => {
         return;
     }
 
-    console.log(`[Playout] Starting playout for track index ${trackIndex}: "${track.title}"`);
+    console.log(`[Playout] Starting playout for track index ${effectiveTrackIndex}: "${track.title}"`);
     currentCommandTrackId = track.id;
     serverStreamStatus = 'starting';
     broadcastStreamStatus();
@@ -598,27 +621,28 @@ const startPlayoutForTrack = async (trackIndex) => {
 
 const advanceTrack = async (jumpToIndex = -1) => {
     if (currentFfmpegCommand) {
-        console.log('[Playout] Force-advancing track. Killing current ffmpeg command.');
-        currentCommandTrackId = null; // Invalidate the current command so its end/error handlers do nothing
+        currentCommandTrackId = null; 
         currentFfmpegCommand.kill('SIGTERM');
         currentFfmpegCommand = null;
     }
     const { sharedPlayerState, sharedPlaylist } = db.data;
     const studioData = db.data.userdata[studioClientEmail];
     const policy = studioData?.settings?.playoutPolicy || {};
+
     let nextIndex;
+    const previousIndex = sharedPlayerState.currentTrackIndex;
 
     if (jumpToIndex !== -1) {
         nextIndex = jumpToIndex;
     } else {
-        // Natural track end, check for soft markers
         const finishedTrackIndex = sharedPlayerState.currentTrackIndex;
         const finishedTrack = sharedPlaylist[finishedTrackIndex];
+        nextIndex = finishedTrackIndex + 1;
+
         if (finishedTrack && !finishedTrack.markerType) {
             const startTime = playheadAnchorTime;
             const now = Date.now();
             let lastSoftMarkerIndex = -1;
-            // Check for any soft markers that occurred between when the track started and now.
             for (let i = finishedTrackIndex + 1; i < sharedPlaylist.length; i++) {
                 const item = sharedPlaylist[i];
                 if (item.markerType === 'soft' && item.time > startTime && item.time <= now) {
@@ -626,21 +650,9 @@ const advanceTrack = async (jumpToIndex = -1) => {
                 }
             }
             if (lastSoftMarkerIndex > -1) {
-                console.log(`[Playout] Soft marker passed at ${new Date(sharedPlaylist[lastSoftMarkerIndex].time).toLocaleTimeString()}. Jumping from index ${finishedTrackIndex} to ${lastSoftMarkerIndex + 1}.`);
+                console.log(`[Playout] Soft marker passed. Jumping from index ${finishedTrackIndex} to after marker at index ${lastSoftMarkerIndex}.`);
                 nextIndex = lastSoftMarkerIndex + 1;
             }
-        }
-        if (nextIndex === undefined) {
-             nextIndex = sharedPlayerState.currentTrackIndex + 1;
-        }
-    }
-
-    if (policy.removePlayedTracks) {
-        const removedIndex = sharedPlayerState.currentTrackIndex;
-        sharedPlaylist.splice(removedIndex, 1);
-        // Adjust nextIndex if the removed item was before it
-        if (nextIndex > removedIndex) {
-            nextIndex = nextIndex - 1;
         }
     }
 
@@ -648,6 +660,16 @@ const advanceTrack = async (jumpToIndex = -1) => {
         nextIndex++;
     }
 
+    if (policy.removePlayedTracks) {
+        const currentItemInOldPosition = sharedPlaylist[previousIndex];
+        if (currentItemInOldPosition && currentItemInOldPosition.id === sharedPlayerState.currentPlayingItemId) {
+            sharedPlaylist.splice(previousIndex, 1);
+            if (nextIndex > previousIndex) {
+                nextIndex--;
+            }
+        }
+    }
+    
     if (nextIndex < sharedPlaylist.length) {
         sharedPlayerState.currentTrackIndex = nextIndex;
         sharedPlayerState.currentPlayingItemId = sharedPlaylist[nextIndex].id;
@@ -658,8 +680,8 @@ const advanceTrack = async (jumpToIndex = -1) => {
         startPlayoutForTrack(nextIndex);
     } else {
         console.log('[Playout] End of playlist reached.');
+        db.data.sharedPlaylist = [];
         stopPlayoutEngine();
-        // If autofill is enabled, trigger it now.
         if (policy.isAutoFillEnabled) {
             console.log('[Playout] End of playlist, triggering autofill.');
             await performAutofill();
@@ -976,7 +998,7 @@ wss.on('connection', async (ws, req) => {
 
     broadcastPresenterList();
 
-    if (ws.readyState === ws.OPEN) {
+    if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'library-update', payload: libraryState }));
         ws.send(JSON.stringify({
             type: 'state-update',
