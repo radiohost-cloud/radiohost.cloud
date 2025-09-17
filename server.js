@@ -886,21 +886,6 @@ const setupAutoMode = async () => {
     if (studioData?.settings?.isAutoModeEnabled) {
         console.log('[Auto-Mode] Auto mode is enabled. Starting automation checks.');
         autoFillInterval = setInterval(checkAndTriggerAutofill, 15000);
-        
-        // Initial check on startup if playlist is empty
-        if (db.data.sharedPlaylist.length === 0) {
-            console.log('[Auto-Mode] Playlist is empty on startup with Auto mode on. Triggering initial fill.');
-            await performAutofill();
-            // After fill, if playlist is now populated, start playback.
-            await db.read(); // Re-read to get the updated playlist
-            if (db.data.sharedPlaylist.length > 0 && !db.data.sharedPlayerState.isPlaying) {
-                console.log('[Auto-Mode] Starting playback after initial fill.');
-                db.data.sharedPlayerState.currentTrackIndex = 0;
-                db.data.sharedPlayerState.currentPlayingItemId = db.data.sharedPlaylist[0].id;
-                db.data.sharedPlayerState.trackProgress = 0;
-                startPlayoutEngine();
-            }
-        }
     } else {
         console.log('[Auto-Mode] Auto mode is disabled.');
     }
@@ -1918,16 +1903,27 @@ if (fs.existsSync(distPath)) {
     await db.read();
     const studioUser = db.data.users.find(u => u.role === 'studio');
     const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
-    
-    setupAutoMode();
+
+    // Step 1: Handle Auto-Fill if necessary
+    if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length === 0) {
+        console.log('[Auto-Mode] Playlist is empty on startup. Triggering initial fill.');
+        await performAutofill();
+        await db.read(); // Re-read playlist state
+    }
+
+    // Step 2: Set up the recurring checks for Auto-Fill and other automations
     setupAutoBackup();
+    setupAutoMode();
     
-    if (studioData?.settings?.isAutoModeEnabled) {
-        if (db.data.sharedPlaylist.length > 0) {
-            db.data.sharedPlayerState.isPlaying = true;
-            await db.write();
-            startPlayoutFromIndex(db.data.sharedPlayerState.currentTrackIndex);
-        }
+    // Step 3: Start playback if conditions are met
+    if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length > 0 && !db.data.sharedPlayerState.isPlaying) {
+        console.log('[Auto-Mode] Starting playback on startup.');
+        db.data.sharedPlayerState.currentTrackIndex = 0;
+        db.data.sharedPlayerState.currentPlayingItemId = db.data.sharedPlaylist[0].id;
+        db.data.sharedPlayerState.trackProgress = 0;
+        db.data.sharedPlayerState.isPlaying = true;
+        await db.write();
+        startPlayoutFromIndex(db.data.sharedPlayerState.currentTrackIndex);
     }
     
     if (studioData?.settings?.isAutoBackupOnStartupEnabled) {
