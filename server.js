@@ -252,7 +252,6 @@ const findTrackInServerTree = (node, trackId) => {
 };
 
 const syncPlaylistWithLibrary = async () => {
-    await db.read();
     const { sharedPlaylist } = db.data;
     let playlistChanged = false;
     
@@ -304,7 +303,6 @@ const broadcastLibraryUpdate = () => {
 const refreshAndBroadcastLibrary = async () => {
     console.log('[FS Operation] Re-scanning media library...');
     try {
-        await db.read();
         const newChildren = await scanMediaToTree(mediaDir);
         libraryState.children = newChildren;
         
@@ -320,7 +318,7 @@ const refreshAndBroadcastLibrary = async () => {
     }
 };
 
-const applyTagsRecursively = async (relativePath, tags, db) => {
+const applyTagsRecursively = async (relativePath, tags) => {
     const fullPath = path.join(mediaDir, relativePath);
     try {
         const entries = await fsPromises.readdir(fullPath, { withFileTypes: true });
@@ -336,7 +334,7 @@ const applyTagsRecursively = async (relativePath, tags, db) => {
                     tags: tags,
                 };
                 // Recurse into subfolder
-                await applyTagsRecursively(entryRelativePath, tags, db);
+                await applyTagsRecursively(entryRelativePath, tags);
             } else if (/\.(mp3|wav|ogg|flac|aac|m4a|webm)$/i.test(entry.name)) {
                 // Update file ID3 tags
                 try {
@@ -359,7 +357,6 @@ const applyTagsRecursively = async (relativePath, tags, db) => {
 
 
 const getStationSettings = async () => {
-    await db.read();
     const studioUser = db.data.users.find(u => u.role === 'studio');
     const userData = studioUser ? db.data.userdata[studioUser.email] : null;
     const settings = userData?.settings;
@@ -398,7 +395,6 @@ const broadcastState = () => {
 };
 
 const getCurrentPublicMetadata = async () => {
-    await db.read();
     const settings = await getStationSettings();
     const { sharedPlayerState, sharedPlaylist } = db.data;
 
@@ -455,7 +451,6 @@ const broadcastPresenterList = async () => {
     const studioWs = clients.get(studioClientEmail);
     if (!studioWs || studioWs.readyState !== WebSocket.OPEN) return;
 
-    await db.read();
     const presenters = db.data.users
         .filter(u => presenterEmails.has(u.email))
         .map(({ password, ...user }) => user);
@@ -634,7 +629,6 @@ const stopPlayout = (shouldBroadcast = true) => {
 const startPlayoutFromIndex = async (startIndex) => {
     stopPlayout(false); // Stop any existing command without broadcasting, as this function will handle it.
 
-    await db.read();
     const { sharedPlaylist } = db.data;
 
     const playoutSlice = sharedPlaylist.slice(startIndex).filter(i => !i.markerType);
@@ -874,7 +868,6 @@ const checkAndTriggerAutofill = async () => {
 const setupAutoMode = async () => {
     if (autoFillInterval) clearInterval(autoFillInterval);
     autoFillInterval = null;
-    await db.read();
     
     const studioUser = db.data.users.find(u => u.role === 'studio');
     if (!studioUser) return;
@@ -967,7 +960,6 @@ wss.on('connection', async (ws, req) => {
         return;
     }
 
-    await db.read();
     const user = db.data.users.find(u => u.email === email);
     if (!user) {
         console.log(`[WebSocket] Connection from unknown user ${email} rejected.`);
@@ -1059,7 +1051,7 @@ wss.on('connection', async (ws, req) => {
                                     tags: newTags
                                 };
                             
-                                await applyTagsRecursively(folderId, newTags, db);
+                                await applyTagsRecursively(folderId, newTags);
                             
                                 await db.write();
                                 await refreshAndBroadcastLibrary();
@@ -1785,7 +1777,6 @@ app.post('/api/track/delete', async (req, res) => {
                 await fsPromises.unlink(artworkPath);
             }
 
-            await db.read();
             if (db.data.mediaCache[id]) {
                 delete db.data.mediaCache[id];
                 await db.write();
@@ -1831,7 +1822,6 @@ app.get('/stream', async (req, res) => {
 });
 
 const performBackup = async () => {
-    await db.read();
     const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
     const backupFileName = `radiohost-backup-${timestamp}.json`;
     const backupFilePath = path.join(backupDir, backupFileName);
@@ -1857,7 +1847,6 @@ const setupAutoBackup = async () => {
     if (backupInterval) {
         clearInterval(backupInterval);
     }
-    await db.read();
     const studioUser = db.data.users.find(u => u.role === 'studio');
     const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
     const settings = studioData?.settings;
@@ -1895,7 +1884,6 @@ if (fs.existsSync(distPath)) {
     await db.write();
     console.log(`[Startup] Scan complete. Found ${libraryState.children.length} items in root.`);
 
-    await db.read();
     const studioUser = db.data.users.find(u => u.role === 'studio');
     const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
 
@@ -1903,7 +1891,6 @@ if (fs.existsSync(distPath)) {
     if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length === 0) {
         console.log('[Auto-Mode] Playlist is empty on startup. Triggering initial fill.');
         await performAutofill();
-        await db.read(); // Re-read playlist state
     }
 
     // Step 2: Set up the recurring checks for Auto-Fill and other automations
