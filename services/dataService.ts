@@ -92,7 +92,7 @@ export const addTrack = async (track: Partial<Track>, file: File | Blob, artwork
     if (!(file instanceof File)) {
         throw new Error("HOST mode requires a File object for uploads.");
     }
-    return apiService.uploadTrack(file, webkitRelativePath, track);
+    return apiService.uploadTrack(file, webkitRelativePath, track.duration);
 };
 
 export const deleteTrack = async (track: Track): Promise<void> => {

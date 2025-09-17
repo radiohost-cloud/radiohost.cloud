@@ -1393,15 +1393,12 @@ const AppInternal: React.FC = () => {
     const handleInsertVoiceTrack = useCallback(async (voiceTrack: Track, blob: Blob, vtMix: VtMixDetails, beforeItemId: string | null) => {
         const userNickname = currentUserRef.current?.nickname || 'User';
         const vtFolderName = playoutPolicy.playoutMode === 'studio' ? 'Studio' : userNickname;
-        
-        const voiceTrackWithArtist = { ...voiceTrack, artist: userNickname };
-        
         const folderPathParts = ['Voicetracks', vtFolderName];
     
         const relativePath = `${folderPathParts.join('/')}/${voiceTrack.title}.webm`;
         try {
             const vtFile = new File([blob], `${voiceTrack.title}.webm`, { type: 'audio/webm' });
-            const savedTrack = await dataService.addTrack(voiceTrackWithArtist, vtFile, undefined, relativePath);
+            const savedTrack = await dataService.addTrack(voiceTrack, vtFile, undefined, relativePath);
             const trackWithMix = { ...savedTrack, vtMix };
 
             if (playoutPolicy.playoutMode === 'presenter') {
@@ -1748,13 +1745,10 @@ const AppInternal: React.FC = () => {
     const handleVoiceTrackCreate = useCallback(async (voiceTrack: Track, blob: Blob): Promise<Track> => {
         const userNickname = currentUserRef.current?.nickname || 'User';
         const vtFolderName = playoutPolicy.playoutMode === 'studio' ? 'Studio' : userNickname;
-        
-        const voiceTrackWithArtist = { ...voiceTrack, artist: userNickname };
-        
         const folderPathParts = ['Voicetracks', vtFolderName];
         const relativePath = `${folderPathParts.join('/')}/${voiceTrack.title}.webm`;
         const vtFile = new File([blob], `${voiceTrack.title}.webm`, { type: 'audio/webm' });
-        return dataService.addTrack(voiceTrackWithArtist, vtFile, undefined, relativePath);
+        return dataService.addTrack(voiceTrack, vtFile, undefined, relativePath);
     }, [playoutPolicy.playoutMode]);
 
     // --- NEW: WebSocket Logic for HOST mode ---
