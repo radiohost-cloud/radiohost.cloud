@@ -677,16 +677,18 @@ const advanceTrack = async (jumpToIndex = -1) => {
     }
 
     if (policy.removePlayedTracks) {
-        sharedPlaylist.splice(sharedPlayerState.currentTrackIndex, 1);
+        const removedIndex = sharedPlayerState.currentTrackIndex;
+        sharedPlaylist.splice(removedIndex, 1);
         // Adjust nextIndex if the removed item was before it
-        if (jumpToIndex === -1 && nextIndex > sharedPlayerState.currentTrackIndex) {
-            nextIndex = nextIndex -1;
+        if (nextIndex > removedIndex) {
+            nextIndex = nextIndex - 1;
         }
     }
 
     while (nextIndex < sharedPlaylist.length && sharedPlaylist[nextIndex]?.markerType) {
         nextIndex++;
     }
+
     if (nextIndex < sharedPlaylist.length) {
         sharedPlayerState.currentTrackIndex = nextIndex;
         sharedPlayerState.currentPlayingItemId = sharedPlaylist[nextIndex].id;
