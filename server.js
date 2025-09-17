@@ -30,6 +30,7 @@ const defaultData = {
     userdata: {},
     mediaCache: {},
     folderMetadata: {},
+    persistentMetadata: {}, // NEW: For metadata of non-ID3 files like VTs
     sharedPlaylist: [],
     sharedPlayerState: {
         currentPlayingItemId: null,
@@ -111,6 +112,7 @@ const fetchArtwork = async (artist, title) => {
 
 // --- Filesystem-based Media Library Logic ---
 const createTrackObject = async (entryFullPath, entryRelativePath, entryName, clientMetadata) => {
+    const persistentMeta = db.data.persistentMetadata?.[entryRelativePath];
     try {
         const durationInSeconds = clientMetadata.duration ? parseFloat(clientMetadata.duration) : await getDuration(entryFullPath);
         const tags = NodeID3.read(entryFullPath);
@@ -126,9 +128,9 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, cl
             hasArtwork = true;
         }
 
-        const title = clientMetadata.title || tags.title || entryName.replace(/\.[^/.]+$/, "");
-        const artist = clientMetadata.artist || tags.artist || 'Unknown Artist';
-        const type = clientMetadata.type || 'Song';
+        const title = persistentMeta?.title || clientMetadata.title || tags.title || entryName.replace(/\.[^/.]+$/, "");
+        const artist = persistentMeta?.artist || clientMetadata.artist || tags.artist || 'Unknown Artist';
+        const type = persistentMeta?.type || clientMetadata.type || 'Song';
 
         if (!hasArtwork && fs.existsSync(artworkFullPath)) {
              hasArtwork = true;
@@ -154,12 +156,13 @@ const createTrackObject = async (entryFullPath, entryRelativePath, entryName, cl
         };
     } catch (tagError) {
         console.error(`Error processing metadata for ${entryName}:`, tagError);
+        const duration = clientMetadata.duration ? parseFloat(clientMetadata.duration) : 180;
         return {
             id: entryRelativePath,
-            title: clientMetadata.title || entryName.replace(/\.[^/.]+$/, ""),
-            artist: clientMetadata.artist || 'Unknown Artist',
-            duration: clientMetadata.duration ? parseFloat(clientMetadata.duration) : 180, // Default duration on error
-            type: clientMetadata.type || 'Song',
+            title: persistentMeta?.title || clientMetadata.title || entryName.replace(/\.[^/.]+$/, ""),
+            artist: persistentMeta?.artist || clientMetadata.artist || 'Unknown Artist',
+            duration: duration,
+            type: persistentMeta?.type || clientMetadata.type || 'Song',
             src: `/media/${encodeURIComponent(entryRelativePath)}`,
             originalFilename: entryName,
             tags: [],
@@ -474,7 +477,7 @@ const PLAYBACK_TICK_RATE = 250; // ms
 let playheadAnchorTime = 0;
 let currentFfmpegCommand = null;
 let currentCommandTrackId = null; // ID of the track associated with currentFfmpegCommand
-let serverStreamStatus = 'inactive';
+let serverStreamStatus = 'inactive'
 let serverStreamError = null;
 
 const stopPlayoutEngine = (broadcast = true) => {
@@ -616,13 +619,15 @@ const advanceTrack = async (jumpToIndex = -1) => {
     } else {
         const finishedTrackIndex = sharedPlayerState.currentTrackIndex;
         const finishedTrack = sharedPlaylist[finishedTrackIndex];
+        // FIX: Soft marker logic
         if (finishedTrack && !finishedTrack.markerType) {
             const startTime = playheadAnchorTime;
-            const endTime = startTime + (finishedTrack.duration * 1000);
+            const now = Date.now();
             let lastSoftMarkerIndex = -1;
+            // Check for any soft markers that occurred between when the track started and now.
             for (let i = finishedTrackIndex + 1; i < sharedPlaylist.length; i++) {
                 const item = sharedPlaylist[i];
-                if (item.markerType === 'soft' && item.time < endTime) {
+                if (item.markerType === 'soft' && item.time > startTime && item.time <= now) {
                     lastSoftMarkerIndex = i;
                 }
             }
@@ -632,11 +637,11 @@ const advanceTrack = async (jumpToIndex = -1) => {
             }
         }
         if (nextIndex === undefined) {
-             nextIndex = finishedTrackIndex + 1;
+             nextIndex = sharedPlayerState.currentTrackIndex + 1;
         }
         if (policy.removePlayedTracks) {
-            sharedPlaylist.splice(finishedTrackIndex, 1);
-            nextIndex = finishedTrackIndex;
+            sharedPlaylist.splice(sharedPlayerState.currentTrackIndex, 1);
+            nextIndex = sharedPlayerState.currentTrackIndex;
         }
     }
     while (nextIndex < sharedPlaylist.length && sharedPlaylist[nextIndex]?.markerType) {
@@ -1089,8 +1094,14 @@ wss.on('connection', async (ws, req) => {
                                 if (!itemId || !newName) break;
                                 const oldPath = path.join(mediaDir, itemId);
                                 const newPath = path.join(path.dirname(oldPath), newName);
+                                const newId = path.relative(mediaDir, newPath).replace(/\\/g, '/');
                                 try {
                                     await fsPromises.rename(oldPath, newPath);
+                                    if (db.data.persistentMetadata?.[itemId]) {
+                                        db.data.persistentMetadata[newId] = db.data.persistentMetadata[itemId];
+                                        delete db.data.persistentMetadata[itemId];
+                                        await db.write();
+                                    }
                                     const oldArtworkPath = path.join(artworkDir, itemId.replace(/\.[^/.]+$/, ".jpg"));
                                     if (fs.existsSync(oldArtworkPath)) {
                                         const newArtworkPath = path.join(path.dirname(oldArtworkPath), newName.replace(/\.[^/.]+$/, ".jpg"));
@@ -1161,9 +1172,13 @@ wss.on('connection', async (ws, req) => {
                                                 const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
                                                 if (fs.existsSync(artworkPath)) await fsPromises.unlink(artworkPath);
                                             }
+                                            if (db.data.persistentMetadata?.[id]) {
+                                                delete db.data.persistentMetadata[id];
+                                            }
                                         }
                                     } catch (e) { console.error(`[FS] Failed to delete item at ${itemPath}:`, e); }
                                 }
+                                await db.write();
                                 await refreshAndBroadcastLibrary();
                                 break;
                             }
@@ -1185,6 +1200,13 @@ wss.on('connection', async (ws, req) => {
                                     const sourcePath = path.join(mediaDir, itemId);
                                     const destDir = destinationFolderId === 'root' ? mediaDir : path.join(mediaDir, destinationFolderId);
                                     const destPath = path.join(destDir, path.basename(itemId));
+                                    const newId = path.relative(mediaDir, destPath).replace(/\\/g, '/');
+
+                                    if (db.data.persistentMetadata?.[itemId]) {
+                                        db.data.persistentMetadata[newId] = db.data.persistentMetadata[itemId];
+                                        delete db.data.persistentMetadata[itemId];
+                                    }
+
                                     const artworkSourcePath = path.join(artworkDir, itemId.replace(/\.[^/.]+$/, ".jpg"));
                                     const artworkDestDir = destinationFolderId === 'root' ? artworkDir : path.join(artworkDir, destinationFolderId);
                                     const artworkDestPath = path.join(artworkDestDir, path.basename(itemId).replace(/\.[^/.]+$/, ".jpg"));
@@ -1197,6 +1219,7 @@ wss.on('connection', async (ws, req) => {
                                         if (sourceStats) await fsPromises.rename(sourcePath, destPath);
                                     } catch (e) { console.error(`[FS] Failed to move item ${itemId}:`, e); }
                                 }
+                                await db.write();
                                 await refreshAndBroadcastLibrary();
                                 break;
                             }
@@ -1818,14 +1841,25 @@ app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
         return res.status(400).json({ message: 'No file uploaded.' });
     }
     try {
-        const relativePath = req.body.webkitRelativePath || req.file.originalname;
+        const relativePath = (req.body.webkitRelativePath || req.file.originalname).replace(/\\/g, '/');
         const clientMetadata = {
             duration: req.body.duration,
             title: req.body.title,
             artist: req.body.artist,
             type: req.body.type,
         };
-        const trackObject = await createTrackObject(req.file.path, relativePath.replace(/\\/g, '/'), req.file.originalname, clientMetadata);
+        const trackObject = await createTrackObject(req.file.path, relativePath, req.file.originalname, clientMetadata);
+        
+        // FIX: Persist metadata for non-ID3 files like VTs
+        if (/\.webm$/i.test(trackObject.id)) {
+            db.data.persistentMetadata[trackObject.id] = {
+                title: trackObject.title,
+                artist: trackObject.artist,
+                type: trackObject.type,
+            };
+            await db.write();
+        }
+
         res.status(201).json(trackObject);
         await refreshAndBroadcastLibrary();
     } catch (error) {
@@ -1852,9 +1886,11 @@ app.post('/api/track/delete', async (req, res) => {
 
             if (db.data.mediaCache[id]) {
                 delete db.data.mediaCache[id];
-                await db.write();
-                console.log(`[Cache] Removed ${id} from cache.`);
             }
+            if (db.data.persistentMetadata?.[id]) {
+                delete db.data.persistentMetadata[id];
+            }
+            await db.write();
             
             res.json({ success: true, message: `Deleted ${id}` });
         } else {
