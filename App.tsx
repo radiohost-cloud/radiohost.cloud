@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -1092,7 +1093,7 @@ const AppInternal: React.FC = () => {
                 let lastSoftMarkerIndex = -1;
                 for (let j = i + 1; j < playlist.length; j++) {
                     const nextItem = playlist[j];
-                    if ('markerType' in nextItem && nextItem.markerType === TimeMarkerType.SOFT && nextItem.time >= startTime && nextItem.time < finalEndTime) {
+                    if ('markerType' in nextItem && nextItem.markerType === TimeMarkerType.SOFT && nextItem.time > startTime && nextItem.time <= finalEndTime) {
                         lastSoftMarkerIndex = j;
                     }
                 }
