@@ -143,7 +143,7 @@ export interface PlayoutHistoryEntry {
 
 // --- NEW AUDIO MIXER TYPES ---
 
-export type AudioSourceId = 'mainPlayer' | 'mic' | 'pfl' | 'cartwall' | `remote_${string}`;
+export type AudioSourceId = 'mainPlayer' | 'mic' | 'pfl' | 'cartwall' | `remote_${string}` | 'serverPlayer';
 export type AudioBusId = 'main' | 'monitor';
 
 export interface AudioBus {

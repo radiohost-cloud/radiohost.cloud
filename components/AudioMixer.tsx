@@ -7,6 +7,7 @@ import SignalIndicator from './SignalIndicator';
 import { Toggle } from './Toggle';
 import { GridIcon } from './icons/GridIcon';
 import { UsersIcon } from './icons/UsersIcon';
+import { ServerIcon } from './icons/ServerIcon';
 
 interface AudioMixerProps {
     mixerConfig: MixerConfig;
@@ -22,18 +23,13 @@ interface AudioMixerProps {
 
 const SOURCE_META: Partial<Record<AudioSourceId, { defaultName: string; icon: React.ReactNode }>> = {
     mainPlayer: { defaultName: "Player", icon: <MusicNoteIcon className="w-5 h-5" /> },
+    serverPlayer: { defaultName: "Server Output", icon: <ServerIcon className="w-5 h-5" /> },
     mic: { defaultName: "Microphone", icon: <MicrophoneIcon className="w-5 h-5" /> },
     pfl: { defaultName: "PFL", icon: <HeadphoneIcon className="w-5 h-5" /> },
     cartwall: { defaultName: "Cartwall", icon: <GridIcon className="w-5 h-5" /> },
 };
 
 const getSourceMeta = (sourceId: AudioSourceId, playoutMode: 'studio' | 'presenter' | undefined) => {
-    if (sourceId === 'mainPlayer') {
-        return { 
-            name: playoutMode === 'studio' ? "Server Output" : "Player", 
-            icon: <MusicNoteIcon className="w-5 h-5" /> 
-        };
-    }
     if (SOURCE_META[sourceId]) {
         return { name: SOURCE_META[sourceId]!.defaultName, icon: SOURCE_META[sourceId]!.icon };
     }
@@ -129,7 +125,7 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
             return sourceId !== 'mic';
         }
         if (playoutMode === 'presenter') {
-            return !sourceId.startsWith('remote_');
+            return !sourceId.startsWith('remote_') && sourceId !== 'serverPlayer';
         }
         return true;
     });

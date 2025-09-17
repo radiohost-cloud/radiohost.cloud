@@ -1,6 +1,6 @@
 // A simple example backend for RadioHost.cloud's HOST mode.
 // This server handles user authentication, data storage, and media file uploads.
-// To run: `npm install express cors multer lowdb ws node-id3` then `node server.js`
+// To run: `npm install express cors multer lowdb ws node-id3 fluent-ffmpeg` then `node server.js`
 
 import express from 'express';
 import cors from 'cors';
@@ -14,6 +14,7 @@ import { promises as fsPromises } from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 import NodeID3 from 'node-id3';
+import ffmpeg from 'fluent-ffmpeg';
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -62,14 +63,6 @@ const artworkDir = path.join(__dirname, 'Artwork');
 if (!fs.existsSync(artworkDir)) fs.mkdirSync(artworkDir, { recursive: true });
 const backupDir = path.join(__dirname, 'Backup');
 if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
-
-
-// --- Promise wrapper for ffprobe ---
-const getDuration = (filePath) => {
-    // This is a placeholder as ffmpeg is removed for now.
-    // In a real scenario, you'd re-add ffprobe or another library for this.
-    return Promise.resolve(180); // Default to 3 minutes
-};
 
 
 // --- Artwork Fetching Helper (moved from artworkService.ts) ---
@@ -474,90 +467,14 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
     return -1;
 };
 
-let playoutInterval = null;
-const PLAYBACK_TICK_RATE = 250; // ms
+// --- Playout Engine ---
+let ffmpegCommand = null;
 
-const advanceTrack = async () => {
-    const { sharedPlayerState, sharedPlaylist } = db.data;
-    const studioData = db.data.userdata[studioClientEmail];
-    const policy = studioData?.settings?.playoutPolicy || {};
-
-    const finishedTrackIndex = sharedPlayerState.currentTrackIndex;
-    const finishedTrack = sharedPlaylist[finishedTrackIndex];
-
-    if (finishedTrack && !finishedTrack.markerType) {
-        db.data.playoutHistory.push({
-            trackId: finishedTrack.originalId || finishedTrack.id,
-            title: finishedTrack.title,
-            artist: finishedTrack.artist,
-            playedAt: Date.now(),
-        });
-        // Prune history to last 100 entries to prevent it from growing indefinitely
-        if (db.data.playoutHistory.length > 100) {
-            db.data.playoutHistory = db.data.playoutHistory.slice(-100);
-        }
-
-        if (policy.removePlayedTracks) {
-            db.data.sharedPlaylist.splice(finishedTrackIndex, 1);
-        }
+const stopPlayout = () => {
+    if (ffmpegCommand) {
+        ffmpegCommand.kill('SIGKILL');
+        ffmpegCommand = null;
     }
-
-    if (sharedPlayerState.stopAfterTrackId && sharedPlayerState.stopAfterTrackId === sharedPlayerState.currentPlayingItemId) {
-        sharedPlayerState.stopAfterTrackId = null;
-        stopPlayoutEngine();
-        return;
-    }
-
-    const nextIndex = findNextPlayableIndex(db.data.sharedPlaylist, finishedTrackIndex, 1);
-    
-    if (nextIndex !== -1 && (!policy.removePlayedTracks || nextIndex > finishedTrackIndex || db.data.sharedPlaylist.length > 0)) {
-        let finalNextIndex = nextIndex;
-        if (policy.removePlayedTracks) {
-            finalNextIndex = (finishedTrackIndex < db.data.sharedPlaylist.length) ? finishedTrackIndex : 0;
-        }
-        
-        sharedPlayerState.currentTrackIndex = finalNextIndex;
-        sharedPlayerState.currentPlayingItemId = db.data.sharedPlaylist[finalNextIndex]?.id || null;
-        sharedPlayerState.trackProgress = 0;
-
-        if (!sharedPlayerState.currentPlayingItemId) {
-            stopPlayoutEngine();
-        }
-    } else {
-        stopPlayoutEngine();
-    }
-    await db.write();
-    broadcastState();
-    broadcastPublicMetadata();
-};
-
-const playoutTick = async () => {
-    if (!db.data.sharedPlayerState.isPlaying) {
-        stopPlayoutEngine();
-        return;
-    }
-
-    const { sharedPlayerState, sharedPlaylist } = db.data;
-    const currentTrack = sharedPlaylist[sharedPlayerState.currentTrackIndex];
-    
-    if (!currentTrack || currentTrack.markerType) {
-        await advanceTrack();
-        return;
-    }
-
-    sharedPlayerState.trackProgress += PLAYBACK_TICK_RATE / 1000;
-    
-    // Send frequent updates for low-latency client-side player sync
-    broadcastState();
-    
-    if (sharedPlayerState.trackProgress >= currentTrack.duration) {
-        await advanceTrack();
-    }
-};
-
-const stopPlayoutEngine = () => {
-    if (playoutInterval) clearInterval(playoutInterval);
-    playoutInterval = null;
     if (db.data.sharedPlayerState.isPlaying) {
         db.data.sharedPlayerState.isPlaying = false;
         db.write();
@@ -566,13 +483,111 @@ const stopPlayoutEngine = () => {
     }
 };
 
-const startPlayoutEngine = () => {
-    if (playoutInterval) clearInterval(playoutInterval);
-    db.data.sharedPlayerState.isPlaying = true;
-    db.write(); // Write the new state immediately
-    playoutInterval = setInterval(playoutTick, PLAYBACK_TICK_RATE);
+const advanceTrackAndPlay = async () => {
+    const { sharedPlayerState, sharedPlaylist } = db.data;
+    const finishedTrackIndex = sharedPlayerState.currentTrackIndex;
+    const finishedTrack = sharedPlaylist[finishedTrackIndex];
+
+    // Log to history before potentially removing
+    if (finishedTrack && !finishedTrack.markerType) {
+        db.data.playoutHistory.push({
+            trackId: finishedTrack.originalId || finishedTrack.id,
+            title: finishedTrack.title,
+            artist: finishedTrack.artist,
+            playedAt: Date.now(),
+        });
+        if (db.data.playoutHistory.length > 100) {
+            db.data.playoutHistory = db.data.playoutHistory.slice(-100);
+        }
+    }
+
+    if (sharedPlayerState.stopAfterTrackId && sharedPlayerState.stopAfterTrackId === sharedPlayerState.currentPlayingItemId) {
+        sharedPlayerState.stopAfterTrackId = null;
+        stopPlayout();
+        return;
+    }
+
+    const nextIndex = findNextPlayableIndex(sharedPlaylist, finishedTrackIndex, 1);
+    
+    if (nextIndex !== -1) {
+        await startPlayoutFromIndex(nextIndex);
+    } else {
+        stopPlayout();
+    }
+};
+
+const startPlayoutFromIndex = async (index) => {
+    stopPlayout(); // Ensure any existing process is stopped
+    await db.read();
+
+    const track = db.data.sharedPlaylist[index];
+    if (!track || track.markerType) {
+        console.log(`[Playout] Skipping non-playable item at index ${index}.`);
+        advanceTrackAndPlay();
+        return;
+    }
+
+    const trackPath = path.join(mediaDir, track.id);
+    if (!fs.existsSync(trackPath)) {
+        console.error(`[Playout] Track file not found: ${trackPath}`);
+        advanceTrackAndPlay();
+        return;
+    }
+
+    console.log(`[Playout] Starting playback for: ${track.title}`);
+
+    db.data.sharedPlayerState = {
+        ...db.data.sharedPlayerState,
+        isPlaying: true,
+        currentTrackIndex: index,
+        currentPlayingItemId: track.id,
+        trackProgress: 0,
+    };
+    await db.write();
     broadcastState();
-    console.log('[Playout Engine] Started.');
+    broadcastPublicMetadata();
+    
+    const studioWs = clients.get(studioClientEmail);
+
+    ffmpegCommand = ffmpeg(trackPath)
+        .noVideo()
+        .audioCodec('pcm_s16le')
+        .audioFrequency(44100)
+        .audioChannels(1)
+        .format('s16le')
+        .on('start', (commandLine) => {
+            console.log('[FFmpeg] Spawned: ' + commandLine);
+        })
+        .on('progress', (progress) => {
+            db.data.sharedPlayerState.trackProgress = progress.timemark.split(':').reduce((acc, time) => (60 * acc) + +time, 0);
+            broadcastState(); // Send progress updates
+        })
+        .on('end', async () => {
+            console.log(`[FFmpeg] Finished processing ${track.title}`);
+            ffmpegCommand = null;
+            await advanceTrackAndPlay();
+        })
+        .on('error', (err) => {
+            if (err.message.includes('SIGKILL')) {
+                console.log('[FFmpeg] Process killed intentionally.');
+            } else {
+                console.error('[FFmpeg] Error:', err.message);
+            }
+            ffmpegCommand = null;
+        });
+
+    const ffmpegStream = ffmpegCommand.pipe();
+    
+    if (studioWs && studioWs.readyState === WebSocket.OPEN) {
+        console.log('[Playout] Piping PCM stream to studio client.');
+        ffmpegStream.on('data', (chunk) => {
+            if (studioWs.readyState === WebSocket.OPEN) {
+                studioWs.send(chunk);
+            }
+        });
+    } else {
+        console.log('[Playout] Studio client not connected, not piping audio.');
+    }
 };
 
 let autoFillInterval = null;
@@ -745,10 +760,7 @@ const setupAutoMode = async () => {
                  console.log('[Auto-Mode] Starting playback after initial fill.');
                  const firstPlayableIndex = findNextPlayableIndex(db.data.sharedPlaylist, -1, 1);
                  if (firstPlayableIndex !== -1) {
-                      db.data.sharedPlayerState.currentTrackIndex = firstPlayableIndex;
-                      db.data.sharedPlayerState.currentPlayingItemId = db.data.sharedPlaylist[firstPlayableIndex].id;
-                      db.data.sharedPlayerState.trackProgress = 0;
-                      startPlayoutEngine();
+                      await startPlayoutFromIndex(firstPlayableIndex);
                  }
             }
         }
@@ -1011,28 +1023,20 @@ wss.on('connection', async (ws, req) => {
                                 const direction = command === 'next' ? 1 : -1;
                                 const nextIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, direction);
                                 if (nextIndex !== -1) {
-                                    sharedPlayerState.currentTrackIndex = nextIndex;
-                                    sharedPlayerState.currentPlayingItemId = sharedPlaylist[nextIndex].id;
-                                    sharedPlayerState.trackProgress = 0;
-                                    await db.write();
-                                    broadcastState();
+                                    await startPlayoutFromIndex(nextIndex);
                                 }
                                 break;
                             }
                             case 'togglePlay': {
                                 if (sharedPlayerState.isPlaying) {
-                                    stopPlayoutEngine();
+                                    stopPlayout();
                                 } else {
-                                    if (sharedPlaylist.length > 0 && !sharedPlayerState.currentPlayingItemId) {
-                                        const firstPlayableIndex = findNextPlayableIndex(sharedPlaylist, -1, 1);
-                                        if (firstPlayableIndex !== -1) {
-                                            sharedPlayerState.currentTrackIndex = firstPlayableIndex;
-                                            sharedPlayerState.currentPlayingItemId = sharedPlaylist[firstPlayableIndex].id;
-                                            sharedPlayerState.trackProgress = 0;
-                                        }
+                                    let startIndex = sharedPlayerState.currentTrackIndex;
+                                    if (!sharedPlayerState.currentPlayingItemId && sharedPlaylist.length > 0) {
+                                        startIndex = findNextPlayableIndex(sharedPlaylist, -1, 1);
                                     }
-                                    if (sharedPlayerState.currentPlayingItemId) {
-                                        startPlayoutEngine();
+                                    if(startIndex !== -1) {
+                                        await startPlayoutFromIndex(startIndex);
                                     }
                                 }
                                 break;
@@ -1061,10 +1065,7 @@ wss.on('connection', async (ws, req) => {
                                 const { itemId } = payload;
                                 const targetIndex = sharedPlaylist.findIndex(item => item.id === itemId);
                                 if (targetIndex !== -1 && !sharedPlaylist[targetIndex].markerType) {
-                                    sharedPlayerState.currentTrackIndex = targetIndex;
-                                    sharedPlayerState.currentPlayingItemId = itemId;
-                                    sharedPlayerState.trackProgress = 0;
-                                    startPlayoutEngine();
+                                    await startPlayoutFromIndex(targetIndex);
                                 }
                                 break;
                             }
@@ -1112,19 +1113,21 @@ wss.on('connection', async (ws, req) => {
                             }
                              case 'removeFromPlaylist': {
                                 const itemId = payload.itemId;
-                                const wasPlayingThisItem = sharedPlayerState.currentPlayingItemId === itemId;
-
-                                const newPlaylist = sharedPlaylist.filter(item => item.id !== itemId);
-                                db.data.sharedPlaylist = newPlaylist;
+                                const currentIndex = sharedPlayerState.currentTrackIndex;
+                                const currentItem = sharedPlaylist[currentIndex];
                                 
-                                if (wasPlayingThisItem) {
-                                    stopPlayoutEngine();
-                                } else {
-                                     const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
-                                     if(newCurrentIndex > -1) {
-                                        sharedPlayerState.currentTrackIndex = newCurrentIndex;
-                                     }
+                                const newPlaylist = sharedPlaylist.filter(item => item.id !== itemId);
+                                const newCurrentIndex = newPlaylist.findIndex(item => item.id === currentItem?.id);
+                                
+                                db.data.sharedPlaylist = newPlaylist;
+                                sharedPlayerState.currentTrackIndex = newCurrentIndex > -1 ? newCurrentIndex : 0;
+                                
+                                if (sharedPlayerState.currentPlayingItemId === itemId) {
+                                    stopPlayout();
+                                    sharedPlayerState.currentPlayingItemId = null;
+                                    sharedPlayerState.trackProgress = 0;
                                 }
+
                                 await db.write();
                                 broadcastState();
                                 break;
@@ -1154,7 +1157,7 @@ wss.on('connection', async (ws, req) => {
                                 sharedPlayerState.currentTrackIndex = 0;
                                 sharedPlayerState.trackProgress = 0;
                                 sharedPlayerState.stopAfterTrackId = null;
-                                stopPlayoutEngine();
+                                stopPlayout();
                                 break;
                             }
                              case 'saveBroadcast': {

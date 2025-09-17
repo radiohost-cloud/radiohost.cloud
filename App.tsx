@@ -98,6 +98,7 @@ const initialBuses: AudioBus[] = [
 
 const initialMixerConfig: MixerConfig = {
     mainPlayer: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
+    serverPlayer: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
     mic: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: false, gain: 1 } } },
     pfl: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
     cartwall: { gain: 1, muted: false, sends: { main: { enabled: true, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
@@ -449,6 +450,11 @@ const AppInternal: React.FC = () => {
     // --- NEW: Server Stream Status State ---
     const [serverStreamStatus, setServerStreamStatus] = useState<string>('inactive');
     const [serverStreamError, setServerStreamError] = useState<string | null>(null);
+
+    const audioStreamPlayerRef = useRef({
+        nextPlayTime: 0,
+        isPlaying: false,
+    });
 
 
     type AdvancedAudioGraph = {
@@ -863,7 +869,7 @@ const AppInternal: React.FC = () => {
             const busDestinations: AdvancedAudioGraph['busDestinations'] = {};
             const analysers: AdvancedAudioGraph['analysers'] = {};
 
-            const sourceIds: AudioSourceId[] = ['mainPlayer', 'mic', 'pfl', 'cartwall'];
+            const sourceIds: AudioSourceId[] = ['mainPlayer', 'serverPlayer', 'mic', 'pfl', 'cartwall'];
             sourceIds.forEach(id => {
                 sourceGains[id] = context.createGain();
                 analysers[id] = context.createAnalyser();
@@ -1779,6 +1785,41 @@ const AppInternal: React.FC = () => {
         };
 
         ws.onmessage = (event) => {
+            if (event.data instanceof ArrayBuffer) {
+                // Handle binary audio data from server
+                const graph = audioGraphRef.current;
+                const streamPlayer = audioStreamPlayerRef.current;
+                const audioContext = graph.context;
+                if (!audioContext || !graph.sourceGains.serverPlayer) return;
+
+                if (audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+
+                // Raw PCM s16le, 1ch, 44100Hz
+                const frameCount = event.data.byteLength / 2; // 16-bit = 2 bytes per frame
+                if (frameCount === 0) return;
+
+                const audioBuffer = audioContext.createBuffer(1, frameCount, 44100);
+                const pcmData = new Int16Array(event.data);
+                const channelData = audioBuffer.getChannelData(0);
+
+                for (let i = 0; i < frameCount; i++) {
+                    channelData[i] = pcmData[i] / 32768.0; // Normalize to [-1.0, 1.0]
+                }
+
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(graph.sourceGains.serverPlayer);
+
+                const now = audioContext.currentTime;
+                const startTime = Math.max(now, streamPlayer.nextPlayTime);
+                source.start(startTime);
+                
+                streamPlayer.nextPlayTime = startTime + audioBuffer.duration;
+                return;
+            }
+
             const data = JSON.parse(event.data);
             if (data.type === 'pong') return;
 
@@ -1791,6 +1832,10 @@ const AppInternal: React.FC = () => {
                     setBroadcasts(serverBroadcasts);
                 }
                 if (playerState) {
+                    if (playerState.isPlaying && !isPlaying) {
+                        // Reset audio stream player when server starts playing
+                        audioStreamPlayerRef.current.nextPlayTime = 0;
+                    }
                     if (playerState.currentTrackIndex !== undefined) setCurrentTrackIndex(playerState.currentTrackIndex);
                     if (playerState.isPlaying !== undefined) setIsPlaying(playerState.isPlaying);
                     if (playerState.trackProgress !== undefined) setTrackProgress(playerState.trackProgress);
@@ -1851,7 +1896,7 @@ const AppInternal: React.FC = () => {
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
             ws.close();
         };
-    }, [currentUser, sendStudioCommand, isMobile]);
+    }, [currentUser, sendStudioCommand, isMobile, isPlaying]);
     
     // Effect to clean up resources for departed presenters
     useEffect(() => {
