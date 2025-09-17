@@ -517,7 +517,7 @@ const startStreamingEngine = async () => {
     
     try {
         const command = ffmpeg()
-            .input(`tcp://127.0.0.1:${LOCAL_STREAM_PORT}?listen=1`)
+            .input(`tcp://127.0.0.1:${LOCAL_STREAM_PORT}?listen=2`)
             .inputFormat('s16le')
             .inputOptions(['-ar 44100', '-ac 2', '-re']);
         
