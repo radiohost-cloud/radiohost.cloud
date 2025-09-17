@@ -395,16 +395,25 @@ const broadcastState = () => {
 };
 
 const findTrackByArtistTitle = (node, artist, title) => {
-    for (const child of node.children) {
-        if (child.type !== 'folder' && child.artist === artist && child.title === title) {
-            return child;
+    const cleanArtist = artist?.toLowerCase().trim();
+    const cleanTitle = title?.toLowerCase().trim();
+    if (!cleanArtist || !cleanTitle) return null;
+
+    let found = null;
+    const traverse = (item) => {
+        if (found) return;
+        if (item.type !== 'folder') {
+            if (item.artist?.toLowerCase().trim() === cleanArtist && item.title?.toLowerCase().trim() === cleanTitle) {
+                found = item;
+            }
+        } else {
+            for (const child of item.children) {
+                traverse(child);
+            }
         }
-        if (child.type === 'folder') {
-            const found = findTrackByArtistTitle(child, artist, title);
-            if (found) return found;
-        }
-    }
-    return null;
+    };
+    traverse(node);
+    return found;
 };
 
 
@@ -545,11 +554,27 @@ const startPlayoutForTrack = async (trackIndex) => {
         advanceTrack(trackIndex + 1);
         return;
     }
-    console.log(`[Playout] Starting playout for track index ${trackIndex}: "${track.title}"`);
-    currentCommandTrackId = track.id; // Associate command with this track ID
+    
     const studioData = db.data.userdata[studioClientEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
-    if (streamConfig && streamConfig.isEnabled) {
+    if (!streamConfig || !streamConfig.isEnabled) {
+        console.log('[Playout] Streaming is disabled. Playout engine will run silently.');
+        // Still need to simulate playback for timing
+        currentCommandTrackId = track.id;
+        setTimeout(() => {
+             if (currentCommandTrackId === track.id) {
+                advanceTrack();
+            }
+        }, track.duration * 1000);
+        return;
+    }
+
+    console.log(`[Playout] Starting playout for track index ${trackIndex}: "${track.title}"`);
+    currentCommandTrackId = track.id;
+    serverStreamStatus = 'starting';
+    broadcastStreamStatus();
+    
+    try {
         const command = ffmpeg().input(trackPath).inputOptions(['-re']);
         command.audioCodec('libmp3lame')
             .audioBitrate(streamConfig.bitrate || 128)
@@ -594,12 +619,19 @@ const startPlayoutForTrack = async (trackIndex) => {
                     broadcastStreamStatus();
                     console.log('[Playout] Advancing to next track due to error.');
                     advanceTrack(); // Try to recover by playing next track
+                } else {
+                    console.log(`[FFMPEG] Command for '${track.title}' was intentionally terminated.`);
                 }
             }
         });
         currentFfmpegCommand = command;
         command.save(outputUrl);
         updateIcecastMetadata(track, streamConfig);
+    } catch(e) {
+        console.error('[FFMPEG] Failed to initialize command:', e);
+        serverStreamStatus = 'error';
+        serverStreamError = 'Failed to start FFmpeg process.';
+        broadcastStreamStatus();
     }
 };
 
@@ -614,12 +646,13 @@ const advanceTrack = async (jumpToIndex = -1) => {
     const studioData = db.data.userdata[studioClientEmail];
     const policy = studioData?.settings?.playoutPolicy || {};
     let nextIndex;
+
     if (jumpToIndex !== -1) {
         nextIndex = jumpToIndex;
     } else {
+        // Natural track end, check for soft markers
         const finishedTrackIndex = sharedPlayerState.currentTrackIndex;
         const finishedTrack = sharedPlaylist[finishedTrackIndex];
-        // FIX: Soft marker logic
         if (finishedTrack && !finishedTrack.markerType) {
             const startTime = playheadAnchorTime;
             const now = Date.now();
@@ -632,18 +665,23 @@ const advanceTrack = async (jumpToIndex = -1) => {
                 }
             }
             if (lastSoftMarkerIndex > -1) {
-                console.log('[Playout] Soft marker found. Jumping.');
+                console.log(`[Playout] Soft marker passed at ${new Date(sharedPlaylist[lastSoftMarkerIndex].time).toLocaleTimeString()}. Jumping from index ${finishedTrackIndex} to ${lastSoftMarkerIndex + 1}.`);
                 nextIndex = lastSoftMarkerIndex + 1;
             }
         }
         if (nextIndex === undefined) {
              nextIndex = sharedPlayerState.currentTrackIndex + 1;
         }
-        if (policy.removePlayedTracks) {
-            sharedPlaylist.splice(sharedPlayerState.currentTrackIndex, 1);
-            nextIndex = sharedPlayerState.currentTrackIndex;
+    }
+
+    if (policy.removePlayedTracks) {
+        sharedPlaylist.splice(sharedPlayerState.currentTrackIndex, 1);
+        // Adjust nextIndex if the removed item was before it
+        if (jumpToIndex === -1 && nextIndex > sharedPlayerState.currentTrackIndex) {
+            nextIndex = nextIndex -1;
         }
     }
+
     while (nextIndex < sharedPlaylist.length && sharedPlaylist[nextIndex]?.markerType) {
         nextIndex++;
     }
@@ -658,6 +696,11 @@ const advanceTrack = async (jumpToIndex = -1) => {
     } else {
         console.log('[Playout] End of playlist reached.');
         stopPlayoutEngine();
+        // If autofill is enabled, trigger it now.
+        if (policy.isAutoFillEnabled) {
+            console.log('[Playout] End of playlist, triggering autofill.');
+            await performAutofill();
+        }
     }
 };
 
@@ -832,14 +875,14 @@ const checkAndTriggerAutofill = async () => {
     const { sharedPlaylist, sharedPlayerState } = db.data;
     const { isPlaying, currentTrackIndex, trackProgress } = sharedPlayerState;
 
-    if (!isPlaying) return;
-
     const studioUser = db.data.users.find(u => u.role === 'studio');
     if (!studioUser) return;
     const studioData = db.data.userdata[studioUser.email];
     const policy = studioData?.settings?.playoutPolicy;
 
     if (!policy || !policy.isAutoFillEnabled) return;
+
+    if (!isPlaying) return;
 
     let remainingDuration = 0;
     const currentTrack = sharedPlaylist[currentTrackIndex];
@@ -1364,7 +1407,16 @@ wss.on('connection', async (ws, req) => {
                                 sharedPlayerState.currentTrackIndex = 0;
                                 sharedPlayerState.trackProgress = 0;
                                 sharedPlayerState.stopAfterTrackId = null;
-                                stopPlayoutEngine();
+                                stopPlayoutEngine(false); // Stop engine, don't broadcast yet
+                                await db.write();
+
+                                const studioData = db.data.userdata[studioClientEmail];
+                                if (studioData?.settings?.isAutoModeEnabled) {
+                                    console.log('[Auto-Fill] Triggering autofill after playlist clear.');
+                                    await performAutofill();
+                                } else {
+                                    broadcastState(); // If not auto-filling, broadcast the empty state
+                                }
                                 break;
                             }
                              case 'saveBroadcast': {

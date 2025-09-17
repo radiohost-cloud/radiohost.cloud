@@ -880,13 +880,7 @@ const AppInternal: React.FC = () => {
                 busDestinations[bus.id] = context.createMediaStreamDestination();
                 analysers[bus.id] = context.createAnalyser();
                 analysers[bus.id]!.fftSize = 256;
-
-                if (bus.id === 'main') {
-                    // Main bus is now virtual, it has no destination.
-                } else {
-                    analysers[bus.id]!.connect(busGains[bus.id]!);
-                }
-                
+                analysers[bus.id]!.connect(busGains[bus.id]!);
                 busGains[bus.id]!.connect(busDestinations[bus.id]!);
             });
 
@@ -894,7 +888,6 @@ const AppInternal: React.FC = () => {
                 audioBuses.forEach(bus => {
                     const routingGain = context.createGain();
                     routingGains[`${sourceId}_to_${bus.id}`] = routingGain;
-                    // FIX: Route the actual audio signal from the source gain, not the analyser.
                     sourceGains[sourceId]!.connect(routingGain);
 
                     const busesWithDucking: AudioBusId[] = ['main', 'monitor'];
@@ -1032,124 +1025,116 @@ const AppInternal: React.FC = () => {
 
     const timeline = useMemo(() => {
         const timelineMap = new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>();
-        if (playlist.length === 0) return timelineMap;
-
-        let playhead = Date.now();
-        let anchorIndex = -1;
-
-        if (isPlaying && currentPlayingItemId) {
-            const idx = playlist.findIndex(p => p.id === currentPlayingItemId);
-            if (idx > -1) {
-                playhead = Date.now() - trackProgress * 1000;
-                anchorIndex = idx;
-            }
-        } else if (currentTrackIndex >= 0 && currentTrackIndex < playlist.length) {
-            anchorIndex = currentTrackIndex;
+        if (playlist.length === 0) {
+            return timelineMap;
         }
-
-        const unprocessedItems = new Map(playlist.map((item, index) => [index, item]));
-        let loopIndex = 0;
-
-        while (unprocessedItems.size > 0 && loopIndex < playlist.length) {
-            if (!unprocessedItems.has(loopIndex)) {
-                loopIndex++;
+    
+        let playhead = Date.now();
+    
+        // Main loop to process items
+        for (let i = 0; i < playlist.length; i++) {
+            const item = playlist[i];
+    
+            if (timelineMap.has(item.id)) { // Already processed (e.g., skipped by a soft marker)
                 continue;
             }
-
-            const item = unprocessedItems.get(loopIndex)!;
-            unprocessedItems.delete(loopIndex);
-
+    
             if ('markerType' in item) {
-                playhead = Math.max(playhead, item.time);
-            } else {
-                const track = item;
-                const startTime = playhead;
-                let naturalEndTime = startTime + track.duration * 1000;
-                let finalEndTime = naturalEndTime;
-                let shortenedBy = 0;
-                let isSkipped = false;
-
-                // Check for hard marker interruption
-                let nextHardMarkerIndex = -1;
-                for (let j = loopIndex + 1; j < playlist.length; j++) {
-                    const nextItem = playlist[j];
-                    if ('markerType' in nextItem && nextItem.markerType === TimeMarkerType.HARD) {
-                        nextHardMarkerIndex = j;
-                        break;
-                    }
+                if (item.markerType === TimeMarkerType.HARD) {
+                    playhead = Math.max(playhead, item.time);
                 }
-
-                if (nextHardMarkerIndex > -1) {
-                    const marker = playlist[nextHardMarkerIndex] as TimeMarker;
-                    if (marker.time < naturalEndTime) {
-                        finalEndTime = marker.time;
+                // Soft markers are handled by the track that precedes them
+                continue;
+            }
+    
+            const track = item;
+            const startTime = playhead;
+            const naturalEndTime = startTime + track.duration * 1000;
+            let finalEndTime = naturalEndTime;
+            let shortenedBy = 0;
+            let isSkipped = false;
+    
+            // Check for hard marker interruption
+            for (let j = i + 1; j < playlist.length; j++) {
+                const nextItem = playlist[j];
+                if ('markerType' in nextItem && nextItem.markerType === TimeMarkerType.HARD) {
+                    if (nextItem.time < finalEndTime) {
+                        finalEndTime = nextItem.time;
                         shortenedBy = (naturalEndTime - finalEndTime) / 1000;
                     }
-                }
-
-                if (finalEndTime <= startTime) {
-                    isSkipped = true;
-                } else {
-                    // Check for soft marker jump
-                    let lastSoftMarkerIndex = -1;
-                    for (let j = loopIndex + 1; j < playlist.length; j++) {
-                        const nextItem = playlist[j];
-                        if ('markerType' in nextItem && nextItem.markerType === TimeMarkerType.SOFT && nextItem.time < finalEndTime) {
-                            lastSoftMarkerIndex = j;
-                        }
-                    }
-
-                    if (lastSoftMarkerIndex > -1) {
-                        // Mark items between this track and the track after the marker as skipped
-                        for (let j = loopIndex + 1; j < lastSoftMarkerIndex + 1; j++) {
-                            const itemToSkip = playlist[j];
-                            if (!('markerType' in itemToSkip)) {
-                                timelineMap.set(itemToSkip.id, {
-                                    startTime: new Date(playhead),
-                                    endTime: new Date(playhead),
-                                    duration: 0,
-                                    isSkipped: true,
-                                    shortenedBy: itemToSkip.duration
-                                });
-                            }
-                            unprocessedItems.delete(j);
-                        }
-                        loopIndex = lastSoftMarkerIndex; // The next loop will be the item after the marker
-                    }
-                }
-
-                timelineMap.set(track.id, {
-                    startTime: new Date(startTime),
-                    endTime: new Date(finalEndTime),
-                    duration: isSkipped ? 0 : (finalEndTime - startTime) / 1000,
-                    isSkipped: isSkipped,
-                    shortenedBy: shortenedBy > 0.1 ? shortenedBy : 0,
-                });
-
-                if (!isSkipped) {
-                    playhead = finalEndTime;
+                    break; // Only the next hard marker matters
                 }
             }
-            loopIndex++;
+    
+            if (finalEndTime <= startTime) {
+                isSkipped = true;
+            }
+    
+            timelineMap.set(track.id, {
+                startTime: new Date(startTime),
+                endTime: new Date(finalEndTime),
+                duration: isSkipped ? 0 : (finalEndTime - startTime) / 1000,
+                isSkipped: isSkipped,
+                shortenedBy: shortenedBy > 0.1 ? shortenedBy : 0,
+            });
+    
+            if (!isSkipped) {
+                playhead = finalEndTime;
+    
+                // Now check for soft markers that occurred during this track's playback
+                let lastSoftMarkerIndex = -1;
+                for (let j = i + 1; j < playlist.length; j++) {
+                    const nextItem = playlist[j];
+                    if ('markerType' in nextItem && nextItem.markerType === TimeMarkerType.SOFT && nextItem.time >= startTime && nextItem.time < finalEndTime) {
+                        lastSoftMarkerIndex = j;
+                    }
+                }
+    
+                if (lastSoftMarkerIndex > -1) {
+                    // Mark items between this track and the marker as skipped
+                    for (let k = i + 1; k <= lastSoftMarkerIndex; k++) {
+                        const itemToSkip = playlist[k];
+                        if (!('markerType' in itemToSkip) && !timelineMap.has(itemToSkip.id)) {
+                            timelineMap.set(itemToSkip.id, {
+                                startTime: new Date(finalEndTime), // They are skipped at the end of the current track
+                                endTime: new Date(finalEndTime),
+                                duration: 0,
+                                isSkipped: true,
+                                shortenedBy: itemToSkip.duration,
+                            });
+                        }
+                    }
+                    i = lastSoftMarkerIndex; // Jump the main loop to the marker's index
+                }
+            }
         }
-
-        // Adjust entire timeline based on anchor
+    
+        // Anchor adjustment
+        let anchorIndex = -1;
+        if (isPlaying && currentPlayingItemId) {
+            anchorIndex = playlist.findIndex(p => p.id === currentPlayingItemId);
+        } else if (currentTrackIndex >= 0 && currentTrackIndex < playlist.length) {
+            anchorIndex = playlist.findIndex((item, index) => !('markerType' in item) && index >= currentTrackIndex);
+        }
+    
         if (anchorIndex > -1) {
             const anchorItem = playlist[anchorIndex];
             const anchorData = timelineMap.get(anchorItem.id);
             if (anchorData) {
-                const currentStartTime = isPlaying ? Date.now() - trackProgress * 1000 : Date.now();
-                const offset = currentStartTime - anchorData.startTime.getTime();
-                for (const [id, data] of timelineMap.entries()) {
-                    timelineMap.set(id, {
-                        ...data,
-                        startTime: new Date(data.startTime.getTime() + offset),
-                        endTime: new Date(data.endTime.getTime() + offset),
-                    });
+                const expectedStartTime = isPlaying ? Date.now() - trackProgress * 1000 : Date.now();
+                const offset = expectedStartTime - anchorData.startTime.getTime();
+                if (Math.abs(offset) > 100) { // Only adjust if there's a drift
+                    for (const [id, data] of timelineMap.entries()) {
+                        timelineMap.set(id, {
+                            ...data,
+                            startTime: new Date(data.startTime.getTime() + offset),
+                            endTime: new Date(data.endTime.getTime() + offset),
+                        });
+                    }
                 }
             }
         }
-        
+    
         return timelineMap;
     }, [playlist, currentPlayingItemId, trackProgress, isPlaying, currentTrackIndex]);
     timelineRef.current = timeline;
@@ -2201,7 +2186,7 @@ const AppInternal: React.FC = () => {
             
             <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
             <audio ref={busMonitorAudioRef} autoPlay></audio>
-            <audio ref={mainPlayerAudioRef} crossOrigin="anonymous"></audio>
+            <audio ref={mainPlayerAudioRef} crossOrigin="anonymous" muted></audio>
         </div>
     );
 };
