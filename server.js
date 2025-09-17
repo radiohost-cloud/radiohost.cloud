@@ -753,8 +753,6 @@ const getAllTracksFromNode = (node) => {
 };
 
 const performAutofill = async () => {
-    await db.read();
-
     const studioUser = db.data.users.find(u => u.role === 'studio');
     if (!studioUser) return;
     const studioData = db.data.userdata[studioUser.email];
@@ -842,7 +840,6 @@ const performAutofill = async () => {
 };
 
 const checkAndTriggerAutofill = async () => {
-    await db.read();
     const { sharedPlaylist, sharedPlayerState } = db.data;
     const { isPlaying, currentTrackIndex, trackProgress } = sharedPlayerState;
 
@@ -1019,8 +1016,6 @@ wss.on('connection', async (ws, req) => {
                     if (studioClientEmail && studioClientEmail === email) {
                         const { command, payload } = data.payload;
                         console.log(`[WebSocket] Processing studio command: ${command}`);
-                
-                        await db.read();
                 
                         const { sharedPlaylist, sharedPlayerState } = db.data;
                 
