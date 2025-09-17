@@ -1032,96 +1032,123 @@ const AppInternal: React.FC = () => {
     const timeline = useMemo(() => {
         const timelineMap = new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>();
         if (playlist.length === 0) return timelineMap;
-    
-        const softSkippedIds = new Set<string>();
-        const now = Date.now();
-        const nowPlayingIndex = isPlaying ? currentTrackIndex : -1;
-    
-        let lastPassedSoftMarkerIndex = -1;
-        playlist.forEach((item, index) => {
-            if ('markerType' in item && item.markerType === TimeMarkerType.SOFT && item.time < now) {
-                lastPassedSoftMarkerIndex = index;
+
+        let playhead = Date.now();
+        let anchorIndex = -1;
+
+        if (isPlaying && currentPlayingItemId) {
+            const idx = playlist.findIndex(p => p.id === currentPlayingItemId);
+            if (idx > -1) {
+                playhead = Date.now() - trackProgress * 1000;
+                anchorIndex = idx;
             }
-        });
-    
-        if (nowPlayingIndex > -1 && lastPassedSoftMarkerIndex > nowPlayingIndex) {
-            for (let i = nowPlayingIndex + 1; i < lastPassedSoftMarkerIndex; i++) {
-                const item = playlist[i];
-                if (!('markerType' in item)) {
-                    softSkippedIds.add(item.id);
-                }
-            }
+        } else if (currentTrackIndex >= 0 && currentTrackIndex < playlist.length) {
+            anchorIndex = currentTrackIndex;
         }
-        
-        const provisionalTimelineMap = new Map<string, { startTime: number, endTime: number, duration: number, isSkipped: boolean, shortenedBy: number }>();
-        let provisionalPlayhead = now;
-        
-        for (let i = 0; i < playlist.length; i++) {
-            const item = playlist[i];
-            
+
+        const unprocessedItems = new Map(playlist.map((item, index) => [index, item]));
+        let loopIndex = 0;
+
+        while (unprocessedItems.size > 0 && loopIndex < playlist.length) {
+            if (!unprocessedItems.has(loopIndex)) {
+                loopIndex++;
+                continue;
+            }
+
+            const item = unprocessedItems.get(loopIndex)!;
+            unprocessedItems.delete(loopIndex);
+
             if ('markerType' in item) {
-                provisionalPlayhead = Math.max(provisionalPlayhead, item.time);
+                playhead = Math.max(playhead, item.time);
             } else {
                 const track = item;
-                const startTime = provisionalPlayhead;
-                const naturalEndTime = startTime + track.duration * 1000;
+                const startTime = playhead;
+                let naturalEndTime = startTime + track.duration * 1000;
                 let finalEndTime = naturalEndTime;
                 let shortenedBy = 0;
-                
-                const nextHardMarkerIndex = playlist.findIndex((nextItem, index) => 
-                    index > i && 'markerType' in nextItem && nextItem.markerType === TimeMarkerType.HARD
-                );
+                let isSkipped = false;
+
+                // Check for hard marker interruption
+                let nextHardMarkerIndex = -1;
+                for (let j = loopIndex + 1; j < playlist.length; j++) {
+                    const nextItem = playlist[j];
+                    if ('markerType' in nextItem && nextItem.markerType === TimeMarkerType.HARD) {
+                        nextHardMarkerIndex = j;
+                        break;
+                    }
+                }
+
                 if (nextHardMarkerIndex > -1) {
-                    const nextMarker = playlist[nextHardMarkerIndex] as TimeMarker;
-                    if (nextMarker.time < naturalEndTime) {
-                        finalEndTime = nextMarker.time;
+                    const marker = playlist[nextHardMarkerIndex] as TimeMarker;
+                    if (marker.time < naturalEndTime) {
+                        finalEndTime = marker.time;
                         shortenedBy = (naturalEndTime - finalEndTime) / 1000;
                     }
                 }
-    
-                const isSkippedByTiming = startTime >= finalEndTime;
-                const isSkippedBySoftMarker = softSkippedIds.has(track.id);
-                const isSkipped = isSkippedByTiming || isSkippedBySoftMarker;
-    
-                provisionalTimelineMap.set(track.id, {
-                    startTime: startTime,
-                    endTime: finalEndTime,
+
+                if (finalEndTime <= startTime) {
+                    isSkipped = true;
+                } else {
+                    // Check for soft marker jump
+                    let lastSoftMarkerIndex = -1;
+                    for (let j = loopIndex + 1; j < playlist.length; j++) {
+                        const nextItem = playlist[j];
+                        if ('markerType' in nextItem && nextItem.markerType === TimeMarkerType.SOFT && nextItem.time < finalEndTime) {
+                            lastSoftMarkerIndex = j;
+                        }
+                    }
+
+                    if (lastSoftMarkerIndex > -1) {
+                        // Mark items between this track and the track after the marker as skipped
+                        for (let j = loopIndex + 1; j < lastSoftMarkerIndex + 1; j++) {
+                            const itemToSkip = playlist[j];
+                            if (!('markerType' in itemToSkip)) {
+                                timelineMap.set(itemToSkip.id, {
+                                    startTime: new Date(playhead),
+                                    endTime: new Date(playhead),
+                                    duration: 0,
+                                    isSkipped: true,
+                                    shortenedBy: itemToSkip.duration
+                                });
+                            }
+                            unprocessedItems.delete(j);
+                        }
+                        loopIndex = lastSoftMarkerIndex; // The next loop will be the item after the marker
+                    }
+                }
+
+                timelineMap.set(track.id, {
+                    startTime: new Date(startTime),
+                    endTime: new Date(finalEndTime),
                     duration: isSkipped ? 0 : (finalEndTime - startTime) / 1000,
                     isSkipped: isSkipped,
                     shortenedBy: shortenedBy > 0.1 ? shortenedBy : 0,
                 });
-                
+
                 if (!isSkipped) {
-                    provisionalPlayhead = finalEndTime;
+                    playhead = finalEndTime;
                 }
             }
+            loopIndex++;
         }
-    
-        let offset = 0;
-        if (currentPlayingItemId && isPlaying) {
-            const provisionalData = provisionalTimelineMap.get(currentPlayingItemId);
-            if (provisionalData) {
-                const actualStartTime = now - (trackProgress * 1000);
-                offset = actualStartTime - provisionalData.startTime;
-            }
-        } else if (!isPlaying && currentTrackIndex >= 0 && currentTrackIndex < playlist.length) {
-            const anchorItem = playlist[currentTrackIndex];
-            if (anchorItem && !('markerType' in anchorItem)) {
-                const provisionalData = provisionalTimelineMap.get(anchorItem.id);
-                if (provisionalData) {
-                    offset = now - provisionalData.startTime;
+
+        // Adjust entire timeline based on anchor
+        if (anchorIndex > -1) {
+            const anchorItem = playlist[anchorIndex];
+            const anchorData = timelineMap.get(anchorItem.id);
+            if (anchorData) {
+                const currentStartTime = isPlaying ? Date.now() - trackProgress * 1000 : Date.now();
+                const offset = currentStartTime - anchorData.startTime.getTime();
+                for (const [id, data] of timelineMap.entries()) {
+                    timelineMap.set(id, {
+                        ...data,
+                        startTime: new Date(data.startTime.getTime() + offset),
+                        endTime: new Date(data.endTime.getTime() + offset),
+                    });
                 }
             }
         }
         
-        for (const [id, data] of provisionalTimelineMap.entries()) {
-            timelineMap.set(id, {
-                ...data,
-                startTime: new Date(data.startTime + offset),
-                endTime: new Date(data.endTime + offset),
-            });
-        }
-    
         return timelineMap;
     }, [playlist, currentPlayingItemId, trackProgress, isPlaying, currentTrackIndex]);
     timelineRef.current = timeline;
@@ -1394,11 +1421,16 @@ const AppInternal: React.FC = () => {
         const userNickname = currentUserRef.current?.nickname || 'User';
         const vtFolderName = playoutPolicy.playoutMode === 'studio' ? 'Studio' : userNickname;
         const folderPathParts = ['Voicetracks', vtFolderName];
+        
+        const voiceTrackWithArtist: Track = {
+            ...voiceTrack,
+            artist: playoutPolicy.playoutMode === 'studio' ? 'Studio' : userNickname,
+        };
     
-        const relativePath = `${folderPathParts.join('/')}/${voiceTrack.title}.webm`;
+        const relativePath = `${folderPathParts.join('/')}/${voiceTrackWithArtist.title}.webm`;
         try {
-            const vtFile = new File([blob], `${voiceTrack.title}.webm`, { type: 'audio/webm' });
-            const savedTrack = await dataService.addTrack(voiceTrack, vtFile, undefined, relativePath);
+            const vtFile = new File([blob], `${voiceTrackWithArtist.title}.webm`, { type: 'audio/webm' });
+            const savedTrack = await dataService.addTrack(voiceTrackWithArtist, vtFile, undefined, relativePath);
             const trackWithMix = { ...savedTrack, vtMix };
 
             if (playoutPolicy.playoutMode === 'presenter') {
@@ -1747,8 +1779,14 @@ const AppInternal: React.FC = () => {
         const vtFolderName = playoutPolicy.playoutMode === 'studio' ? 'Studio' : userNickname;
         const folderPathParts = ['Voicetracks', vtFolderName];
         const relativePath = `${folderPathParts.join('/')}/${voiceTrack.title}.webm`;
-        const vtFile = new File([blob], `${voiceTrack.title}.webm`, { type: 'audio/webm' });
-        return dataService.addTrack(voiceTrack, vtFile, undefined, relativePath);
+        
+        const voiceTrackWithArtist: Track = {
+            ...voiceTrack,
+            artist: playoutPolicy.playoutMode === 'studio' ? 'Studio' : userNickname,
+        };
+
+        const vtFile = new File([blob], `${voiceTrackWithArtist.title}.webm`, { type: 'audio/webm' });
+        return dataService.addTrack(voiceTrackWithArtist, vtFile, undefined, relativePath);
     }, [playoutPolicy.playoutMode]);
 
     // --- NEW: WebSocket Logic for HOST mode ---
