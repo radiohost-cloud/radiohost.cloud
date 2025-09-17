@@ -957,6 +957,128 @@ const sendInitialPublicState = async (ws) => {
     }
 };
 
+// --- NEW SCHEDULER ENGINE ---
+let schedulerInterval = null;
+const SCHEDULER_CHECK_RATE = 10000; // Check every 10 seconds
+
+const loadBroadcastIntoPlaylist = async (broadcast) => {
+    console.log(`[Scheduler] Loading broadcast "${broadcast.title}" into playlist.`);
+    
+    const newPlaylistItems = broadcast.playlist.map(item => {
+        if (item.type === 'marker') {
+            return { ...item, id: `b-marker-${Date.now()}-${Math.random().toString(36).substring(2, 9)}` };
+        }
+        return {
+            ...item,
+            id: `bpli-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            originalId: item.originalId || item.id,
+            addedBy: 'broadcast'
+        };
+    });
+
+    db.data.sharedPlaylist.unshift(...newPlaylistItems);
+    
+    const studioData = db.data.userdata[studioClientEmail];
+    const isAutoMode = studioData?.settings?.isAutoModeEnabled;
+    if (isAutoMode && !db.data.sharedPlayerState.isPlaying && db.data.sharedPlaylist.length > 0) {
+        console.log('[Scheduler] Starting playout for newly loaded broadcast.');
+        await startPlayoutEngine(0);
+    } else {
+        await db.write();
+        broadcastState();
+    }
+};
+
+const getStartOfWeek = (date) => {
+    const d = new Date(date);
+    const day = d.getDay();
+    const diff = d.getDate() - day + (day === 0 ? -6 : 1); // Adjust when day is Sunday
+    d.setHours(0, 0, 0, 0);
+    return new Date(d.setDate(diff));
+};
+
+const getNextOccurrence = (broadcast) => {
+    const { startTime, repeatSettings, lastLoaded = 0 } = broadcast;
+
+    if (!repeatSettings || repeatSettings.type === 'none') {
+        return startTime > lastLoaded ? new Date(startTime) : null;
+    }
+
+    const { type, interval = 1, days = [], endDate } = repeatSettings;
+    const endDateObj = endDate ? new Date(endDate) : null;
+
+    let candidate = new Date(lastLoaded > 0 ? lastLoaded : startTime);
+    if (lastLoaded > 0) {
+        candidate.setMilliseconds(candidate.getMilliseconds() + 1000); // Start search just after last loaded time
+    }
+    candidate.setHours(new Date(startTime).getHours(), new Date(startTime).getMinutes(), 0, 0);
+    
+    for (let i = 0; i < 366 * 2; i++) { // Safety break: search max 2 years ahead
+        if (endDateObj && candidate > endDateObj) return null;
+
+        if (candidate.getTime() > lastLoaded) {
+            let isValid = false;
+            switch(type) {
+                case 'daily': {
+                    const dayDiff = Math.round((candidate.getTime() - startTime) / (1000 * 60 * 60 * 24));
+                    if (dayDiff >= 0 && dayDiff % interval === 0) isValid = true;
+                    break;
+                }
+                case 'weekly': {
+                    const startWeekDate = getStartOfWeek(startTime);
+                    const candidateWeekDate = getStartOfWeek(candidate);
+                    const weekDiff = Math.round((candidateWeekDate.getTime() - startWeekDate.getTime()) / (7 * 24 * 60 * 60 * 1000));
+                    if (days.includes(candidate.getDay()) && weekDiff >= 0 && weekDiff % interval === 0) isValid = true;
+                    break;
+                }
+                case 'monthly': {
+                    const monthDiff = (candidate.getFullYear() - new Date(startTime).getFullYear()) * 12 + (candidate.getMonth() - new Date(startTime).getMonth());
+                    if (candidate.getDate() === new Date(startTime).getDate() && monthDiff >= 0 && monthDiff % interval === 0) isValid = true;
+                    break;
+                }
+            }
+
+            if (isValid) return candidate;
+        }
+        
+        candidate.setDate(candidate.getDate() + 1);
+    }
+
+    return null; // Nothing found within search limit
+};
+
+const checkScheduledBroadcasts = async () => {
+    if (!studioClientEmail) return;
+
+    const now = Date.now();
+    const studioData = db.data.userdata[studioClientEmail];
+    const broadcasts = studioData?.broadcasts || [];
+    let stateChanged = false;
+
+    for (const broadcast of broadcasts) {
+        const nextOccurrence = getNextOccurrence(broadcast);
+        
+        if (nextOccurrence) {
+            const nextTime = nextOccurrence.getTime();
+            if (nextTime <= now && nextTime > (now - SCHEDULER_CHECK_RATE) ) {
+                await loadBroadcastIntoPlaylist(broadcast);
+                broadcast.lastLoaded = nextTime;
+                stateChanged = true;
+            }
+        }
+    }
+    if (stateChanged) {
+        await db.write();
+    }
+};
+
+const setupScheduler = () => {
+    if (schedulerInterval) clearInterval(schedulerInterval);
+    console.log('[Scheduler] Setting up broadcast check interval.');
+    schedulerInterval = setInterval(checkScheduledBroadcasts, SCHEDULER_CHECK_RATE);
+};
+
+
 wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const email = url.searchParams.get('email');
@@ -1366,6 +1488,15 @@ wss.on('connection', async (ws, req) => {
                                     studioData.broadcasts = studioData.broadcasts.filter(b => b.id !== broadcastId);
                                     await db.write();
                                     broadcastState();
+                                }
+                                break;
+                            }
+                             case 'loadBroadcast': {
+                                const { broadcastId } = payload;
+                                const studioData = db.data.userdata[studioClientEmail];
+                                const broadcast = studioData?.broadcasts?.find(b => b.id === broadcastId);
+                                if (broadcast) {
+                                    await loadBroadcastIntoPlaylist(broadcast);
                                 }
                                 break;
                             }
@@ -1835,6 +1966,7 @@ app.post('/api/userdata/:email', async (req, res) => {
 
     setupAutoBackup();
     setupAutoMode();
+    setupScheduler(); // Re-initialize scheduler on settings change
 
     const newConfig = req.body?.settings?.playoutPolicy?.streamingConfig;
     if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
@@ -2027,9 +2159,10 @@ if (fs.existsSync(distPath)) {
         await performAutofill();
     }
 
-    // Step 2: Set up the recurring checks for Auto-Fill and other automations
+    // Step 2: Set up the recurring checks
     setupAutoBackup();
     setupAutoMode();
+    setupScheduler();
     
     // Step 3: Start playback if conditions are met
     if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length > 0 && !db.data.sharedPlayerState.isPlaying) {
