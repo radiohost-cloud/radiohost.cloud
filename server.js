@@ -395,15 +395,17 @@ const broadcastState = () => {
 };
 
 const findTrackByArtistTitle = (node, artist, title) => {
-    const cleanArtist = artist?.toLowerCase().trim();
-    const cleanTitle = title?.toLowerCase().trim();
+    const normalize = (str) => (str || '').toLowerCase().trim().replace(/\s+/g, ' ');
+    const cleanArtist = normalize(artist);
+    const cleanTitle = normalize(title);
+
     if (!cleanArtist || !cleanTitle) return null;
 
     let found = null;
     const traverse = (item) => {
         if (found) return;
         if (item.type !== 'folder') {
-            if (item.artist?.toLowerCase().trim() === cleanArtist && item.title?.toLowerCase().trim() === cleanTitle) {
+            if (normalize(item.artist) === cleanArtist && normalize(item.title) === cleanTitle) {
                 found = item;
             }
         } else {
@@ -1414,9 +1416,8 @@ wss.on('connection', async (ws, req) => {
                                 if (studioData?.settings?.isAutoModeEnabled) {
                                     console.log('[Auto-Fill] Triggering autofill after playlist clear.');
                                     await performAutofill();
-                                } else {
-                                    broadcastState(); // If not auto-filling, broadcast the empty state
                                 }
+                                broadcastState();
                                 break;
                             }
                              case 'saveBroadcast': {

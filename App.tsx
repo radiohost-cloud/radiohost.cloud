@@ -880,17 +880,21 @@ const AppInternal: React.FC = () => {
                 busDestinations[bus.id] = context.createMediaStreamDestination();
                 analysers[bus.id] = context.createAnalyser();
                 analysers[bus.id]!.fftSize = 256;
+                
+                // Chain: Analyser -> BusGain -> Destination
                 analysers[bus.id]!.connect(busGains[bus.id]!);
                 busGains[bus.id]!.connect(busDestinations[bus.id]!);
             });
-
+            
             sourceIds.forEach(sourceId => {
                 audioBuses.forEach(bus => {
                     const routingGain = context.createGain();
                     routingGains[`${sourceId}_to_${bus.id}`] = routingGain;
+                    // Connect source gain to its bus-specific routing gain
                     sourceGains[sourceId]!.connect(routingGain);
-
+            
                     const busesWithDucking: AudioBusId[] = ['main', 'monitor'];
+                    // Ducking happens *after* routing, before the bus analyser
                     if ((sourceId === 'mainPlayer' || sourceId === 'cartwall') && busesWithDucking.includes(bus.id)) {
                         const duckingGain = context.createGain();
                         duckingGains[`${sourceId}_to_${bus.id}`] = duckingGain;
@@ -971,9 +975,12 @@ const AppInternal: React.FC = () => {
     }, [isPlaying, currentPlayingItemId, trackProgress]);
 
     const handleTogglePlay = useCallback(async () => {
+        if (!audioGraphRef.current.isInitialized) {
+            await initializeAudioGraph();
+        }
         if (playlistRef.current.length === 0 || playoutPolicy.playoutMode === 'presenter') return;
         sendStudioCommand('togglePlay');
-    }, [playoutPolicy.playoutMode, sendStudioCommand]);
+    }, [playoutPolicy.playoutMode, sendStudioCommand, initializeAudioGraph]);
     
     const handlePlayTrack = useCallback(async (itemId: string) => {
         if (playoutPolicy.playoutMode === 'presenter') return;
@@ -986,7 +993,7 @@ const AppInternal: React.FC = () => {
     }, []);
 
     useEffect(() => {
-        if (activeRightColumnTab === 'mixer') {
+        if (activeRightColumnTab === 'mixer' && !audioGraphRef.current.isInitialized) {
             initializeAudioGraph();
         }
     }, [activeRightColumnTab, initializeAudioGraph]);
