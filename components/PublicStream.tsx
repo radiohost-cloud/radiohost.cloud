@@ -116,6 +116,11 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                             <input type="text" id="publicStreamUrl" value={streamingConfig.publicStreamUrl} onChange={e => handleConfigChange('publicStreamUrl', e.target.value)} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm" placeholder="http://your-icecast:8000/stream"/>
                             <p className="text-xs text-neutral-500 mt-1">The audio source for your listeners.</p>
                         </div>
+                        <div>
+                            <label htmlFor="icecastStatusUrl" className="block text-sm font-medium mb-1">Icecast Status JSON URL</label>
+                            <input type="text" id="icecastStatusUrl" value={streamingConfig.icecastStatusUrl || ''} onChange={e => handleConfigChange('icecastStatusUrl', e.target.value)} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm" placeholder="e.g., http://your-icecast:8000/status-json.xsl"/>
+                            <p className="text-xs text-neutral-500 mt-1">Required for syncing metadata with the audio stream. Your Icecast server may need CORS configured.</p>
+                        </div>
                          <div>
                             <label htmlFor="share-url" className="block text-sm font-medium mb-1">Shareable Link</label>
                             <div className="flex gap-2">

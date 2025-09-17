@@ -89,6 +89,7 @@ export interface StreamingConfig {
   metadataHeader?: string;
   publicPlayerEnabled: boolean;
   publicStreamUrl: string;
+  icecastStatusUrl?: string;
 }
 
 export interface PlayoutPolicy {

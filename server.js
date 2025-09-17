@@ -395,48 +395,43 @@ const broadcastState = () => {
   });
 };
 
-const getCurrentPublicMetadata = async () => {
-    const settings = await getStationSettings();
-    const { sharedPlayerState, sharedPlaylist } = db.data;
+const findTrackByArtistTitle = (node, artist, title) => {
+    for (const child of node.children) {
+        if (child.type !== 'folder' && child.artist === artist && child.title === title) {
+            return child;
+        }
+        if (child.type === 'folder') {
+            const found = findTrackByArtistTitle(child, artist, title);
+            if (found) return found;
+        }
+    }
+    return null;
+};
 
-    let nowPlaying = {
-        title: 'Silence',
-        artist: 'RadioHost.cloud',
-        artworkUrl: null,
+
+const broadcastPublicMetadata = async (track) => {
+    const settings = await getStationSettings();
+    let artworkUrl = null;
+
+    if (track) {
+        if (track.remoteArtworkUrl) {
+            artworkUrl = track.remoteArtworkUrl;
+        } else if (track.hasEmbeddedArtwork) {
+            const artworkPath = (track.id).replace(/\.[^/.]+$/, ".jpg");
+            artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
+        }
+    }
+
+    const nowPlaying = {
+        title: track ? track.title : 'Silence',
+        artist: track ? track.artist : 'RadioHost.cloud',
+        artworkUrl: artworkUrl,
         logoSrc: settings.logoSrc,
     };
 
-    if (sharedPlayerState.isPlaying && sharedPlayerState.currentPlayingItemId) {
-        const currentItem = sharedPlaylist.find(item => item.id === sharedPlayerState.currentPlayingItemId);
-        if (currentItem && currentItem.type !== 'marker') {
-            const fullTrackInfo = findTrackInServerTree(libraryState, currentItem.originalId || currentItem.id);
-            let artworkUrl = null;
-            if (fullTrackInfo) {
-                if (fullTrackInfo.remoteArtworkUrl) {
-                    artworkUrl = fullTrackInfo.remoteArtworkUrl;
-                } else if (fullTrackInfo.hasEmbeddedArtwork) {
-                    const artworkPath = (fullTrackInfo.id).replace(/\.[^/.]+$/, ".jpg");
-                    artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
-                }
-            }
-            nowPlaying = {
-                title: currentItem.title,
-                artist: currentItem.artist,
-                artworkUrl: artworkUrl,
-                logoSrc: settings.logoSrc,
-            };
-        }
-    }
-    return nowPlaying;
-};
-
-const broadcastPublicMetadata = async () => {
-    const nowPlaying = await getCurrentPublicMetadata();
     const message = JSON.stringify({
         type: 'metadataUpdate',
-        payload: {
-            nowPlaying: nowPlaying
-        }
+        payload: { nowPlaying }
     });
 
     browserPlayerClients.forEach(ws => {
@@ -500,7 +495,6 @@ const stopPlayoutEngine = (broadcast = true) => {
     db.write();
     if (broadcast) {
         broadcastState();
-        broadcastPublicMetadata();
         serverStreamStatus = 'inactive';
         broadcastStreamStatus();
     }
@@ -659,7 +653,6 @@ const advanceTrack = async (jumpToIndex = -1) => {
         playheadAnchorTime = Date.now();
         await db.write();
         broadcastState();
-        broadcastPublicMetadata();
         startPlayoutForTrack(nextIndex);
     } else {
         console.log('[Playout] End of playlist reached.');
@@ -708,7 +701,6 @@ const startPlayoutEngine = async (startIndex) => {
     playoutInterval = setInterval(playoutTick, PLAYBACK_TICK_RATE);
     await db.write();
     broadcastState();
-    broadcastPublicMetadata();
     console.log(`[Playout Engine] Started from index ${startIndex}.`);
 };
 
@@ -883,6 +875,55 @@ const setupAutoMode = async () => {
     }
 };
 
+let icecastPollInterval = null;
+let lastIcecastTitle = '';
+
+const pollIcecastStatus = async () => {
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    if (!studioUser) return;
+    const config = db.data.userdata[studioUser.email]?.settings?.playoutPolicy?.streamingConfig;
+
+    if (!config || !config.publicPlayerEnabled || !config.icecastStatusUrl) {
+        return;
+    }
+
+    try {
+        const response = await fetch(config.icecastStatusUrl);
+        const data = await response.json();
+        const source = data?.icestats?.source;
+        const currentTitle = source?.title || 'Silence';
+        
+        if (currentTitle !== lastIcecastTitle) {
+            console.log(`[Icecast Poll] Detected title change: "${currentTitle}"`);
+            lastIcecastTitle = currentTitle;
+
+            const [artist, title] = currentTitle.split(' - ').map(s => s.trim());
+            const track = findTrackByArtistTitle(libraryState, artist, title);
+            
+            broadcastPublicMetadata(track);
+        }
+    } catch (error) {
+        // Don't log every time, can be spammy if URL is wrong
+        // console.error('[Icecast Poll] Error fetching status:', error.message);
+    }
+};
+
+const setupIcecastPolling = () => {
+    if (icecastPollInterval) clearInterval(icecastPollInterval);
+    icecastPollInterval = null;
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    if (!studioUser) return;
+    const config = db.data.userdata[studioUser.email]?.settings?.playoutPolicy?.streamingConfig;
+
+    if (config?.publicPlayerEnabled && config?.icecastStatusUrl) {
+        console.log('[Icecast Poll] Starting polling for public metadata sync.');
+        icecastPollInterval = setInterval(pollIcecastStatus, 3000);
+    } else {
+        console.log('[Icecast Poll] Polling disabled.');
+    }
+};
+
+
 const sendInitialPublicState = async (ws) => {
     const settings = await getStationSettings();
     const config = settings?.streamingConfig || {};
@@ -890,21 +931,37 @@ const sendInitialPublicState = async (ws) => {
     if (!config.publicPlayerEnabled) {
         return;
     }
+    
+    // With polling, we fetch the current state directly
+    // and then let the poller handle updates.
+    try {
+        const response = await fetch(config.icecastStatusUrl);
+        const data = await response.json();
+        const source = data?.icestats?.source;
+        const currentTitle = source?.title || 'Silence';
+        lastIcecastTitle = currentTitle;
+        const [artist, title] = currentTitle.split(' - ').map(s => s.trim());
+        const track = findTrackByArtistTitle(libraryState, artist, title);
+        
+        const nowPlaying = {
+            title: track ? track.title : title || '...',
+            artist: track ? track.artist : artist || '...',
+            artworkUrl: track ? (track.remoteArtworkUrl || (track.hasEmbeddedArtwork ? `/artwork/${encodeURIComponent(track.id.replace(/\.[^/.]+$/, ".jpg"))}`: null)) : null,
+            logoSrc: settings.logoSrc,
+        };
 
-    const nowPlaying = await getCurrentPublicMetadata();
+        const initialState = {
+            publicStreamUrl: config.publicStreamUrl,
+            nowPlaying: nowPlaying
+        };
+        const message = JSON.stringify({ type: 'initial-state', payload: initialState });
 
-    const initialState = {
-        publicStreamUrl: config.publicStreamUrl,
-        nowPlaying: nowPlaying
-    };
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(message);
+        }
 
-    const message = JSON.stringify({
-        type: 'initial-state',
-        payload: initialState
-    });
-
-    if (ws.readyState === WebSocket.OPEN) {
-        ws.send(message);
+    } catch(e) {
+        console.error("Could not fetch initial Icecast state for public player:", e);
     }
 };
 
@@ -1716,6 +1773,7 @@ app.post('/api/userdata/:email', async (req, res) => {
 
     setupAutoBackup();
     setupAutoMode();
+    setupIcecastPolling();
 
     const newConfig = req.body?.settings?.playoutPolicy?.streamingConfig;
     if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
@@ -1898,6 +1956,7 @@ if (fs.existsSync(distPath)) {
     // Step 2: Set up the recurring checks for Auto-Fill and other automations
     setupAutoBackup();
     setupAutoMode();
+    setupIcecastPolling();
     
     // Step 3: Start playback if conditions are met
     if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length > 0 && !db.data.sharedPlayerState.isPlaying) {

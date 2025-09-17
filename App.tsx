@@ -88,6 +88,7 @@ const defaultPlayoutPolicy: PlayoutPolicy = {
         metadataHeader: '',
         publicPlayerEnabled: false,
         publicStreamUrl: '',
+        icecastStatusUrl: '',
     },
 };
 
