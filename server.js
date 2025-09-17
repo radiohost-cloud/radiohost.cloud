@@ -464,20 +464,33 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
 let playoutInterval = null;
 const PLAYBACK_TICK_RATE = 250; // ms
 let playheadAnchorTime = 0;
-let currentFfmpegCommand = null;
-let currentCommandTrackId = null; // ID of the track associated with currentFfmpegCommand
-let serverStreamStatus = 'inactive'
+
+let icecastStreamCommand = null;
+let currentFeederCommand = null;
+let currentFeederTrackId = null;
+let serverStreamStatus = 'inactive';
 let serverStreamError = null;
+const LOCAL_STREAM_PORT = 12345;
+
+const stopStreamingEngine = () => {
+    if (icecastStreamCommand) {
+        icecastStreamCommand.kill('SIGTERM');
+        icecastStreamCommand = null;
+        console.log('[FFMPEG] Main Icecast streaming process stopped.');
+    }
+};
 
 const stopPlayoutEngine = (broadcast = true) => {
     if (playoutInterval) clearInterval(playoutInterval);
     playoutInterval = null;
-    
-    currentCommandTrackId = null; // Invalidate any running command
-    if (currentFfmpegCommand) {
-        currentFfmpegCommand.kill('SIGTERM');
-        currentFfmpegCommand = null;
+
+    if (currentFeederCommand) {
+        currentFeederCommand.kill('SIGTERM');
+        currentFeederCommand = null;
     }
+    currentFeederTrackId = null;
+    
+    stopStreamingEngine();
 
     db.data.sharedPlayerState.isPlaying = false;
     db.write();
@@ -489,100 +502,26 @@ const stopPlayoutEngine = (broadcast = true) => {
     console.log('[Playout Engine] Stopped.');
 };
 
-const updateIcecastMetadata = async (track, config) => {
-    if (!config || !config.serverAddress || !config.isEnabled) return;
+const startStreamingEngine = async () => {
+    stopStreamingEngine(); // Ensure no lingering process
 
-    const { serverAddress, username, password } = config;
-    const song = encodeURIComponent(`${track.artist || 'Unknown'} - ${track.title || 'Untitled'}`);
-
-    const match = serverAddress.match(/^(.*?)(?::(\d+))?(\/.*)/);
-    if (!match) {
-        console.error('[METADATA] Could not parse server address:', serverAddress);
-        return;
-    }
-    const [, host, port = '8000', mount] = match;
-
-    const metadataUrl = `http://${host}:${port}/admin/metadata?mount=${mount}&mode=updinfo&song=${song}`;
-
-    try {
-        const auth = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
-        await fetch(metadataUrl, {
-            headers: { 'Authorization': auth }
-        });
-        console.log(`[METADATA] Updated for ${mount} to: ${decodeURIComponent(song)}`);
-    } catch (error) {
-        console.error('[METADATA] Failed to update Icecast metadata:', error.message);
-    }
-};
-
-const startPlayoutForTrack = async (trackIndex) => {
-    const { sharedPlaylist, sharedPlayerState } = db.data;
-
-    // --- Marker Cleanup Logic ---
-    let effectiveTrackIndex = trackIndex;
-    let markerCleanupIndex = -1;
-    // Look for a marker in the items *before* the one we're about to play.
-    for (let i = effectiveTrackIndex - 1; i >= 0; i--) {
-        if (sharedPlaylist[i]?.markerType) {
-            markerCleanupIndex = i;
-            break;
-        }
-    }
-    
-    if (markerCleanupIndex !== -1) {
-        const itemsToRemove = markerCleanupIndex + 1;
-        console.log(`[Playout] Cleaning playlist after marker. Removing ${itemsToRemove} items.`);
-        sharedPlaylist.splice(0, itemsToRemove);
-        
-        // After splicing, the track we want to play is now at index 0.
-        effectiveTrackIndex = 0; 
-        
-        // Also update the global state's track index to reflect the change
-        sharedPlayerState.currentTrackIndex = 0; 
-    }
-
-    if (effectiveTrackIndex < 0 || effectiveTrackIndex >= sharedPlaylist.length) {
-        console.log('[Playout] Invalid track index after cleanup, stopping playout.');
-        stopPlayoutEngine();
-        return;
-    }
-    const track = sharedPlaylist[effectiveTrackIndex];
-    if (!track || track.markerType) {
-        console.warn(`[Playout] Attempted to play invalid item at index ${effectiveTrackIndex}. Skipping.`);
-        advanceTrack(effectiveTrackIndex + 1); // Jump past the invalid item
-        return;
-    }
-    const trackPath = path.join(mediaDir, track.originalId || track.id);
-    if (!fs.existsSync(trackPath)) {
-        console.error(`[FFMPEG] File not found: ${trackPath}. Skipping track.`);
-        advanceTrack();
-        return;
-    }
-    
     const studioData = db.data.userdata[studioClientEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
+
     if (!streamConfig || !streamConfig.isEnabled) {
-        console.log('[Playout] Streaming is disabled. Playout engine will run silently.');
-        // Still need to simulate playback for timing
-        currentCommandTrackId = track.id;
-        setTimeout(() => {
-             if (currentCommandTrackId === track.id) {
-                advanceTrack();
-            }
-        }, track.duration * 1000);
+        console.log('[Playout] Streaming is disabled. Engine will not connect to Icecast.');
         return;
     }
 
-    console.log(`[Playout] Starting playout for track index ${effectiveTrackIndex}: "${track.title}"`);
-    currentCommandTrackId = track.id;
-    serverStreamStatus = 'starting';
-    broadcastStreamStatus();
+    console.log('[FFMPEG] Starting persistent Icecast streaming process...');
     
     try {
-        const command = ffmpeg().input(trackPath).inputOptions(['-re']);
-
+        const command = ffmpeg()
+            .input(`tcp://127.0.0.1:${LOCAL_STREAM_PORT}?listen=1`)
+            .inputFormat('s16le')
+            .inputOptions(['-ar 44100', '-ac 2', '-re']);
+        
         const bitrateK = streamConfig.bitrate || 128;
-        const metadataTitle = `${track.artist || 'Unknown Artist'} - ${track.title || 'Untitled Track'}`;
         
         command.audioCodec('libmp3lame')
             .audioBitrate(`${bitrateK}k`)
@@ -592,12 +531,9 @@ const startPlayoutForTrack = async (trackIndex) => {
             .outputOptions([
                 '-loglevel', 'error',
                 '-content_type', 'audio/mpeg',
-                // Force Constant Bitrate (CBR) for better Icecast compatibility
                 '-minrate', `${bitrateK}k`,
                 '-maxrate', `${bitrateK}k`,
                 '-bufsize', `${bitrateK * 2}k`,
-                // Embed track metadata directly into the stream
-                '-metadata', `title=${metadataTitle}`
             ]);
 
         const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
@@ -614,52 +550,119 @@ const startPlayoutForTrack = async (trackIndex) => {
         ]);
 
         command.on('start', (cmdLine) => {
-            console.log(`[FFMPEG] Started streaming: ${track.title}`);
+            console.log('[FFMPEG] Persistent Icecast connection established.');
             serverStreamStatus = 'broadcasting';
             serverStreamError = null;
             broadcastStreamStatus();
         });
-        command.on('end', () => {
-            console.log(`[FFMPEG] Stream for '${track.title}' finished naturally.`);
-            if (currentCommandTrackId === track.id) {
-                currentFfmpegCommand = null;
-                currentCommandTrackId = null;
-                advanceTrack(); // Natural progression
-            } else {
-                console.log(`[FFMPEG] Ignored 'end' event from a stale command for '${track.title}'.`);
-            }
-        });
+        
         command.on('error', (err) => {
-            if (currentCommandTrackId === track.id) {
-                currentFfmpegCommand = null;
-                currentCommandTrackId = null;
-                if (!err.message.includes('SIGTERM')) { // Ignore errors from manual kills
-                    console.error(`[FFMPEG] Playback error for '${track.title}': ${err.message}`);
-                    serverStreamStatus = 'error';
-                    serverStreamError = err.message;
-                    broadcastStreamStatus();
-                    console.log('[Playout] Advancing to next track due to error.');
-                    advanceTrack(); // Try to recover by playing next track
-                } else {
-                    console.log(`[FFMPEG] Command for '${track.title}' was intentionally terminated.`);
+            if (!err.message.includes('SIGTERM')) {
+                console.error(`[FFMPEG] Main streaming process error: ${err.message}`);
+                serverStreamStatus = 'error';
+                serverStreamError = err.message;
+                broadcastStreamStatus();
+                // Attempt to restart the whole engine
+                if (db.data.sharedPlayerState.isPlaying) {
+                    console.log('[Playout] Restarting playout engine due to main stream error.');
+                    stopPlayoutEngine(false);
+                    startPlayoutEngine(db.data.sharedPlayerState.currentTrackIndex);
                 }
+            } else {
+                 console.log(`[FFMPEG] Main streaming process was intentionally terminated.`);
             }
         });
-        currentFfmpegCommand = command;
+        
+        icecastStreamCommand = command;
         command.save(outputUrl);
+
     } catch(e) {
-        console.error('[FFMPEG] Failed to initialize command:', e);
+        console.error('[FFMPEG] Failed to initialize main streaming command:', e);
         serverStreamStatus = 'error';
-        serverStreamError = 'Failed to start FFmpeg process.';
+        serverStreamError = 'Failed to start FFmpeg master process.';
         broadcastStreamStatus();
     }
 };
 
+const startPlayoutForTrack = async (trackIndex) => {
+    const { sharedPlaylist } = db.data;
+    const track = sharedPlaylist[trackIndex];
+    
+    if (!track || track.markerType) {
+        console.warn(`[Playout] Attempted to play invalid item at index ${trackIndex}. Skipping.`);
+        advanceTrack(trackIndex + 1);
+        return;
+    }
+    
+    const trackPath = path.join(mediaDir, track.originalId || track.id);
+    if (!fs.existsSync(trackPath)) {
+        console.error(`[FFMPEG] File not found: ${trackPath}. Skipping track.`);
+        advanceTrack();
+        return;
+    }
+    
+    if (currentFeederCommand) {
+        currentFeederCommand.kill('SIGTERM');
+    }
+    
+    currentFeederTrackId = track.id;
+
+    const studioData = db.data.userdata[studioClientEmail];
+    const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
+
+    if (!streamConfig || !streamConfig.isEnabled) {
+        console.log(`[Playout] Streaming is disabled. Simulating playback for track: "${track.title}"`);
+        // We still need to simulate the timing for playlist progression
+        setTimeout(() => {
+            if (currentFeederTrackId === track.id) {
+                advanceTrack();
+            }
+        }, track.duration * 1000);
+        return;
+    }
+    
+    console.log(`[Playout] Starting feeder for track: "${track.title}"`);
+    try {
+        const command = ffmpeg(trackPath)
+            .inputOptions(['-re'])
+            .audioCodec('pcm_s16le')
+            .audioFrequency(44100)
+            .audioChannels(2)
+            .format('s16le')
+            .outputOptions(['-loglevel', 'error']);
+
+        command.on('end', () => {
+            if (currentFeederTrackId === track.id) {
+                console.log(`[FFMPEG] Feeder for '${track.title}' finished.`);
+                currentFeederCommand = null;
+                currentFeederTrackId = null;
+                advanceTrack();
+            }
+        });
+
+        command.on('error', (err) => {
+            if (currentFeederTrackId === track.id && !err.message.includes('SIGTERM')) {
+                console.error(`[FFMPEG] Feeder error for '${track.title}': ${err.message}`);
+                currentFeederCommand = null;
+                currentFeederTrackId = null;
+                advanceTrack(); // Skip to next track on error
+            }
+        });
+
+        currentFeederCommand = command;
+        command.save(`tcp://127.0.0.1:${LOCAL_STREAM_PORT}`);
+    } catch (e) {
+        console.error('[FFMPEG] Failed to initialize feeder command:', e);
+        advanceTrack(); // Try to recover
+    }
+};
+
+
 const advanceTrack = async (jumpToIndex = -1) => {
-    if (currentFfmpegCommand) {
-        currentCommandTrackId = null; 
-        currentFfmpegCommand.kill('SIGTERM');
-        currentFfmpegCommand = null;
+    if (currentFeederCommand) {
+        currentFeederCommand.kill('SIGTERM');
+        currentFeederCommand = null;
+        currentFeederTrackId = null;
     }
     const { sharedPlayerState, sharedPlaylist } = db.data;
     const studioData = db.data.userdata[studioClientEmail];
@@ -668,8 +671,25 @@ const advanceTrack = async (jumpToIndex = -1) => {
     let nextIndex;
     const previousIndex = sharedPlayerState.currentTrackIndex;
 
-    if (jumpToIndex !== -1) {
-        nextIndex = jumpToIndex;
+    // --- Marker Cleanup Logic ---
+    let effectiveJumpToIndex = jumpToIndex;
+    let markerCleanupIndex = -1;
+    const startIndexForCleanup = jumpToIndex !== -1 ? jumpToIndex : previousIndex + 1;
+    for (let i = startIndexForCleanup - 1; i >= 0; i--) {
+        if (sharedPlaylist[i]?.markerType) {
+            markerCleanupIndex = i;
+            break;
+        }
+    }
+    if (markerCleanupIndex !== -1) {
+        const itemsToRemove = markerCleanupIndex + 1;
+        console.log(`[Playout] Cleaning playlist after marker. Removing ${itemsToRemove} items.`);
+        sharedPlaylist.splice(0, itemsToRemove);
+        effectiveJumpToIndex = 0;
+    }
+
+    if (effectiveJumpToIndex !== -1) {
+        nextIndex = effectiveJumpToIndex;
     } else {
         const finishedTrackIndex = sharedPlayerState.currentTrackIndex;
         const finishedTrack = sharedPlaylist[finishedTrackIndex];
@@ -758,8 +778,14 @@ const startPlayoutEngine = async (startIndex) => {
     sharedPlayerState.currentPlayingItemId = sharedPlaylist[startIndex]?.id;
     sharedPlayerState.trackProgress = 0;
     playheadAnchorTime = Date.now();
-    startPlayoutForTrack(startIndex);
-    playoutInterval = setInterval(playoutTick, PLAYBACK_TICK_RATE);
+    
+    await startStreamingEngine();
+    // Give the listener a moment to start before the feeder tries to connect
+    setTimeout(() => {
+        startPlayoutForTrack(startIndex);
+        playoutInterval = setInterval(playoutTick, PLAYBACK_TICK_RATE);
+    }, 500);
+
     await db.write();
     broadcastState();
     console.log(`[Playout Engine] Started from index ${startIndex}.`);
