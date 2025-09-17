@@ -395,64 +395,6 @@ const broadcastState = () => {
   });
 };
 
-const findTrackByArtistTitle = (node, artist, title) => {
-    const normalize = (str) => (str || '').toLowerCase().trim().replace(/\s+/g, ' ');
-    const cleanArtist = normalize(artist);
-    const cleanTitle = normalize(title);
-
-    if (!cleanArtist || !cleanTitle) return null;
-
-    let found = null;
-    const traverse = (item) => {
-        if (found) return;
-        if (item.type !== 'folder') {
-            if (normalize(item.artist) === cleanArtist && normalize(item.title) === cleanTitle) {
-                found = item;
-            }
-        } else {
-            for (const child of item.children) {
-                traverse(child);
-            }
-        }
-    };
-    traverse(node);
-    return found;
-};
-
-
-const broadcastPublicMetadata = async (track) => {
-    const settings = await getStationSettings();
-    let artworkUrl = null;
-
-    if (track) {
-        if (track.remoteArtworkUrl) {
-            artworkUrl = track.remoteArtworkUrl;
-        } else if (track.hasEmbeddedArtwork) {
-            const artworkPath = (track.id).replace(/\.[^/.]+$/, ".jpg");
-            artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
-        }
-    }
-
-    const nowPlaying = {
-        title: track ? track.title : 'Silence',
-        artist: track ? track.artist : 'RadioHost.cloud',
-        artworkUrl: artworkUrl,
-        logoSrc: settings.logoSrc,
-    };
-
-    const message = JSON.stringify({
-        type: 'metadataUpdate',
-        payload: { nowPlaying }
-    });
-
-    browserPlayerClients.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(message);
-        }
-    });
-};
-
-
 const broadcastPresenterList = async () => {
     if (!studioClientEmail) return;
     const studioWs = clients.get(studioClientEmail);
@@ -940,55 +882,6 @@ const setupAutoMode = async () => {
     }
 };
 
-let icecastPollInterval = null;
-let lastIcecastTitle = '';
-
-const pollIcecastStatus = async () => {
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    if (!studioUser) return;
-    const config = db.data.userdata[studioUser.email]?.settings?.playoutPolicy?.streamingConfig;
-
-    if (!config || !config.publicPlayerEnabled || !config.icecastStatusUrl) {
-        return;
-    }
-
-    try {
-        const response = await fetch(config.icecastStatusUrl);
-        const data = await response.json();
-        const source = data?.icestats?.source;
-        const currentTitle = source?.title || 'Silence';
-        
-        if (currentTitle !== lastIcecastTitle) {
-            console.log(`[Icecast Poll] Detected title change: "${currentTitle}"`);
-            lastIcecastTitle = currentTitle;
-
-            const [artist, title] = currentTitle.split(' - ').map(s => s.trim());
-            const track = findTrackByArtistTitle(libraryState, artist, title);
-            
-            broadcastPublicMetadata(track);
-        }
-    } catch (error) {
-        // Don't log every time, can be spammy if URL is wrong
-        // console.error('[Icecast Poll] Error fetching status:', error.message);
-    }
-};
-
-const setupIcecastPolling = () => {
-    if (icecastPollInterval) clearInterval(icecastPollInterval);
-    icecastPollInterval = null;
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    if (!studioUser) return;
-    const config = db.data.userdata[studioUser.email]?.settings?.playoutPolicy?.streamingConfig;
-
-    if (config?.publicPlayerEnabled && config?.icecastStatusUrl) {
-        console.log('[Icecast Poll] Starting polling for public metadata sync.');
-        icecastPollInterval = setInterval(pollIcecastStatus, 3000);
-    } else {
-        console.log('[Icecast Poll] Polling disabled.');
-    }
-};
-
-
 const sendInitialPublicState = async (ws) => {
     const settings = await getStationSettings();
     const config = settings?.streamingConfig || {};
@@ -997,53 +890,16 @@ const sendInitialPublicState = async (ws) => {
         return;
     }
     
-    try {
-        if (!config.icecastStatusUrl) {
-            console.warn('[Icecast] Public player is enabled, but Icecast Status URL is not configured. Sending default metadata.');
-            // Send initial state without nowPlaying from Icecast if URL is missing
-            const initialState = {
-                publicStreamUrl: config.publicStreamUrl,
-                nowPlaying: {
-                    title: settings.stationName || 'Live Stream',
-                    artist: 'RadioHost.cloud',
-                    artworkUrl: settings.logoSrc,
-                    logoSrc: settings.logoSrc
-                }
-            };
-            const message = JSON.stringify({ type: 'initial-state', payload: initialState });
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(message);
-            }
-            return;
-        }
+    const initialState = {
+        publicStreamUrl: config.publicStreamUrl,
+        icecastStatusUrl: config.icecastStatusUrl,
+        logoSrc: settings.logoSrc,
+        stationName: settings.stationName,
+    };
+    const message = JSON.stringify({ type: 'initial-state', payload: initialState });
 
-        const response = await fetch(config.icecastStatusUrl);
-        const data = await response.json();
-        const source = data?.icestats?.source;
-        const currentTitle = source?.title || 'Silence';
-        lastIcecastTitle = currentTitle;
-        const [artist, title] = currentTitle.split(' - ').map(s => s.trim());
-        const track = findTrackByArtistTitle(libraryState, artist, title);
-        
-        const nowPlaying = {
-            title: track ? track.title : title || '...',
-            artist: track ? track.artist : artist || '...',
-            artworkUrl: track ? (track.remoteArtworkUrl || (track.hasEmbeddedArtwork ? `/artwork/${encodeURIComponent(track.id.replace(/\.[^/.]+$/, ".jpg"))}` : null)) : null,
-            logoSrc: settings.logoSrc,
-        };
-
-        const initialState = {
-            publicStreamUrl: config.publicStreamUrl,
-            nowPlaying: nowPlaying
-        };
-        const message = JSON.stringify({ type: 'initial-state', payload: initialState });
-
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(message);
-        }
-
-    } catch(e) {
-        console.error("Could not fetch initial Icecast state for public player:", e);
+    if (ws.readyState === WebSocket.OPEN) {
+        ws.send(message);
     }
 };
 
@@ -1584,7 +1440,7 @@ app.use('/media', express.static(mediaDir, {
 }));
 app.use('/artwork', express.static(artworkDir));
 
-const getPlayerPageHTML = (stationName) => `
+const getPlayerPageHTML = (stationName, streamingConfig) => `
 <!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
@@ -1680,23 +1536,74 @@ const getPlayerPageHTML = (stationName) => `
         const messageInput = document.getElementById('message-input');
 
         let publicStreamUrl = '';
+        let icecastStatusUrl = ${JSON.stringify(streamingConfig?.icecastStatusUrl || null)};
         let stationName = ${JSON.stringify(stationName || 'Live Stream')};
+        let logoSrc = ${JSON.stringify(streamingConfig?.logoSrc || null)};
         let ws;
+        let lastKnownTitle = '';
 
-        const updateMetadataDisplay = (metadata) => {
-            if (!metadata) return;
-            titleEl.textContent = metadata.title || '...';
-            artistEl.textContent = metadata.artist || '...';
-            artworkEl.src = metadata.artworkUrl || metadata.logoSrc || 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
+        const fetchArtwork = async (artist, title) => {
+            if (!artist || !title) return null;
+            const searchTerm = encodeURIComponent(artist + ' ' + title);
+            const url = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=1\`;
+            try {
+                const response = await fetch(url);
+                if (!response.ok) return null;
+                const data = await response.json();
+                if (data.resultCount > 0 && data.results[0].artworkUrl100) {
+                    return data.results[0].artworkUrl100.replace('100x100', '600x600');
+                }
+                return null;
+            } catch (e) {
+                console.error('Artwork fetch error:', e);
+                return null;
+            }
+        };
+        
+        const updateMetadataDisplay = async (title, artist) => {
+            titleEl.textContent = title || '...';
+            artistEl.textContent = artist || '...';
+            
+            const artworkUrl = await fetchArtwork(artist, title);
+            artworkEl.src = artworkUrl || logoSrc || 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
 
             if ('mediaSession' in navigator) {
                 navigator.mediaSession.metadata = new MediaMetadata({
-                    title: metadata.title || '...',
-                    artist: metadata.artist || 'RadioHost.cloud',
+                    title: title || '...',
+                    artist: artist || 'RadioHost.cloud',
                     album: stationName,
-                    artwork: metadata.artworkUrl ? [{ src: metadata.artworkUrl, sizes: '512x512' }] : []
+                    artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
                 });
             }
+        };
+
+        const pollMetadata = async () => {
+            if (!icecastStatusUrl) {
+                setTimeout(pollMetadata, 10000); // Check again later if URL appears
+                return;
+            }
+            try {
+                const response = await fetch(icecastStatusUrl);
+                const data = await response.json();
+                const source = data?.icestats?.source;
+                const sourceInfo = Array.isArray(source) ? source[0] : source;
+                const currentTitle = sourceInfo?.title || 'Silence';
+                
+                if (currentTitle !== lastKnownTitle) {
+                    lastKnownTitle = currentTitle;
+                    console.log('New metadata from Icecast:', currentTitle);
+                    
+                    let [artist, title] = currentTitle.split(' - ').map(s => s.trim());
+                    if (!title) {
+                        title = artist;
+                        artist = 'Unknown Artist';
+                    }
+                    updateMetadataDisplay(title, artist);
+                }
+            } catch (e) {
+                console.error('Error polling Icecast metadata:', e);
+            }
+            setTimeout(pollMetadata, 5000);
         };
 
         playBtn.addEventListener('click', () => {
@@ -1729,16 +1636,15 @@ const getPlayerPageHTML = (stationName) => `
 
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                if (data.type === 'initial-state' || data.type === 'metadataUpdate') {
-                    const nowPlaying = data.payload.nowPlaying;
-                    if (data.type === 'initial-state' && data.payload.publicStreamUrl) {
-                        publicStreamUrl = data.payload.publicStreamUrl;
-                        if (publicStreamUrl && !audioPlayer.src) {
-                            audioPlayer.src = publicStreamUrl;
-                        }
-                    }
-                    if (nowPlaying) {
-                        updateMetadataDisplay(nowPlaying);
+                if (data.type === 'initial-state') {
+                    const { payload } = data;
+                    publicStreamUrl = payload.publicStreamUrl;
+                    icecastStatusUrl = payload.icecastStatusUrl;
+                    logoSrc = payload.logoSrc;
+                    stationName = payload.stationName;
+
+                    if (publicStreamUrl && !audioPlayer.src) {
+                        audioPlayer.src = publicStreamUrl;
                     }
                 } else if (data.type === 'chatMessage') {
                     addChatMessage(data.payload);
@@ -1749,9 +1655,9 @@ const getPlayerPageHTML = (stationName) => `
             };
             ws.onclose = () => setTimeout(connectWs, 5000);
         };
-
+        
         const addChatMessage = (msg) => {
-            const isMe = msg.from === nicknameInput.value || (msg.from === 'Studio' && (nicknameInput.value === 'Studio' || currentUser?.role === 'studio'));
+            const isMe = msg.from === nicknameInput.value;
             const msgDiv = document.createElement('div');
             msgDiv.className = 'chat-message ' + (isMe ? 'me' : 'other');
             
@@ -1804,6 +1710,7 @@ const getPlayerPageHTML = (stationName) => `
         });
         
         connectWs();
+        pollMetadata();
     </script>
 </body>
 </html>`;
@@ -1881,7 +1788,6 @@ app.post('/api/userdata/:email', async (req, res) => {
 
     setupAutoBackup();
     setupAutoMode();
-    setupIcecastPolling();
 
     const newConfig = req.body?.settings?.playoutPolicy?.streamingConfig;
     if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
@@ -1996,7 +1902,7 @@ app.post('/api/folder', async (req, res) => {
 app.get('/stream', async (req, res) => {
     const settings = await getStationSettings();
     if(settings?.streamingConfig?.publicPlayerEnabled){
-        res.send(getPlayerPageHTML(settings.stationName));
+        res.send(getPlayerPageHTML(settings.stationName, settings.streamingConfig));
     } else {
         res.status(403).send('<h1>Public player is not enabled.</h1>');
     }
@@ -2077,7 +1983,6 @@ if (fs.existsSync(distPath)) {
     // Step 2: Set up the recurring checks for Auto-Fill and other automations
     setupAutoBackup();
     setupAutoMode();
-    setupIcecastPolling();
     
     // Step 3: Start playback if conditions are met
     if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length > 0 && !db.data.sharedPlayerState.isPlaying) {
