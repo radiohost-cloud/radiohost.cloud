@@ -1,5 +1,3 @@
-
-
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { UserIcon } from './icons/UserIcon';
 import { LogoutIcon } from './icons/LogoutIcon';
@@ -282,7 +280,6 @@ const Header: React.FC<HeaderProps> = ({
     const DECK_VIEW_THRESHOLD = 180; // pixels
     const showDeckView = headerHeight >= DECK_VIEW_THRESHOLD;
 
-    const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
     const statusInfo = {
         connected: { color: 'bg-green-500', text: 'Connected' },
         connecting: { color: 'bg-yellow-500 animate-pulse', text: 'Connecting...' },
@@ -324,7 +321,7 @@ const Header: React.FC<HeaderProps> = ({
                             <button onClick={toggleFullscreen} className={`p-2 rounded-md transition-colors ${iconColorClass}`} title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}>{isFullscreen ? <ExitFullscreenIcon className="w-5 h-5" /> : <EnterFullscreenIcon className="w-5 h-5" />}</button>
                             {currentUser && <>
                                 <div className={`h-8 border-l ${separatorClass}`}></div>
-                                {isHostMode && playoutMode && (
+                                {playoutMode && (
                                     <div className="flex items-center gap-2" title={statusInfo[wsStatus].text}>
                                         <span className={`h-2.5 w-2.5 rounded-full ${statusInfo[wsStatus].color}`}></span>
                                         <span className={`text-sm font-semibold uppercase ${textColorClass}`}>{playoutMode}</span>
@@ -451,7 +448,7 @@ const Header: React.FC<HeaderProps> = ({
                         {currentUser ? (
                             <>
                                 <div className={`h-8 border-l ${separatorClass} hidden sm:block`}></div>
-                                {isHostMode && playoutMode && (
+                                {playoutMode && (
                                      <div className="flex items-center gap-2" title={statusInfo[wsStatus].text}>
                                         <span className={`h-2.5 w-2.5 rounded-full ${statusInfo[wsStatus].color}`}></span>
                                         <span className={`text-sm font-semibold uppercase ${textColorClass}`}>{playoutMode}</span>
