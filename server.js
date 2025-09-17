@@ -613,7 +613,11 @@ const startPlayoutFromIndex = async (index) => {
         return;
     }
 
-    const trackPath = path.join(mediaDir, track.id);
+    // FIX: Use the originalId for playlist items, which points to the library track's path.
+    // Fall back to track.id for items that might not be instanced (e.g., newly added VTs).
+    const trackFileId = track.originalId || track.id;
+    const trackPath = path.join(mediaDir, trackFileId);
+
     if (!fs.existsSync(trackPath)) {
         console.error(`[Playout] Track file not found: ${trackPath}`);
         advanceTrackAndPlay();
