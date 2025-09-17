@@ -1,7 +1,3 @@
-// A simple example backend for RadioHost.cloud's HOST mode.
-// This server handles user authentication, data storage, and media file uploads.
-// To run: `npm install express cors multer lowdb ws node-id3 fluent-ffmpeg` then `node server.js`
-
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -932,9 +928,26 @@ const sendInitialPublicState = async (ws) => {
         return;
     }
     
-    // With polling, we fetch the current state directly
-    // and then let the poller handle updates.
     try {
+        if (!config.icecastStatusUrl) {
+            console.warn('[Icecast] Public player is enabled, but Icecast Status URL is not configured. Sending default metadata.');
+            // Send initial state without nowPlaying from Icecast if URL is missing
+            const initialState = {
+                publicStreamUrl: config.publicStreamUrl,
+                nowPlaying: {
+                    title: settings.stationName || 'Live Stream',
+                    artist: 'RadioHost.cloud',
+                    artworkUrl: settings.logoSrc,
+                    logoSrc: settings.logoSrc
+                }
+            };
+            const message = JSON.stringify({ type: 'initial-state', payload: initialState });
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(message);
+            }
+            return;
+        }
+
         const response = await fetch(config.icecastStatusUrl);
         const data = await response.json();
         const source = data?.icestats?.source;
@@ -946,7 +959,7 @@ const sendInitialPublicState = async (ws) => {
         const nowPlaying = {
             title: track ? track.title : title || '...',
             artist: track ? track.artist : artist || '...',
-            artworkUrl: track ? (track.remoteArtworkUrl || (track.hasEmbeddedArtwork ? `/artwork/${encodeURIComponent(track.id.replace(/\.[^/.]+$/, ".jpg"))}`: null)) : null,
+            artworkUrl: track ? (track.remoteArtworkUrl || (track.hasEmbeddedArtwork ? `/artwork/${encodeURIComponent(track.id.replace(/\.[^/.]+$/, ".jpg"))}` : null)) : null,
             logoSrc: settings.logoSrc,
         };
 
