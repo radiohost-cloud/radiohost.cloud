@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { type ChatMessage, type User } from '../types';
 import { CloseIcon } from './icons/CloseIcon';
@@ -20,13 +21,35 @@ const MobileChat: React.FC<MobileChatProps> = ({ isOpen, onClose, messages, onSe
     const [isEmojiPickerOpen, setIsEmojiPickerOpen] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        if (isOpen) {
-            // Use 'auto' instead of 'instant' for better performance on mobile when keyboard appears
-            messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
-            setTimeout(() => inputRef.current?.focus(), 300); // After animation
-        }
+        if (!isOpen) return;
+        
+        const visualViewport = window.visualViewport;
+        if (!visualViewport) return;
+
+        const handleResize = () => {
+            if (containerRef.current) {
+                containerRef.current.style.height = `${visualViewport.height}px`;
+                // Scroll to bottom after resize to keep input in view
+                setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'auto' }), 50);
+            }
+        };
+
+        visualViewport.addEventListener('resize', handleResize);
+        handleResize(); // Initial call to set height
+
+        // Use 'auto' instead of 'instant' for better performance on mobile when keyboard appears
+        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+        setTimeout(() => inputRef.current?.focus(), 300); // After animation
+
+        return () => {
+            visualViewport.removeEventListener('resize', handleResize);
+            if (containerRef.current) {
+                containerRef.current.style.height = ''; // Clean up style on close
+            }
+        };
     }, [isOpen]);
     
     useEffect(() => {
@@ -57,7 +80,7 @@ const MobileChat: React.FC<MobileChatProps> = ({ isOpen, onClose, messages, onSe
     if (!isOpen) return null;
 
     return (
-        <div className="fixed top-0 left-0 w-full h-full bg-black z-40 flex flex-col animate-slide-in-up">
+        <div ref={containerRef} className="fixed top-0 left-0 w-full h-full bg-black z-40 flex flex-col animate-slide-in-up">
             {/* Header */}
             <header className="flex-shrink-0 flex items-center justify-between p-2 bg-neutral-900 border-b border-neutral-800">
                 <div className="flex-grow pl-2">

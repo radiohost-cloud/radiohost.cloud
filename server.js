@@ -2068,9 +2068,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             const cleanArtist = artist.toLowerCase().trim();
             const cleanTitle = title.toLowerCase().trim();
             const searchTerm = encodeURIComponent(artist + ' ' + title);
-            const url = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=5&country=US\`;
+            const itunesUrl = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=5&country=US\`;
             try {
-                const response = await fetch(url);
+                const response = await fetch(itunesUrl);
                 if (!response.ok) return null;
                 const data = await response.json();
                 if (data.resultCount > 0) {
@@ -2081,7 +2081,8 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     );
                     const result = bestMatch || data.results[0];
                     if (result && result.artworkUrl100) {
-                        return result.artworkUrl100.replace('100x100', '600x600');
+                        const artworkUrl = result.artworkUrl100.replace('100x100', '600x600');
+                        return \`/api/artwork-proxy?url=\${encodeURIComponent(artworkUrl)}\`;
                     }
                 }
                 return null;
@@ -2247,9 +2248,30 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             const mobileChatNotification = document.getElementById('mobile-chat-notification');
 
             let startY, startPos, isDragging = false;
-            const minPos = 0;
-            const maxPos = window.innerHeight - 70;
+            let minPos = 0;
+            let maxPos = window.innerHeight - 70;
             let isDrawerOpen = false;
+
+            const updateDrawerPositions = () => {
+                minPos = 0;
+                maxPos = window.innerHeight - 70;
+            };
+            window.addEventListener('resize', updateDrawerPositions);
+            updateDrawerPositions();
+
+            // Keyboard fix for iOS
+            const visualViewport = window.visualViewport;
+            if (visualViewport) {
+                const handleViewportResize = () => {
+                    drawer.style.height = \`\${visualViewport.height}px\`;
+                    // When keyboard is open and drawer is open, keep it at the top
+                    if (isDrawerOpen) {
+                        drawer.style.transform = \`translateY(0px)\`;
+                    }
+                };
+                visualViewport.addEventListener('resize', handleViewportResize);
+            }
+
 
             const setDrawerPosition = (y, transitioning = false) => {
                 if(transitioning) drawer.classList.add('transitioning');
@@ -2651,6 +2673,28 @@ app.get('/stream', async (req, res) => {
     }
 });
 
+app.get('/api/artwork-proxy', async (req, res) => {
+    const { url } = req.query;
+    if (!url) {
+        return res.status(400).send('URL parameter is required.');
+    }
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            return res.status(response.status).send(response.statusText);
+        }
+        const contentType = response.headers.get('content-type');
+        if (contentType) {
+            res.setHeader('Content-Type', contentType);
+        }
+        response.body.pipe(res);
+    } catch (error) {
+        console.error('Artwork proxy error:', error);
+        res.status(500).send('Failed to fetch image.');
+    }
+});
+
+
 const performBackup = async () => {
     const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
     const backupFileName = `radiohost-backup-${timestamp}.json`;
@@ -2715,24 +2759,20 @@ if (fs.existsSync(distPath)) {
     console.log(`[Startup] Scan complete. Found ${libraryState.children.length} items in root.`);
 
     const studioUser = db.data.users.find(u => u.role === 'studio');
-    // FIX: Set the global studioClientEmail here so that startup procedures can find the correct settings.
     if (studioUser) {
         studioClientEmail = studioUser.email;
     }
     const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
 
-    // Step 1: Handle Auto-Fill if necessary
     if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length === 0) {
         console.log('[Auto-Mode] Playlist is empty on startup. Triggering initial fill.');
         await performAutofill();
     }
 
-    // Step 2: Set up the recurring checks
     setupAutoBackup();
     setupAutoMode();
     setupScheduler();
     
-    // Step 3: Start playback if conditions are met
     if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length > 0 && !db.data.sharedPlayerState.isPlaying) {
         console.log('[Auto-Mode] Starting playback on startup.');
         const startIndex = 0;
