@@ -1,3 +1,4 @@
+
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -226,7 +227,8 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
 
         for (const cachedPath in db.data.mediaCache) {
             if (!allFilePaths.has(cachedPath)) {
-                delete db.data.mediaCache[cachedPath];
+                // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
+                Reflect.deleteProperty(db.data.mediaCache, cachedPath);
                 console.log(`[Cache] Cleaned up stale cache for: ${cachedPath}`);
                 cacheChanged = true;
             }
@@ -1326,7 +1328,8 @@ wss.on('connection', async (ws, req) => {
                                     await fsPromises.rename(oldPath, newPath);
                                     if (db.data.persistentMetadata?.[itemId]) {
                                         db.data.persistentMetadata[newId] = db.data.persistentMetadata[itemId];
-                                        delete db.data.persistentMetadata[itemId];
+                                        // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
+                                        Reflect.deleteProperty(db.data.persistentMetadata, itemId);
                                         await db.write();
                                     }
                                     const oldArtworkPath = path.join(artworkDir, itemId.replace(/\.[^/.]+$/, ".jpg"));
@@ -1400,7 +1403,8 @@ wss.on('connection', async (ws, req) => {
                                                 if (fs.existsSync(artworkPath)) await fsPromises.unlink(artworkPath);
                                             }
                                             if (db.data.persistentMetadata?.[id]) {
-                                                delete db.data.persistentMetadata[id];
+                                                // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
+                                                Reflect.deleteProperty(db.data.persistentMetadata, id);
                                             }
                                         }
                                     } catch (e) { console.error(`[FS] Failed to delete item at ${itemPath}:`, e); }
@@ -1431,7 +1435,8 @@ wss.on('connection', async (ws, req) => {
 
                                     if (db.data.persistentMetadata?.[itemId]) {
                                         db.data.persistentMetadata[newId] = db.data.persistentMetadata[itemId];
-                                        delete db.data.persistentMetadata[itemId];
+                                        // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
+                                        Reflect.deleteProperty(db.data.persistentMetadata, itemId);
                                     }
 
                                     const artworkSourcePath = path.join(artworkDir, itemId.replace(/\.[^/.]+$/, ".jpg"));
@@ -1860,14 +1865,24 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
 
         const fetchArtwork = async (artist, title) => {
             if (!artist || !title) return null;
+            const cleanArtist = artist.toLowerCase().trim();
+            const cleanTitle = title.toLowerCase().trim();
             const searchTerm = encodeURIComponent(artist + ' ' + title);
-            const url = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=1\`;
+            const url = `https://itunes.apple.com/search?term=${searchTerm}&entity=song&media=music&limit=5&country=US`;
             try {
                 const response = await fetch(url);
                 if (!response.ok) return null;
                 const data = await response.json();
-                if (data.resultCount > 0 && data.results[0].artworkUrl100) {
-                    return data.results[0].artworkUrl100.replace('100x100', '600x600');
+                if (data.resultCount > 0) {
+                    const bestMatch = data.results.find(result =>
+                        result.artistName && result.trackName &&
+                        result.artistName.toLowerCase().includes(cleanArtist) &&
+                        result.trackName.toLowerCase().includes(cleanTitle)
+                    );
+                    const result = bestMatch || data.results[0];
+                    if (result && result.artworkUrl100) {
+                        return result.artworkUrl100.replace('100x100', '600x600');
+                    }
                 }
                 return null;
             } catch (e) {
@@ -2180,10 +2195,12 @@ app.post('/api/track/delete', async (req, res) => {
             }
 
             if (db.data.mediaCache[id]) {
-                delete db.data.mediaCache[id];
+                // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
+                Reflect.deleteProperty(db.data.mediaCache, id);
             }
             if (db.data.persistentMetadata?.[id]) {
-                delete db.data.persistentMetadata[id];
+                // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
+                Reflect.deleteProperty(db.data.persistentMetadata, id);
             }
             await db.write();
             
