@@ -1819,6 +1819,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             --subtext-color: #a0a0a0; 
             --accent-color: #ef4444; 
             --container-bg: rgba(0, 0, 0, 0.3);
+            --header-bg-color: #2a2a2a;
         }
         html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
         body { 
@@ -1836,6 +1837,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             transition: background 1s ease-in-out, color 1s ease-in-out;
             animation: gradient-animation 15s ease infinite;
         }
+        #bg-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
         @keyframes gradient-animation {
             0% { background-position: 0% 50%; }
             50% { background-position: 100% 50%; }
@@ -1877,11 +1879,11 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         
         /* Desktop Chat */
         .desktop-only { display: flex; }
-        #chat-bubble { position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 15px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
+        #chat-bubble { position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 15px rgba(0,0,0,0.4); transition: transform 0.2s ease; z-index: 101; }
         #chat-bubble:hover { transform: scale(1.1); }
         #chat-bubble svg { width: 32px; height: 32px; color: white; }
         #chat-notification { position: absolute; top: 0; right: 0; width: 12px; height: 12px; background-color: #3b82f6; border-radius: 50%; border: 2px solid var(--accent-color); display: none; }
-        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 320px; height: 450px; background-color: #1a1a1a; border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
+        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 380px; height: 550px; background-color: #1a1a1a; border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
         #chat-window.open { display: flex; opacity: 1; transform: scale(1); }
         #chat-window:not(.open) { opacity: 0; transform: scale(0.9); }
         .chat-header { padding: 10px 15px; background-color: #2a2a2a; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
@@ -1908,17 +1910,19 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             .desktop-only { display: none !important; }
             .mobile-only { display: flex; }
             
-            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background-color: #1a1a1a; flex-direction: column; transform: translateY(calc(100% - 90px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); }
+            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background-color: #1a1a1a; flex-direction: column; transform: translateY(calc(100% - 70px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); }
             #chat-drawer.transitioning { transition: transform 0.3s ease-out; }
-            #chat-drawer-header { padding: 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; }
-            .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 10px; }
-            #chat-drawer-header h3 { margin: 0; font-size: 1rem; }
+            #chat-drawer-header { padding: 10px 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; background: var(--header-bg-color); transition: background 1s ease-in-out; border-top-left-radius: 20px; border-top-right-radius: 20px; }
+            .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 8px; }
+            #chat-drawer-header h3 { margin: 0; font-size: 0.9rem; }
             #chat-drawer-content { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; }
+            #chat-messages { flex-direction: column-reverse; }
             #mobile-chat-notification { position: absolute; top: 18px; right: 20px; width: 10px; height: 10px; background-color: #3b82f6; border-radius: 50%; display: none; }
         }
     </style>
 </head>
 <body>
+    <canvas id="bg-canvas" class="desktop-only"></canvas>
     <div id="logo-container"></div>
     <div class="player-container">
         <img id="artwork" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art">
@@ -2030,11 +2034,16 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         };
 
         const updateDynamicBackground = (imageUrl) => {
-            if (!imageUrl) {
+            const setDefaultColors = () => {
                 rootEl.style.setProperty('--bg-gradient', 'linear-gradient(45deg, #1a1a1a, #000000)');
                 rootEl.style.setProperty('--text-color', '#ffffff');
                 rootEl.style.setProperty('--subtext-color', '#a0a0a0');
                 rootEl.style.setProperty('--container-bg', 'rgba(0, 0, 0, 0.3)');
+                rootEl.style.setProperty('--header-bg-color', '#2a2a2a');
+            };
+
+            if (!imageUrl) {
+                setDefaultColors();
                 return;
             }
             const img = new Image();
@@ -2046,8 +2055,12 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 rootEl.style.setProperty('--text-color', textColor === 'white' ? '#ffffff' : '#000000');
                 rootEl.style.setProperty('--subtext-color', textColor === 'white' ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)');
                 rootEl.style.setProperty('--container-bg', textColor === 'white' ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)');
+                rootEl.style.setProperty('--header-bg-color', colors[0]);
             };
-            img.onerror = () => updateDynamicBackground(null);
+            img.onerror = () => {
+                console.warn('Failed to load image for dynamic background.');
+                setDefaultColors();
+            };
         };
 
         const fetchArtwork = async (artist, title) => {
@@ -2095,17 +2108,23 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             titleEl.textContent = title || '...';
             artistEl.textContent = artist || '...';
             
-            const artworkUrl = await fetchArtwork(artist, title);
-            artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-            updateDynamicBackground(artworkUrl);
-
-            if ('mediaSession' in navigator) {
-                navigator.mediaSession.metadata = new MediaMetadata({
-                    title: title || '...',
-                    artist: artist || 'RadioHost.cloud',
-                    album: stationName,
-                    artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
-                });
+            try {
+                const artworkUrl = await fetchArtwork(artist, title);
+                artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+                updateDynamicBackground(artworkUrl);
+    
+                if ('mediaSession' in navigator) {
+                    navigator.mediaSession.metadata = new MediaMetadata({
+                        title: title || '...',
+                        artist: artist || 'RadioHost.cloud',
+                        album: stationName,
+                        artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
+                    });
+                }
+            } catch (e) {
+                console.error("Failed to update display with new metadata:", e);
+                artworkEl.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+                updateDynamicBackground(null);
             }
         };
 
@@ -2163,7 +2182,12 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             msgDiv.innerHTML = content;
             if(chatMessages) {
                 chatMessages.appendChild(msgDiv);
-                chatMessages.scrollTop = chatMessages.scrollHeight;
+                // For column-reverse, scroll to bottom is scroll to top of element
+                if (window.innerWidth <= 768) {
+                   chatMessages.scrollTop = 0;
+                } else {
+                   chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
             }
         };
         
@@ -2224,7 +2248,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 
             let startY, startPos, isDragging = false;
             const minPos = 0;
-            const maxPos = window.innerHeight - 90;
+            const maxPos = window.innerHeight - 70;
             let isDrawerOpen = false;
 
             const setDrawerPosition = (y, transitioning = false) => {
@@ -2297,6 +2321,102 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             });
         }
         
+        // --- Audio Reactive Background ---
+        if (window.innerWidth > 768) {
+            const canvas = document.getElementById('bg-canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            let audioContext, analyser, source;
+            const ripples = [];
+            let lastBeatTime = 0;
+            const beatThreshold = 0.25; // Adjusted sensitivity
+            const beatCooldown = 300; // ms
+            
+            function initAudioAnalysis() {
+                if (audioContext) return;
+                try {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    source = audioContext.createMediaElementSource(audioPlayer);
+                    analyser = audioContext.createAnalyser();
+                    analyser.fftSize = 128;
+                    source.connect(analyser);
+                    analyser.connect(audioContext.destination);
+                    animate();
+                } catch (e) {
+                    console.error("Could not initialize Web Audio API:", e);
+                }
+            }
+            
+            class Ripple {
+                constructor(x, y, color) {
+                    this.x = x;
+                    this.y = y;
+                    this.radius = 1;
+                    this.maxRadius = 150 + Math.random() * 100;
+                    this.life = 1;
+                    this.speed = Math.random() * 2 + 1;
+                    this.color = color;
+                }
+                update() {
+                    this.radius += this.speed;
+                    this.life -= 0.01;
+                }
+                draw() {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                    ctx.strokeStyle = \`rgba(\${this.color}, \${this.life})\`;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            function detectBeat(dataArray) {
+                const bassValue = (dataArray[1] + dataArray[2] + dataArray[3]) / 3;
+                if (bassValue / 255 > beatThreshold && Date.now() - lastBeatTime > beatCooldown) {
+                    lastBeatTime = Date.now();
+                    return true;
+                }
+                return false;
+            }
+
+            function animate() {
+                requestAnimationFrame(animate);
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                if (analyser) {
+                    const bufferLength = analyser.frequencyBinCount;
+                    const dataArray = new Uint8Array(bufferLength);
+                    analyser.getByteFrequencyData(dataArray);
+                    
+                    if (detectBeat(dataArray)) {
+                        const rippleColor = rootEl.style.getPropertyValue('--text-color') === '#ffffff' ? '255,255,255' : '0,0,0';
+                        const x = Math.random() * canvas.width;
+                        const y = Math.random() * canvas.height;
+                        if (ripples.length < 30) { // Limit number of ripples for performance
+                           ripples.push(new Ripple(x, y, rippleColor));
+                        }
+                    }
+                }
+                
+                for (let i = ripples.length - 1; i >= 0; i--) {
+                    const r = ripples[i];
+                    r.update();
+                    r.draw();
+                    if (r.life <= 0) {
+                        ripples.splice(i, 1);
+                    }
+                }
+            }
+            
+            playBtn.addEventListener('click', initAudioAnalysis, { once: true });
+            window.addEventListener('resize', () => {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+            });
+        }
+
         connectWs();
         pollMetadata();
         updateLogo(defaultLogoSrc);
