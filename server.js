@@ -611,8 +611,14 @@ const startStreamingEngine = async () => {
         const outputUrl = `icecast://${username}:${password}@${serverAddress}`;
 
         const args = [
+            // Input options for raw PCM from stdin
+            '-acodec', 'pcm_s16le',
+            '-f', 's16le',
+            '-ar', '44100',
+            '-ac', '2',
             '-re',
             '-i', '-', // Read from stdin
+            // Output options
             '-acodec', 'libmp3lame',
             '-b:a', `${bitrateK}k`,
             '-ar', '44100',
