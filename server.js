@@ -11,6 +11,7 @@ import http from 'http';
 import { WebSocketServer } from 'ws';
 import NodeID3 from 'node-id3';
 import ffmpeg from 'fluent-ffmpeg';
+import { spawn } from 'child_process';
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -470,7 +471,6 @@ let currentFeederCommand = null;
 let currentFeederTrackId = null;
 let serverStreamStatus = 'inactive';
 let serverStreamError = null;
-const LOCAL_STREAM_PORT = 12345;
 
 // --- NEW: Metadata Update Logic ---
 
@@ -557,12 +557,13 @@ const updateIcecastMetadata = async (track) => {
     }
 };
 
-
-const stopStreamingEngine = () => {
-    if (icecastStreamCommand) {
-        icecastStreamCommand.kill('SIGTERM');
-        icecastStreamCommand = null;
-        console.log('[FFMPEG] Main Icecast streaming process stopped.');
+const killProcess = (process) => {
+    if (process && !process.killed) {
+        try {
+            process.kill('SIGTERM');
+        } catch (e) {
+            console.warn(`[Process] Could not kill process: ${e.message}`);
+        }
     }
 };
 
@@ -570,14 +571,13 @@ const stopPlayoutEngine = async (broadcast = true) => {
     if (playoutInterval) clearInterval(playoutInterval);
     playoutInterval = null;
 
-    if (currentFeederCommand) {
-        currentFeederCommand.kill('SIGTERM');
-        currentFeederCommand = null;
-    }
+    killProcess(currentFeederCommand);
+    currentFeederCommand = null;
     currentFeederTrackId = null;
-    
-    stopStreamingEngine();
 
+    killProcess(icecastStreamCommand);
+    icecastStreamCommand = null;
+    
     db.data.sharedPlayerState.isPlaying = false;
     await db.write();
 
@@ -591,8 +591,9 @@ const stopPlayoutEngine = async (broadcast = true) => {
     console.log('[Playout Engine] Stopped.');
 };
 
+
 const startStreamingEngine = async () => {
-    stopStreamingEngine(); // Ensure no lingering process
+    killProcess(icecastStreamCommand); // Ensure no lingering process
 
     const studioData = db.data.userdata[studioClientEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
@@ -609,56 +610,48 @@ const startStreamingEngine = async () => {
         const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
         const outputUrl = `icecast://${username}:${password}@${serverAddress}`;
 
-        const command = ffmpeg()
-            // Input 1: Infinite silent audio to keep the process alive
-            .input('anullsrc')
-            .inputFormat('lavfi')
-            .inputOptions(['-ar', '44100', '-ac', '2'])
-            
-            // Input 2: TCP listener for the track feeders
-            .input(`tcp://127.0.0.1:${LOCAL_STREAM_PORT}?listen=1`)
-            .inputFormat('s16le')
-            .inputOptions(['-ar', '44100', '-ac', '2'])
-            
-            // Mix the two inputs. The amix filter will run as long as the longest input (anullsrc) is active.
-            .complexFilter([
-                '[0:a][1:a]amix=inputs=2:duration=longest[aout]'
-            ])
-            .map('[aout]')
-            
-            // Output encoding and streaming settings
-            .audioCodec('libmp3lame')
-            .audioBitrate(`${bitrateK}k`)
-            .audioFrequency(44100)
-            .audioChannels(2)
-            .format('mp3')
-            .outputOptions([
-                '-loglevel', 'error',
-                '-content_type', 'audio/mpeg',
-                '-ice_name', stationName || 'RadioHost.cloud',
-                '-ice_genre', stationGenre || 'Various',
-                '-ice_url', stationUrl || 'https://radiohost.cloud',
-                '-ice_description', stationDescription || 'Powered by RadioHost.cloud',
-                '-ice_public', '1',
-                '-reconnect', '1',
-                '-reconnect_streamed', '1',
-                '-reconnect_delay_max', '5'
-            ]);
-        
-        command.on('start', (cmdLine) => {
-            console.log('[FFMPEG] Persistent Icecast connection established with mixing.');
+        const args = [
+            '-re',
+            '-i', '-', // Read from stdin
+            '-acodec', 'libmp3lame',
+            '-b:a', `${bitrateK}k`,
+            '-ar', '44100',
+            '-ac', '2',
+            '-f', 'mp3',
+            '-loglevel', 'error',
+            '-content_type', 'audio/mpeg',
+            '-ice_name', stationName || 'RadioHost.cloud',
+            '-ice_genre', stationGenre || 'Various',
+            '-ice_url', stationUrl || 'https://radiohost.cloud',
+            '-ice_description', stationDescription || 'Powered by RadioHost.cloud',
+            '-ice_public', '1',
+            '-reconnect', '1',
+            '-reconnect_streamed', '1',
+            '-reconnect_delay_max', '5',
+            outputUrl
+        ];
+
+        icecastStreamCommand = spawn('ffmpeg', args);
+
+        icecastStreamCommand.on('spawn', () => {
+            console.log('[FFMPEG] Persistent Icecast connection process spawned.');
             serverStreamStatus = 'broadcasting';
             serverStreamError = null;
             broadcastStreamStatus();
         });
+
+        icecastStreamCommand.stderr.on('data', (data) => {
+            console.error(`[FFMPEG Main Stderr] ${data.toString()}`);
+        });
         
-        command.on('error', (err) => {
-            if (!err.message.includes('SIGTERM')) {
-                console.error(`[FFMPEG] Main streaming process error: ${err.message}`);
+        icecastStreamCommand.on('exit', (code, signal) => {
+            if (signal !== 'SIGTERM') {
+                const errorMessage = `Main streaming process exited unexpectedly with code ${code}, signal ${signal}`;
+                console.error(`[FFMPEG] ${errorMessage}`);
                 serverStreamStatus = 'error';
-                serverStreamError = err.message;
+                serverStreamError = errorMessage;
                 broadcastStreamStatus();
-                if (db.data.sharedPlayerState.isPlaying) {
+                 if (db.data.sharedPlayerState.isPlaying) {
                     console.log('[Playout] Restarting playout engine due to main stream error.');
                     stopPlayoutEngine(false);
                     startPlayoutEngine(db.data.sharedPlayerState.currentTrackIndex);
@@ -666,10 +659,8 @@ const startStreamingEngine = async () => {
             } else {
                  console.log(`[FFMPEG] Main streaming process was intentionally terminated.`);
             }
+            icecastStreamCommand = null;
         });
-        
-        icecastStreamCommand = command;
-        command.save(outputUrl);
 
     } catch(e) {
         console.error('[FFMPEG] Failed to initialize main streaming command:', e);
@@ -698,9 +689,7 @@ const startPlayoutForTrack = async (trackIndex) => {
         return;
     }
     
-    if (currentFeederCommand) {
-        currentFeederCommand.kill('SIGTERM');
-    }
+    killProcess(currentFeederCommand);
     
     currentFeederTrackId = track.id;
 
@@ -709,45 +698,59 @@ const startPlayoutForTrack = async (trackIndex) => {
 
     if (!streamConfig || !streamConfig.isEnabled) {
         console.log(`[Playout] Streaming is disabled. Simulating playback for track: "${track.title}"`);
-        // We still need to simulate the timing for playlist progression
         setTimeout(() => {
-            if (currentFeederTrackId === track.id) {
+            if (currentFeederTrackId === track.id && db.data.sharedPlayerState.isPlaying) {
                 advanceTrack();
             }
         }, track.duration * 1000);
         return;
     }
+
+    if (!icecastStreamCommand || !icecastStreamCommand.stdin) {
+        console.error('[Playout] Main stream command is not running. Cannot start feeder.');
+        // Attempt to recover by restarting the whole engine
+        await stopPlayoutEngine(false);
+        await startPlayoutEngine(db.data.sharedPlayerState.currentTrackIndex);
+        return;
+    }
     
     console.log(`[Playout] Starting feeder for track: "${track.title}"`);
     try {
-        const command = ffmpeg(trackPath)
-            .inputOptions(['-re'])
-            .audioCodec('pcm_s16le')
-            .audioFrequency(44100)
-            .audioChannels(2)
-            .format('s16le')
-            .outputOptions(['-loglevel', 'error']);
+        const args = [
+            '-i', trackPath,
+            '-f', 's16le',
+            '-acodec', 'pcm_s16le',
+            '-ar', '44100',
+            '-ac', '2',
+            '-loglevel', 'error',
+            '-' // Output to stdout
+        ];
 
-        command.on('end', () => {
-            if (currentFeederTrackId === track.id) {
+        const feeder = spawn('ffmpeg', args);
+        currentFeederCommand = feeder;
+
+        feeder.stdout.pipe(icecastStreamCommand.stdin, { end: false });
+        
+        feeder.stderr.on('data', (data) => {
+            console.error(`[FFMPEG Feeder Stderr for ${track.title}] ${data.toString()}`);
+        });
+
+        feeder.on('exit', (code, signal) => {
+            if (signal !== 'SIGTERM' && currentFeederTrackId === track.id) {
                 console.log(`[FFMPEG] Feeder for '${track.title}' finished.`);
                 currentFeederCommand = null;
                 currentFeederTrackId = null;
-                advanceTrack();
+                if(db.data.sharedPlayerState.isPlaying) {
+                   advanceTrack();
+                }
             }
         });
 
-        command.on('error', (err) => {
-            if (currentFeederTrackId === track.id && !err.message.includes('SIGTERM')) {
-                console.error(`[FFMPEG] Feeder error for '${track.title}': ${err.message}`);
-                currentFeederCommand = null;
-                currentFeederTrackId = null;
-                advanceTrack(); // Skip to next track on error
-            }
+        feeder.stdout.on('error', (err) => {
+             console.error(`[FFMPEG] Feeder stdout pipe error for '${track.title}':`, err);
+             advanceTrack();
         });
 
-        currentFeederCommand = command;
-        command.save(`tcp://127.0.0.1:${LOCAL_STREAM_PORT}`);
     } catch (e) {
         console.error('[FFMPEG] Failed to initialize feeder command:', e);
         advanceTrack(); // Try to recover
@@ -756,11 +759,10 @@ const startPlayoutForTrack = async (trackIndex) => {
 
 
 const advanceTrack = async (jumpToIndex = -1) => {
-    if (currentFeederCommand) {
-        currentFeederCommand.kill('SIGTERM');
-        currentFeederCommand = null;
-        currentFeederTrackId = null;
-    }
+    killProcess(currentFeederCommand);
+    currentFeederCommand = null;
+    currentFeederTrackId = null;
+
     const { sharedPlayerState, sharedPlaylist } = db.data;
     const studioData = db.data.userdata[studioClientEmail];
     const policy = studioData?.settings?.playoutPolicy || {};
@@ -877,11 +879,9 @@ const startPlayoutEngine = async (startIndex) => {
     playheadAnchorTime = Date.now();
     
     await startStreamingEngine();
-    // Give the listener a moment to start before the feeder tries to connect
-    setTimeout(() => {
-        startPlayoutForTrack(startIndex);
-        playoutInterval = setInterval(playoutTick, PLAYBACK_TICK_RATE);
-    }, 500);
+
+    startPlayoutForTrack(startIndex);
+    playoutInterval = setInterval(playoutTick, PLAYBACK_TICK_RATE);
 
     await db.write();
     broadcastState();
