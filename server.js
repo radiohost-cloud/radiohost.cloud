@@ -2020,9 +2020,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         let stationName = ${JSON.stringify(stationName || 'Live Stream')};
         let defaultLogoSrc = ${JSON.stringify(logoSrc || null)};
         let ws;
-        let lastKnownIcecastTitle = '';
-        let icecastStatusUrl = ${JSON.stringify(streamingConfig?.icecastStatusUrl || '')};
-
+        let lastKnownTitle = '';
 
         const getProminentColors = (img) => {
             const canvas = document.createElement('canvas');
@@ -2096,6 +2094,35 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             };
         };
 
+        const fetchArtwork = async (artist, title) => {
+            if (!artist || !title) return null;
+            const cleanArtist = artist.toLowerCase().trim();
+            const cleanTitle = title.toLowerCase().trim();
+            const searchTerm = encodeURIComponent(artist + ' ' + title);
+            const itunesUrl = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=5&country=US\`;
+            try {
+                const response = await fetch(itunesUrl);
+                if (!response.ok) return null;
+                const data = await response.json();
+                if (data.resultCount > 0) {
+                    const bestMatch = data.results.find(result =>
+                        result.artistName && result.trackName &&
+                        result.artistName.toLowerCase().includes(cleanArtist) &&
+                        result.trackName.toLowerCase().includes(cleanTitle)
+                    );
+                    const result = bestMatch || data.results[0];
+                    if (result && result.artworkUrl100) {
+                        const artworkUrl = result.artworkUrl100.replace('100x100', '600x600');
+                        return \`/api/artwork-proxy?url=\${encodeURIComponent(artworkUrl)}\`;
+                    }
+                }
+                return null;
+            } catch (e) {
+                console.error('Artwork fetch error:', e);
+                return null;
+            }
+        };
+        
         const updateLogo = (logoSrc) => {
             if (logoSrc) {
                 stationLogo.src = logoSrc;
@@ -2110,52 +2137,19 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         };
         
         const pollMetadata = async () => {
-            if (!icecastStatusUrl) {
-                // Fallback to old method if Icecast status URL isn't set
-                try {
-                    const response = await fetch('/api/stream-metadata');
-                    if (!response.ok) throw new Error('App metadata fetch failed');
-                    const data = await response.json();
-                    
-                    titleEl.textContent = data.title || '...';
-                    artistEl.textContent = data.artist || '...';
-                    const artworkUrl = data.artworkUrl;
-                    artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-                    updateDynamicBackground(artworkUrl);
-
-                    if ('mediaSession' in navigator) {
-                        navigator.mediaSession.metadata = new MediaMetadata({
-                            title: data.title || '...', artist: data.artist || stationName, album: stationName,
-                            artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
-                        });
-                    }
-                } catch (e) { console.error('Error polling app metadata:', e); }
-                setTimeout(pollMetadata, 5000);
-                return;
-            }
-
-            // New method: Poll Icecast as a trigger
             try {
-                const icecastResponse = await fetch(icecastStatusUrl);
-                if (!icecastResponse.ok) throw new Error('Icecast status fetch failed');
-                const icecastData = await icecastResponse.json();
-                const icestats = icecastData.icestats;
-                // Handle cases where source is an array or object
-                const source = Array.isArray(icestats.source) ? icestats.source.find(s => s.listenurl.endsWith(new URL(publicStreamUrl).pathname)) || icestats.source[0] : icestats.source;
-                const newIcecastTitle = source ? source.title : stationName;
-
-                if (newIcecastTitle !== lastKnownIcecastTitle) {
-                    console.log('Icecast metadata changed. Fetching authoritative data from app.');
-                    lastKnownIcecastTitle = newIcecastTitle;
+                const response = await fetch('/api/stream-metadata');
+                if (!response.ok) return;
+                const data = await response.json();
+                const currentFullTitle = \`\${data.artist || ''} - \${data.title || ''}\`;
+                
+                if (currentFullTitle !== lastKnownTitle) {
+                    lastKnownTitle = currentFullTitle;
                     
-                    const appMetaResponse = await fetch('/api/stream-metadata');
-                    if (!appMetaResponse.ok) throw new Error('App metadata fetch failed');
-                    const data = await appMetaResponse.json();
-
                     titleEl.textContent = data.title || '...';
                     artistEl.textContent = data.artist || '...';
                     
-                    const artworkUrl = data.artworkUrl;
+                    const artworkUrl = data.artworkUrl || await fetchArtwork(data.artist, data.title);
                     artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
                     updateDynamicBackground(artworkUrl);
         
@@ -2168,11 +2162,10 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                         });
                     }
                 }
-            } catch(e) {
-                console.error("Error polling Icecast metadata:", e);
+            } catch (e) {
+                console.error('Error polling metadata:', e);
             }
-
-            setTimeout(pollMetadata, 4000);
+            setTimeout(pollMetadata, 5000);
         };
 
         playBtn.addEventListener('click', () => {
@@ -2278,10 +2271,25 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             let isDrawerOpen = false;
 
             const updateDrawerPositions = () => {
-                const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
                 minPos = 0;
-                maxPos = viewportHeight - 70;
+                maxPos = window.innerHeight - 70;
             };
+            window.addEventListener('resize', updateDrawerPositions);
+            updateDrawerPositions();
+
+            // Keyboard fix for iOS
+            const visualViewport = window.visualViewport;
+            if (visualViewport) {
+                const handleViewportResize = () => {
+                    drawer.style.height = \`\${visualViewport.height}px\`;
+                    // When keyboard is open and drawer is open, keep it at the top
+                    if (isDrawerOpen) {
+                        drawer.style.transform = \`translateY(0px)\`;
+                    }
+                };
+                visualViewport.addEventListener('resize', handleViewportResize);
+            }
+
 
             const setDrawerPosition = (y, transitioning = false) => {
                 if(transitioning) drawer.classList.add('transitioning');
@@ -2334,22 +2342,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     else closeDrawer();
                 }
             });
-            
-            window.addEventListener('resize', updateDrawerPositions);
-
-            // Keyboard fix for iOS/Android
-            const visualViewport = window.visualViewport;
-            if (visualViewport) {
-                const handleViewportResize = () => {
-                    updateDrawerPositions(); // **THE FIX**
-                    drawer.style.height = \`\${visualViewport.height}px\`;
-                    if (isDrawerOpen) {
-                        drawer.style.transform = \`translateY(0px)\`;
-                    }
-                };
-                visualViewport.addEventListener('resize', handleViewportResize);
-            }
-             updateDrawerPositions();
         }
         
         if (nicknameInput) {
