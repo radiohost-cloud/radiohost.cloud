@@ -1,4 +1,3 @@
-
 import React, { useMemo, useState } from 'react';
 import { Toggle } from './Toggle';
 import { BroadcastIcon } from './icons/BroadcastIcon';
@@ -89,17 +88,6 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                     <div>
                         <label htmlFor="password" className="block text-sm font-medium mb-1">Password</label>
                         <input type="password" id="password" value={streamingConfig.password} onChange={e => handleConfigChange('password', e.target.value)} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"/>
-                    </div>
-                </div>
-                <div className="grid grid-cols-1">
-                    <div>
-                        <label htmlFor="bitrate" className="block text-sm font-medium mb-1">Bitrate</label>
-                        <select id="bitrate" value={streamingConfig.bitrate} onChange={e => handleConfigChange('bitrate', Number(e.target.value))} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed">
-                            <option value="128">128 kbps</option>
-                            <option value="192">192 kbps</option>
-                            <option value="256">256 kbps</option>
-                            <option value="320">320 kbps</option>
-                        </select>
                     </div>
                 </div>
                 <div>

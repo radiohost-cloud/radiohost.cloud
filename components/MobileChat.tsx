@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { type ChatMessage, type User } from '../types';
 import { CloseIcon } from './icons/CloseIcon';
@@ -21,39 +20,18 @@ const MobileChat: React.FC<MobileChatProps> = ({ isOpen, onClose, messages, onSe
     const [isEmojiPickerOpen, setIsEmojiPickerOpen] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
-    const containerRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         if (isOpen) {
+            // Use 'auto' instead of 'instant' for better performance on mobile when keyboard appears
             messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
-            setTimeout(() => inputRef.current?.focus(), 300);
+            setTimeout(() => inputRef.current?.focus(), 300); // After animation
         }
     }, [isOpen]);
     
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
-
-    useEffect(() => {
-        if (!isOpen) return;
-        const container = containerRef.current;
-        if (!container) return;
-
-        const handleResize = () => {
-            if (window.visualViewport) {
-                container.style.height = `${window.visualViewport.height}px`;
-                messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
-            }
-        };
-
-        window.visualViewport?.addEventListener('resize', handleResize);
-        handleResize(); // Set initial height
-
-        return () => {
-            window.visualViewport?.removeEventListener('resize', handleResize);
-            container.style.height = ''; // Reset on close
-        };
-    }, [isOpen]);
 
     const handleNicknameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const newNick = e.target.value;
@@ -79,7 +57,7 @@ const MobileChat: React.FC<MobileChatProps> = ({ isOpen, onClose, messages, onSe
     if (!isOpen) return null;
 
     return (
-        <div ref={containerRef} className="fixed top-0 left-0 w-full h-full bg-black z-40 flex flex-col animate-slide-in-up">
+        <div className="fixed top-0 left-0 w-full h-full bg-black z-40 flex flex-col animate-slide-in-up">
             {/* Header */}
             <header className="flex-shrink-0 flex items-center justify-between p-2 bg-neutral-900 border-b border-neutral-800">
                 <div className="flex-grow pl-2">

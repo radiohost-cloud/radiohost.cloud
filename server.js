@@ -1886,7 +1886,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #chat-window { position: fixed; bottom: 90px; right: 20px; width: 380px; height: 550px; background-color: #1a1a1a; border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
         #chat-window.open { display: flex; opacity: 1; transform: scale(1); }
         #chat-window:not(.open) { opacity: 0; transform: scale(0.9); }
-        .chat-header { padding: 10px 15px; background-color: var(--header-bg-color); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; transition: background-color 1s ease-in-out; }
+        .chat-header { padding: 10px 15px; background-color: #2a2a2a; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
         .chat-header h3 { margin: 0; font-size: 1rem; }
         .chat-header button { background: none; border: none; color: white; font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1; }
         #chat-messages { flex-grow: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; }
@@ -1912,10 +1912,11 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             
             #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background-color: #1a1a1a; flex-direction: column; transform: translateY(calc(100% - 70px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); }
             #chat-drawer.transitioning { transition: transform 0.3s ease-out; }
-            #chat-drawer-header { padding-bottom: 10px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; background: var(--header-bg-color); transition: background 1s ease-in-out; border-top-left-radius: 20px; border-top-right-radius: 20px; }
-            .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 8px auto 8px; }
+            #chat-drawer-header { padding: 10px 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; background: var(--header-bg-color); transition: background 1s ease-in-out; border-top-left-radius: 20px; border-top-right-radius: 20px; }
+            .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 8px; }
             #chat-drawer-header h3 { margin: 0; font-size: 0.9rem; }
             #chat-drawer-content { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; }
+            #chat-messages { flex-direction: column-reverse; }
             #mobile-chat-notification { position: absolute; top: 18px; right: 20px; width: 10px; height: 10px; background-color: #3b82f6; border-radius: 50%; display: none; }
         }
     </style>
@@ -2064,13 +2065,26 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 
         const fetchArtwork = async (artist, title) => {
             if (!artist || !title) return null;
-            const params = new URLSearchParams({ artist, title });
-            const url = \`/api/artwork?\${params.toString()}\`;
+            const cleanArtist = artist.toLowerCase().trim();
+            const cleanTitle = title.toLowerCase().trim();
+            const searchTerm = encodeURIComponent(artist + ' ' + title);
+            const url = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=5&country=US\`;
             try {
                 const response = await fetch(url);
                 if (!response.ok) return null;
-                const blob = await response.blob();
-                return URL.createObjectURL(blob);
+                const data = await response.json();
+                if (data.resultCount > 0) {
+                    const bestMatch = data.results.find(result =>
+                        result.artistName && result.trackName &&
+                        result.artistName.toLowerCase().includes(cleanArtist) &&
+                        result.trackName.toLowerCase().includes(cleanTitle)
+                    );
+                    const result = bestMatch || data.results[0];
+                    if (result && result.artworkUrl100) {
+                        return result.artworkUrl100.replace('100x100', '600x600');
+                    }
+                }
+                return null;
             } catch (e) {
                 console.error('Artwork fetch error:', e);
                 return null;
@@ -2095,21 +2109,16 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             artistEl.textContent = artist || '...';
             
             try {
-                const newArtworkUrl = await fetchArtwork(artist, title);
-
-                if (artworkEl.src && artworkEl.src.startsWith('blob:')) {
-                    URL.revokeObjectURL(artworkEl.src);
-                }
-
-                artworkEl.src = newArtworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-                updateDynamicBackground(newArtworkUrl);
+                const artworkUrl = await fetchArtwork(artist, title);
+                artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+                updateDynamicBackground(artworkUrl);
     
                 if ('mediaSession' in navigator) {
                     navigator.mediaSession.metadata = new MediaMetadata({
                         title: title || '...',
                         artist: artist || 'RadioHost.cloud',
                         album: stationName,
-                        artwork: newArtworkUrl ? [{ src: newArtworkUrl, sizes: '512x512' }] : []
+                        artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
                     });
                 }
             } catch (e) {
@@ -2173,7 +2182,12 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             msgDiv.innerHTML = content;
             if(chatMessages) {
                 chatMessages.appendChild(msgDiv);
-                chatMessages.scrollTop = chatMessages.scrollHeight;
+                // For column-reverse, scroll to bottom is scroll to top of element
+                if (window.innerWidth <= 768) {
+                   chatMessages.scrollTop = 0;
+                } else {
+                   chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
             }
         };
         
@@ -2288,13 +2302,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     else closeDrawer();
                 }
             });
-
-            if (window.visualViewport) {
-                const handleResize = () => {
-                    drawer.style.height = \`\${window.visualViewport.height}px\`;
-                };
-                window.visualViewport.addEventListener('resize', handleResize);
-            }
         }
         
         if (nicknameInput) {
@@ -2634,31 +2641,6 @@ app.get('/api/stream-metadata', async (req, res) => {
     }
 });
 
-app.get('/api/artwork', async (req, res) => {
-    const { artist, title } = req.query;
-    if (!artist || !title) {
-        return res.status(400).json({ message: 'Artist and title are required.' });
-    }
-    try {
-        const imageUrl = await fetchArtwork(artist, title);
-        if (!imageUrl) {
-            return res.status(404).json({ message: 'Artwork not found.' });
-        }
-        const imageResponse = await fetch(imageUrl);
-        if (!imageResponse.ok) {
-            return res.status(imageResponse.status).send(imageResponse.statusText);
-        }
-        imageResponse.headers.forEach((value, name) => {
-            if (name.toLowerCase() !== 'transfer-encoding' && name.toLowerCase() !== 'connection') {
-                res.setHeader(name, value);
-            }
-        });
-        imageResponse.body.pipe(res);
-    } catch (error) {
-        console.error('[Artwork Proxy] Error:', error);
-        res.status(500).json({ message: 'Error fetching artwork.' });
-    }
-});
 
 app.get('/stream', async (req, res) => {
     const settings = await getStationSettings();
@@ -2733,6 +2715,7 @@ if (fs.existsSync(distPath)) {
     console.log(`[Startup] Scan complete. Found ${libraryState.children.length} items in root.`);
 
     const studioUser = db.data.users.find(u => u.role === 'studio');
+    // FIX: Set the global studioClientEmail here so that startup procedures can find the correct settings.
     if (studioUser) {
         studioClientEmail = studioUser.email;
     }
