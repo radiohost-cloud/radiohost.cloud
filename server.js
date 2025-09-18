@@ -605,14 +605,29 @@ const startStreamingEngine = async () => {
     console.log('[FFMPEG] Starting persistent Icecast streaming process...');
     
     try {
-        const command = ffmpeg()
-            .input(`tcp://127.0.0.1:${LOCAL_STREAM_PORT}?listen=2`)
-            .inputFormat('s16le')
-            .inputOptions(['-ar 44100', '-ac 2', '-re']);
-        
         const bitrateK = streamConfig.bitrate || 128;
-        
-        command.audioCodec('libmp3lame')
+        const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
+        const outputUrl = `icecast://${username}:${password}@${serverAddress}`;
+
+        const command = ffmpeg()
+            // Input 1: Infinite silent audio to keep the process alive
+            .input('anullsrc')
+            .inputFormat('lavfi')
+            .inputOptions(['-ar', '44100', '-ac', '2'])
+            
+            // Input 2: TCP listener for the track feeders
+            .input(`tcp://127.0.0.1:${LOCAL_STREAM_PORT}?listen=1`)
+            .inputFormat('s16le')
+            .inputOptions(['-ar', '44100', '-ac', '2'])
+            
+            // Mix the two inputs. The amix filter will run as long as the longest input (anullsrc) is active.
+            .complexFilter([
+                '[0:a][1:a]amix=inputs=2:duration=longest[aout]'
+            ])
+            .map('[aout]')
+            
+            // Output encoding and streaming settings
+            .audioCodec('libmp3lame')
             .audioBitrate(`${bitrateK}k`)
             .audioFrequency(44100)
             .audioChannels(2)
@@ -620,26 +635,18 @@ const startStreamingEngine = async () => {
             .outputOptions([
                 '-loglevel', 'error',
                 '-content_type', 'audio/mpeg',
-                '-minrate', `${bitrateK}k`,
-                '-maxrate', `${bitrateK}k`,
-                '-bufsize', `${bitrateK * 2}k`,
+                '-ice_name', stationName || 'RadioHost.cloud',
+                '-ice_genre', stationGenre || 'Various',
+                '-ice_url', stationUrl || 'https://radiohost.cloud',
+                '-ice_description', stationDescription || 'Powered by RadioHost.cloud',
+                '-ice_public', '1',
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '5'
             ]);
-
-        const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
-        const outputUrl = `icecast://${username}:${password}@${serverAddress}`;
-        command.outputOptions([
-            '-ice_name', stationName || 'RadioHost.cloud',
-            '-ice_genre', stationGenre || 'Various',
-            '-ice_url', stationUrl || 'https://radiohost.cloud',
-            '-ice_description', stationDescription || 'Powered by RadioHost.cloud',
-            '-ice_public', '1',
-            '-reconnect', '1',
-            '-reconnect_streamed', '1',
-            '-reconnect_delay_max', '5'
-        ]);
-
+        
         command.on('start', (cmdLine) => {
-            console.log('[FFMPEG] Persistent Icecast connection established.');
+            console.log('[FFMPEG] Persistent Icecast connection established with mixing.');
             serverStreamStatus = 'broadcasting';
             serverStreamError = null;
             broadcastStreamStatus();
@@ -651,7 +658,6 @@ const startStreamingEngine = async () => {
                 serverStreamStatus = 'error';
                 serverStreamError = err.message;
                 broadcastStreamStatus();
-                // Attempt to restart the whole engine
                 if (db.data.sharedPlayerState.isPlaying) {
                     console.log('[Playout] Restarting playout engine due to main stream error.');
                     stopPlayoutEngine(false);
