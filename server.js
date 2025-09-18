@@ -32,7 +32,7 @@ const defaultData = {
     userdata: {},
     mediaCache: {},
     folderMetadata: {},
-    persistentMetadata: {}, // NEW: For metadata of non-ID3 files like VTs
+    persistentMetadata: {}, // For metadata of non-ID3 files like VTs
     sharedPlaylist: [],
     sharedPlayerState: {
         currentPlayingItemId: null,
@@ -239,6 +239,19 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
 };
 
 let libraryState = { id: 'root', name: 'Media Library', type: 'folder', children: [] };
+let studioUserEmail = null;
+
+const initStudioUser = () => {
+    const studioUser = db.data.users.find(u => u.role === 'studio');
+    if (studioUser) {
+        studioUserEmail = studioUser.email;
+        console.log(`[Server] Designated studio user is '${studioUserEmail}'. Their settings will drive server operation.`);
+    } else {
+        studioUserEmail = null;
+        console.warn('[Server] No user with "studio" role found. Automation and streaming features will be disabled until a studio user is configured.');
+    }
+};
+
 
 const findTrackInServerTree = (node, trackId) => {
     for (const child of node.children) {
@@ -359,8 +372,15 @@ const applyTagsRecursively = async (relativePath, tags) => {
 
 
 const getStationSettings = async () => {
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    const userData = studioUser ? db.data.userdata[studioUser.email] : null;
+    if (!studioUserEmail) {
+        return {
+            streamingConfig: {},
+            stationName: 'RadioHost.cloud Stream',
+            description: 'Live internet radio stream.',
+            logoSrc: null,
+        };
+    }
+    const userData = db.data.userdata[studioUserEmail] || {};
     const settings = userData?.settings;
 
     return {
@@ -373,7 +393,6 @@ const getStationSettings = async () => {
 
 
 const clients = new Map();
-let studioClientEmail = null;
 const presenterEmails = new Set();
 let currentLogoSrc = null;
 
@@ -421,7 +440,7 @@ const broadcastState = () => {
     const statePayload = {
         playlist: getPlaylistWithSkipStatus(),
         playerState: db.data.sharedPlayerState,
-        broadcasts: db.data.userdata[studioClientEmail]?.broadcasts || [],
+        broadcasts: (studioUserEmail && db.data.userdata[studioUserEmail]?.broadcasts) || [],
     };
     const message = JSON.stringify({ type: 'state-update', payload: statePayload });
     clients.forEach((ws, email) => {
@@ -433,8 +452,8 @@ const broadcastState = () => {
 };
 
 const broadcastPresenterList = async () => {
-    if (!studioClientEmail) return;
-    const studioWs = clients.get(studioClientEmail);
+    if (!studioUserEmail) return;
+    const studioWs = clients.get(studioUserEmail);
     if (!studioWs || studioWs.readyState !== WebSocket.OPEN) return;
 
     const presenters = db.data.users
@@ -504,7 +523,8 @@ const getSuppressionSettingsFromServer = (track) => {
 };
 
 const updateIcecastMetadata = async (track) => {
-    const studioData = db.data.userdata[studioClientEmail];
+    if (!studioUserEmail) return;
+    const studioData = db.data.userdata[studioUserEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
 
     if (!streamConfig || !streamConfig.isEnabled || !streamConfig.serverAddress) {
@@ -569,8 +589,8 @@ const killProcess = (process) => {
 };
 
 const broadcastStreamStatus = () => {
-    if (!studioClientEmail) return;
-    const studioWs = clients.get(studioClientEmail);
+    if (!studioUserEmail) return;
+    const studioWs = clients.get(studioUserEmail);
     if (studioWs && studioWs.readyState === WebSocket.OPEN) {
         studioWs.send(JSON.stringify({
             type: 'stream-status-update',
@@ -632,8 +652,13 @@ const startStreamingEngine = () => {
 
     return new Promise((resolve, reject) => {
         killProcess(icecastStreamCommand);
+        if (!studioUserEmail) {
+            isEngineStarting = false;
+            resolve();
+            return;
+        }
 
-        const studioData = db.data.userdata[studioClientEmail];
+        const studioData = db.data.userdata[studioUserEmail];
         const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
 
         if (!streamConfig || !streamConfig.isEnabled) {
@@ -739,7 +764,23 @@ const startPlayoutForTrack = async (trackIndex) => {
         advanceTrack(trackIndex + 1);
         return;
     }
+    
+    await updateIcecastMetadata(track);
+    
+    const studioData = db.data.userdata[studioUserEmail];
+    const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
 
+    if (!streamConfig || !streamConfig.isEnabled) {
+        console.log(`[Playout] Streaming is disabled. Simulating playback for track: "${track.title}"`);
+        // Simulating playback end for non-streaming mode
+        setTimeout(() => {
+            if (currentFeederTrackId === track.id && db.data.sharedPlayerState.isPlaying) {
+                advanceTrack();
+            }
+        }, track.duration * 1000);
+        return;
+    }
+    
     if (!icecastStreamCommand || !icecastStreamCommand.stdin || icecastStreamCommand.killed) {
         console.error('[Playout] Main stream command is not running. Attempting to restart engine before feeding track.');
         try {
@@ -754,8 +795,6 @@ const startPlayoutForTrack = async (trackIndex) => {
             return;
         }
     }
-    
-    await updateIcecastMetadata(track);
 
     const trackPath = path.join(mediaDir, track.originalId || track.id);
     if (!fs.existsSync(trackPath)) {
@@ -768,20 +807,6 @@ const startPlayoutForTrack = async (trackIndex) => {
     
     currentFeederTrackId = track.id;
 
-    const studioData = db.data.userdata[studioClientEmail];
-    const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
-
-    if (!streamConfig || !streamConfig.isEnabled) {
-        console.log(`[Playout] Streaming is disabled. Simulating playback for track: "${track.title}"`);
-        // Simulating playback end for non-streaming mode
-        setTimeout(() => {
-            if (currentFeederTrackId === track.id && db.data.sharedPlayerState.isPlaying) {
-                advanceTrack();
-            }
-        }, track.duration * 1000);
-        return;
-    }
-    
     console.log(`[Playout] Starting feeder for track: "${track.title}"`);
     try {
         const args = ['-i', trackPath, '-f', 's16le', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', '-loglevel', 'error', '-'];
@@ -851,7 +876,11 @@ const advanceTrack = async (jumpToIndex = -1) => {
     currentFeederTrackId = null;
 
     const { sharedPlayerState, sharedPlaylist } = db.data;
-    const studioData = db.data.userdata[studioClientEmail];
+    if (!studioUserEmail) {
+        await pausePlayout();
+        return;
+    }
+    const studioData = db.data.userdata[studioUserEmail];
     const policy = studioData?.settings?.playoutPolicy || {};
 
     let nextIndex;
@@ -981,9 +1010,8 @@ const getAllTracksFromNode = (node) => {
 };
 
 const performAutofill = async () => {
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    if (!studioUser) return;
-    const studioData = db.data.userdata[studioUser.email];
+    if (!studioUserEmail) return;
+    const studioData = db.data.userdata[studioUserEmail];
     const policy = studioData?.settings?.playoutPolicy;
 
     if (!policy || !policy.isAutoFillEnabled || !policy.autoFillSourceId) {
@@ -1068,12 +1096,12 @@ const performAutofill = async () => {
 };
 
 const checkAndTriggerAutofill = async () => {
+    if (!studioUserEmail) return;
+
     const { sharedPlaylist, sharedPlayerState } = db.data;
     const { isPlaying, currentTrackIndex, trackProgress } = sharedPlayerState;
 
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    if (!studioUser) return;
-    const studioData = db.data.userdata[studioUser.email];
+    const studioData = db.data.userdata[studioUserEmail];
     const policy = studioData?.settings?.playoutPolicy;
 
     if (!policy || !policy.isAutoFillEnabled) return;
@@ -1103,9 +1131,8 @@ const setupAutoMode = async () => {
     if (autoFillInterval) clearInterval(autoFillInterval);
     autoFillInterval = null;
     
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    if (!studioUser) return;
-    const studioData = db.data.userdata[studioUser.email];
+    if (!studioUserEmail) return;
+    const studioData = db.data.userdata[studioUserEmail];
     
     if (studioData?.settings?.isAutoModeEnabled) {
         console.log('[Auto-Mode] Auto mode is enabled. Starting automation checks.');
@@ -1165,7 +1192,7 @@ const loadBroadcastIntoPlaylist = async (broadcast) => {
         console.log('[Scheduler] Player is inactive. Inserting broadcast at the start of the playlist.');
     }
     
-    const studioData = db.data.userdata[studioClientEmail];
+    const studioData = db.data.userdata[studioUserEmail];
     const isAutoMode = studioData?.settings?.isAutoModeEnabled;
     if (isAutoMode && !db.data.sharedPlayerState.isPlaying && db.data.sharedPlaylist.length > 0) {
         console.log('[Scheduler] Starting playout for newly loaded broadcast.');
@@ -1235,10 +1262,10 @@ const getNextOccurrence = (broadcast) => {
 };
 
 const checkScheduledBroadcasts = async () => {
-    if (!studioClientEmail) return;
+    if (!studioUserEmail) return;
 
     const now = Date.now();
-    const studioData = db.data.userdata[studioClientEmail];
+    const studioData = db.data.userdata[studioUserEmail];
     const broadcasts = studioData?.broadcasts || [];
     let stateChanged = false;
 
@@ -1289,8 +1316,8 @@ wss.on('connection', async (ws, req) => {
                         timestamp: Date.now()
                     };
 
-                    if (studioClientEmail) {
-                        const studioWs = clients.get(studioClientEmail);
+                    if (studioUserEmail) {
+                        const studioWs = clients.get(studioUserEmail);
                         if (studioWs && studioWs.readyState === WebSocket.OPEN) {
                             studioWs.send(JSON.stringify({ type: 'chatMessage', payload: listenerMessage }));
                         }
@@ -1330,18 +1357,17 @@ wss.on('connection', async (ws, req) => {
     console.log(`[WebSocket] Client connected: ${email} (Role: ${user.role})`);
     clients.set(email, ws);
 
-    if (user.role === 'studio') {
-        studioClientEmail = email;
-        broadcastStreamStatus();
-    } else if (user.role === 'presenter') {
+    if (user.role === 'presenter') {
         presenterEmails.add(email);
+        broadcastPresenterList();
     }
-
-    broadcastPresenterList();
 
     if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'library-update', payload: libraryState }));
         broadcastState();
+        if (user.role === 'studio') {
+            broadcastStreamStatus();
+        }
     }
 
     ws.on('message', async (message) => {
@@ -1358,7 +1384,7 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'studio-command':
-                    if (studioClientEmail && studioClientEmail === email) {
+                    if (studioUserEmail && studioUserEmail === email) {
                         const { command, payload } = data.payload;
                         console.log(`[WebSocket] Processing studio command: ${command}`);
                 
@@ -1449,7 +1475,6 @@ wss.on('connection', async (ws, req) => {
                                                 if (fs.existsSync(artworkPath)) await fsPromises.unlink(artworkPath);
                                             }
                                             if (db.data.persistentMetadata?.[id]) {
-                                                // FIX: Replaced `delete` with `Reflect.deleteProperty` to avoid strict mode errors.
                                                 Reflect.deleteProperty(db.data.persistentMetadata, id);
                                             }
                                         }
@@ -1521,7 +1546,7 @@ wss.on('connection', async (ws, req) => {
                                 break;
                             }
                             case 'toggleAutoMode': {
-                                const studioData = db.data.userdata[studioClientEmail];
+                                const studioData = db.data.userdata[studioUserEmail];
                                 if (studioData) {
                                     if (!studioData.settings) studioData.settings = {};
                                     studioData.settings.isAutoModeEnabled = payload.enabled;
@@ -1643,7 +1668,7 @@ wss.on('connection', async (ws, req) => {
                                 await stopStreamingEngine(false); // Stop engine, don't broadcast yet
                                 await db.write();
 
-                                const studioData = db.data.userdata[studioClientEmail];
+                                const studioData = db.data.userdata[studioUserEmail];
                                 if (studioData?.settings?.isAutoModeEnabled) {
                                     console.log('[Auto-Fill] Triggering autofill after playlist clear.');
                                     await performAutofill();
@@ -1654,7 +1679,7 @@ wss.on('connection', async (ws, req) => {
                              case 'saveBroadcast': {
                                 const { broadcast } = payload;
                                 if (!broadcast) break;
-                                const studioData = db.data.userdata[studioClientEmail];
+                                const studioData = db.data.userdata[studioUserEmail];
                                 if (studioData) {
                                     if (!studioData.broadcasts) studioData.broadcasts = [];
                                     const index = studioData.broadcasts.findIndex(b => b.id === broadcast.id);
@@ -1670,7 +1695,7 @@ wss.on('connection', async (ws, req) => {
                             }
                             case 'deleteBroadcast': {
                                 const { broadcastId } = payload;
-                                const studioData = db.data.userdata[studioClientEmail];
+                                const studioData = db.data.userdata[studioUserEmail];
                                 if (studioData && studioData.broadcasts) {
                                     studioData.broadcasts = studioData.broadcasts.filter(b => b.id !== broadcastId);
                                     await db.write();
@@ -1680,7 +1705,7 @@ wss.on('connection', async (ws, req) => {
                             }
                              case 'loadBroadcast': {
                                 const { broadcastId } = payload;
-                                const studioData = db.data.userdata[studioClientEmail];
+                                const studioData = db.data.userdata[studioUserEmail];
                                 const broadcast = studioData?.broadcasts?.find(b => b.id === broadcastId);
                                 if (broadcast) {
                                     await loadBroadcastIntoPlaylist(broadcast);
@@ -1692,7 +1717,7 @@ wss.on('connection', async (ws, req) => {
                     break;
 
                 case 'chatMessage':
-                    if (studioClientEmail && studioClientEmail === email) {
+                    if (studioUserEmail && studioUserEmail === email) {
                         const studioMessage = {
                             from: 'Studio',
                             text: data.payload.text,
@@ -1707,7 +1732,7 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'configUpdate':
-                    if (studioClientEmail && studioClientEmail === email) {
+                    if (studioUserEmail && studioUserEmail === email) {
                         currentLogoSrc = data.payload.logoSrc;
                         console.log(`[WebSocket] Studio updated logo.`);
                         browserPlayerClients.forEach(clientWs => {
@@ -1730,7 +1755,7 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'voiceTrackAdd':
-                    if (user && user.role === 'presenter' && studioClientEmail) {
+                    if (user && user.role === 'presenter' && studioUserEmail) {
                         console.log(`[WebSocket] Received VT from presenter ${email}. Adding to playlist.`);
                         const { voiceTrack, beforeItemId } = data.payload;
                         if (voiceTrack && voiceTrack.id) {
@@ -1745,8 +1770,8 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'presenter-state-change':
-                    if (studioClientEmail) {
-                        const studioWs = clients.get(studioClientEmail);
+                    if (studioUserEmail) {
+                        const studioWs = clients.get(studioUserEmail);
                         if (studioWs && studioWs.readyState === WebSocket.OPEN) {
                             console.log(`[WebSocket] Relaying on-air status change from ${email} to studio.`);
                             studioWs.send(JSON.stringify({
@@ -1765,16 +1790,8 @@ wss.on('connection', async (ws, req) => {
     ws.on('close', () => {
         console.log(`[WebSocket] Client disconnected: ${email}`);
         clients.delete(email);
-        let listChanged = false;
-        if (studioClientEmail === email) {
-            studioClientEmail = null;
-        }
         if (presenterEmails.has(email)) {
             presenterEmails.delete(email);
-            listChanged = true;
-        }
-
-        if (listChanged) {
             broadcastPresenterList();
         }
     });
@@ -2456,6 +2473,7 @@ app.post('/api/signup', async (req, res) => {
     const newUser = { email, password, nickname, role };
     db.data.users.push(newUser);
     await db.write();
+    initStudioUser(); // Re-check for a studio user
     const { password: _, ...userToReturn } = newUser;
     res.status(201).json(userToReturn);
 });
@@ -2497,6 +2515,7 @@ app.put('/api/user/:email/role', async (req, res) => {
     if (user) {
         user.role = role;
         await db.write();
+        initStudioUser(); // Re-check for a studio user in case roles changed
         const { password, ...userToReturn } = user;
         res.json(userToReturn);
     } else {
@@ -2512,6 +2531,14 @@ app.get('/api/userdata/:email', (req, res) => {
 
 app.post('/api/userdata/:email', async (req, res) => {
     const { email } = req.params;
+    if (email !== studioUserEmail) {
+        // Only allow non-studio users to save their own specific settings, not global ones.
+         const { settings, audioConfig, cartwallPages } = req.body;
+         db.data.userdata[email] = { ...(db.data.userdata[email] || {}), settings, audioConfig, cartwallPages };
+         await db.write();
+         return res.json({ success: true });
+    }
+
     const oldConfig = db.data.userdata[email]?.settings?.playoutPolicy?.streamingConfig;
     
     db.data.userdata[email] = req.body;
@@ -2722,8 +2749,9 @@ const setupAutoBackup = async () => {
     if (backupInterval) {
         clearInterval(backupInterval);
     }
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
+    if (!studioUserEmail) return;
+
+    const studioData = db.data.userdata[studioUserEmail];
     const settings = studioData?.settings;
 
     if (settings?.isAutoBackupEnabled && settings?.autoBackupInterval > 0) {
@@ -2754,16 +2782,13 @@ if (fs.existsSync(distPath)) {
 
 
 (async () => {
+    initStudioUser();
     console.log('[Startup] Performing initial media library scan...');
     libraryState.children = await scanMediaToTree(mediaDir);
     await db.write();
     console.log(`[Startup] Scan complete. Found ${libraryState.children.length} items in root.`);
 
-    const studioUser = db.data.users.find(u => u.role === 'studio');
-    if (studioUser) {
-        studioClientEmail = studioUser.email;
-    }
-    const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
+    const studioData = studioUserEmail ? db.data.userdata[studioUserEmail] : null;
 
     if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length === 0) {
         console.log('[Auto-Mode] Playlist is empty on startup. Triggering initial fill.');
