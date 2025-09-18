@@ -1806,7 +1806,7 @@ app.use('/media', express.static(mediaDir, {
 }));
 app.use('/artwork', express.static(artworkDir));
 
-const getPlayerPageHTML = (stationName, streamingConfig) => `
+const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 <!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
@@ -1814,17 +1814,52 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>${stationName || 'RadioHost.cloud Live Player'}</title>
     <style>
-        :root { --bg-color: #000; --text-color: #fff; --subtext-color: #a0a0a0; --accent-color: #ef4444; }
+        :root { 
+            --bg-gradient: linear-gradient(45deg, #1a1a1a, #000000); 
+            --text-color: #ffffff; 
+            --subtext-color: #a0a0a0; 
+            --accent-color: #ef4444; 
+            --container-bg: rgba(0, 0, 0, 0.3);
+        }
         html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
-        body { background-color: var(--bg-color); color: var(--text-color); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px; box-sizing: border-box; overflow: hidden; }
-        .player-container { max-width: 350px; width: 100%; background: rgba(255,255,255,0.05); border-radius: 20px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); backdrop-filter: blur(10px); }
-        #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease; }
+        body { 
+            background: var(--bg-gradient); 
+            background-size: 200% 200%;
+            color: var(--text-color); 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            text-align: center; 
+            padding: 20px; 
+            box-sizing: border-box; 
+            overflow: hidden; 
+            transition: background 1s ease-in-out, color 1s ease-in-out;
+            animation: gradient-animation 15s ease infinite;
+        }
+        @keyframes gradient-animation {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        .player-container { 
+            max-width: 350px; 
+            width: 100%; 
+            background: var(--container-bg); 
+            border-radius: 20px; 
+            padding: 30px; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5); 
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease, box-shadow 0.3s ease; box-shadow: 0 5px 20px rgba(0,0,0,0.3); }
         #title { font-size: 1.5rem; font-weight: bold; margin: 0; min-height: 2.25rem; }
-        #artist { font-size: 1rem; color: var(--subtext-color); margin: 5px 0 20px; min-height: 1.5rem; }
+        #artist { font-size: 1rem; color: var(--subtext-color); margin: 5px 0 20px; min-height: 1.5rem; transition: color 1s ease-in-out; }
         .play-button { background-color: var(--accent-color); color: white; border: none; border-radius: 50%; width: 60px; height: 60px; font-size: 2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; margin: 0 auto; transition: background-color 0.2s; }
         .play-button:hover { background-color: #d03838; }
-        .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; }
-        .footer a { color: var(--text-color); text-decoration: none; }
+        .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; transition: color 1s ease-in-out; }
+        .footer a { color: var(--text-color); text-decoration: none; transition: color 1s ease-in-out; }
         
         #chat-bubble { position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 15px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
         #chat-bubble:hover { transform: scale(1.1); }
@@ -1891,6 +1926,7 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
         const titleEl = document.getElementById('title');
         const artistEl = document.getElementById('artist');
         const artworkEl = document.getElementById('artwork');
+        const rootEl = document.documentElement;
 
         const chatBubble = document.getElementById('chat-bubble');
         const chatNotification = document.getElementById('chat-notification');
@@ -1904,9 +1940,75 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
         let publicStreamUrl = '';
         let icecastStatusUrl = ${JSON.stringify(streamingConfig?.icecastStatusUrl || null)};
         let stationName = ${JSON.stringify(stationName || 'Live Stream')};
-        let logoSrc = ${JSON.stringify(streamingConfig?.logoSrc || null)};
+        let defaultLogoSrc = ${JSON.stringify(logoSrc || null)} || 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
         let ws;
         let lastKnownTitle = '';
+
+        const getProminentColors = (img) => {
+            const canvas = document.createElement('canvas');
+            const MAX_WIDTH = 100;
+            const scale = MAX_WIDTH / img.width;
+            canvas.width = MAX_WIDTH;
+            canvas.height = img.height * scale;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            if (!ctx) return { colors: ['#1a1a1a', '#000000'], textColor: 'white' };
+            
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+            const colorCounts = {};
+            
+            for (let i = 0; i < imageData.length; i += 16) { // Sample pixels for performance
+                const r = imageData[i], g = imageData[i + 1], b = imageData[i + 2], a = imageData[i + 3];
+                if (a < 128) continue;
+                const key = [Math.round(r/16)*16, Math.round(g/16)*16, Math.round(b/16)*16].join(',');
+                colorCounts[key] = (colorCounts[key] || 0) + 1;
+            }
+
+            const sortedColorKeys = Object.keys(colorCounts).sort((a, b) => colorCounts[b] - colorCounts[a]);
+            const getLuminance = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
+
+            const filteredColors = sortedColorKeys.filter(key => {
+                const [r, g, b] = key.split(',').map(Number);
+                const max = Math.max(r, g, b), min = Math.min(r, g, b);
+                if ((r + g + b) / 3 < 25 || (r + g + b) / 3 > 230) return false; // Filter near black/white
+                if (max - min < 15) return false; // Filter greys
+                return true;
+            });
+
+            const prominentColorKeys = filteredColors.slice(0, 2);
+            if (prominentColorKeys.length < 2) return { colors: ['#1a1a1a', '#000000'], textColor: 'white' };
+
+            const color1 = prominentColorKeys[0].split(',').map(Number);
+            const color2 = prominentColorKeys[1].split(',').map(Number);
+            const avgLuminance = (getLuminance(...color1) + getLuminance(...color2)) / 2;
+            const textColor = avgLuminance > 140 ? 'black' : 'white';
+            
+            return { colors: prominentColorKeys.map(key => \`rgb(\${key})\`), textColor };
+        };
+
+        const updateDynamicBackground = (imageUrl) => {
+            if (!imageUrl) {
+                rootEl.style.setProperty('--bg-gradient', 'linear-gradient(45deg, #1a1a1a, #000000)');
+                rootEl.style.setProperty('--text-color', '#ffffff');
+                rootEl.style.setProperty('--subtext-color', '#a0a0a0');
+                rootEl.style.setProperty('--container-bg', 'rgba(0, 0, 0, 0.3)');
+                return;
+            }
+            const img = new Image();
+            img.crossOrigin = "Anonymous";
+            img.src = imageUrl;
+            img.onload = () => {
+                const { colors, textColor } = getProminentColors(img);
+                rootEl.style.setProperty('--bg-gradient', \`linear-gradient(45deg, \${colors[0]}, \${colors[1]})\`);
+                rootEl.style.setProperty('--text-color', textColor === 'white' ? '#ffffff' : '#000000');
+                rootEl.style.setProperty('--subtext-color', textColor === 'white' ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)');
+                rootEl.style.setProperty('--container-bg', textColor === 'white' ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)');
+            };
+            img.onerror = () => {
+                // If image fails to load (e.g., CORS), revert to default
+                updateDynamicBackground(null);
+            }
+        };
 
         const fetchArtwork = async (artist, title) => {
             if (!artist || !title) return null;
@@ -1941,7 +2043,8 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
             artistEl.textContent = artist || '...';
             
             const artworkUrl = await fetchArtwork(artist, title);
-            artworkEl.src = artworkUrl || logoSrc || 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
+            artworkEl.src = artworkUrl || defaultLogoSrc;
+            updateDynamicBackground(artworkUrl);
 
             if ('mediaSession' in navigator) {
                 navigator.mediaSession.metadata = new MediaMetadata({
@@ -1959,11 +2062,15 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
                 return;
             }
             try {
-                const response = await fetch(icecastStatusUrl);
+                // Add a cache-busting query parameter
+                const url = new URL(icecastStatusUrl);
+                url.searchParams.set('_', new Date().getTime());
+                
+                const response = await fetch(url);
                 const data = await response.json();
                 const source = data?.icestats?.source;
                 const sourceInfo = Array.isArray(source) ? source[0] : source;
-                const currentTitle = sourceInfo?.title || 'Silence';
+                const currentTitle = sourceInfo?.title || stationName || 'Live Stream';
                 
                 if (currentTitle !== lastKnownTitle) {
                     lastKnownTitle = currentTitle;
@@ -1972,7 +2079,7 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
                     let [artist, title] = currentTitle.split(' - ').map(s => s.trim());
                     if (!title) {
                         title = artist;
-                        artist = 'Unknown Artist';
+                        artist = stationName;
                     }
                     updateMetadataDisplay(title, artist);
                 }
@@ -2016,7 +2123,7 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
                     const { payload } = data;
                     publicStreamUrl = payload.publicStreamUrl;
                     icecastStatusUrl = payload.icecastStatusUrl;
-                    logoSrc = payload.logoSrc;
+                    if (payload.logoSrc) defaultLogoSrc = payload.logoSrc;
                     stationName = payload.stationName;
 
                     if (publicStreamUrl && !audioPlayer.src) {
@@ -2278,7 +2385,7 @@ app.post('/api/folder', async (req, res) => {
 app.get('/stream', async (req, res) => {
     const settings = await getStationSettings();
     if(settings?.streamingConfig?.publicPlayerEnabled){
-        res.send(getPlayerPageHTML(settings.stationName, settings.streamingConfig));
+        res.send(getPlayerPageHTML(settings.stationName, settings.streamingConfig, settings.logoSrc));
     } else {
         res.status(403).send('<h1>Public player is not enabled.</h1>');
     }
