@@ -2687,7 +2687,8 @@ app.get('/api/artwork-proxy', async (req, res) => {
         if (contentType) {
             res.setHeader('Content-Type', contentType);
         }
-        response.body.pipe(res);
+        const imageBuffer = await response.arrayBuffer();
+        res.send(Buffer.from(imageBuffer));
     } catch (error) {
         console.error('Artwork proxy error:', error);
         res.status(500).send('Failed to fetch image.');
