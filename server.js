@@ -2272,24 +2272,11 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 
             const updateDrawerPositions = () => {
                 minPos = 0;
-                maxPos = window.innerHeight - 70;
+                const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+                maxPos = viewportHeight - 70;
             };
             window.addEventListener('resize', updateDrawerPositions);
             updateDrawerPositions();
-
-            // Keyboard fix for iOS
-            const visualViewport = window.visualViewport;
-            if (visualViewport) {
-                const handleViewportResize = () => {
-                    drawer.style.height = \`\${visualViewport.height}px\`;
-                    // When keyboard is open and drawer is open, keep it at the top
-                    if (isDrawerOpen) {
-                        drawer.style.transform = \`translateY(0px)\`;
-                    }
-                };
-                visualViewport.addEventListener('resize', handleViewportResize);
-            }
-
 
             const setDrawerPosition = (y, transitioning = false) => {
                 if(transitioning) drawer.classList.add('transitioning');
@@ -2311,6 +2298,25 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 
             const openDrawer = () => { setDrawerPosition(minPos, true); isDrawerOpen = true; if (messageInput) messageInput.focus(); mobileChatNotification.style.display = 'none'; };
             const closeDrawer = () => { setDrawerPosition(maxPos, true); isDrawerOpen = false; if (messageInput) messageInput.blur(); };
+            
+            // Keyboard fix
+            const visualViewport = window.visualViewport;
+            if (visualViewport) {
+                const handleViewportResize = () => {
+                    // Update layout variables first, based on the new visible height.
+                    updateDrawerPositions();
+                    drawer.style.height = \`\${visualViewport.height}px\`;
+
+                    // Now, re-apply the current state (open/closed) using the new layout values.
+                    // This ensures all related visuals (like player opacity) are also correctly updated.
+                    if (isDrawerOpen) {
+                        setDrawerPosition(minPos, false); // Resnap to open position
+                    } else {
+                        setDrawerPosition(maxPos, false); // Resnap to closed position
+                    }
+                };
+                visualViewport.addEventListener('resize', handleViewportResize);
+            }
 
             drawerHeader.addEventListener('touchstart', e => {
                 isDragging = true;
@@ -2334,11 +2340,12 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 isDragging = false;
                 const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
                 const currentY = currentTransform.m42;
+                const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
                 if (isDrawerOpen) {
-                    if (currentY > window.innerHeight * 0.3) closeDrawer();
+                    if (currentY > viewportHeight * 0.3) closeDrawer();
                     else openDrawer();
                 } else {
-                    if (currentY < window.innerHeight * 0.7) openDrawer();
+                    if (currentY < viewportHeight * 0.7) openDrawer();
                     else closeDrawer();
                 }
             });
