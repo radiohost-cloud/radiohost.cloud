@@ -2339,6 +2339,10 @@ if (fs.existsSync(distPath)) {
     console.log(`[Startup] Scan complete. Found ${libraryState.children.length} items in root.`);
 
     const studioUser = db.data.users.find(u => u.role === 'studio');
+    // FIX: Set the global studioClientEmail here so that startup procedures can find the correct settings.
+    if (studioUser) {
+        studioClientEmail = studioUser.email;
+    }
     const studioData = studioUser ? db.data.userdata[studioUser.email] : null;
 
     // Step 1: Handle Auto-Fill if necessary
