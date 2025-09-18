@@ -462,7 +462,7 @@ const findNextPlayableIndex = (playlist, startIndex, direction = 1) => {
     return -1;
 };
 
-// --- NEW Playout Engine ---
+// --- Playout Engine State & Logic ---
 let playoutInterval = null;
 const PLAYBACK_TICK_RATE = 250; // ms
 let playheadAnchorTime = 0;
@@ -472,9 +472,9 @@ let currentFeederCommand = null;
 let currentFeederTrackId = null;
 let serverStreamStatus = 'inactive';
 let serverStreamError = null;
+let isEngineStarting = false;
 
-// --- NEW: Metadata Update Logic ---
-
+// --- Metadata Update Logic ---
 const findTrackAndPathInServerTree = (node, trackId, currentPath = []) => {
     const pathWithCurrentNode = [...currentPath, node];
     for (const child of node.children) {
@@ -568,7 +568,18 @@ const killProcess = (process) => {
     }
 };
 
-const stopPlayoutEngine = async (broadcast = true) => {
+const broadcastStreamStatus = () => {
+    if (!studioClientEmail) return;
+    const studioWs = clients.get(studioClientEmail);
+    if (studioWs && studioWs.readyState === WebSocket.OPEN) {
+        studioWs.send(JSON.stringify({
+            type: 'stream-status-update',
+            payload: { status: serverStreamStatus, error: serverStreamError }
+        }));
+    }
+};
+
+const stopStreamingEngine = async (broadcast = true) => {
     if (playoutInterval) clearInterval(playoutInterval);
     playoutInterval = null;
 
@@ -582,18 +593,43 @@ const stopPlayoutEngine = async (broadcast = true) => {
     db.data.sharedPlayerState.isPlaying = false;
     await db.write();
 
-    await updateIcecastMetadata(null); // Clear metadata on stop
+    await updateIcecastMetadata(null);
+
+    if (broadcast) {
+        serverStreamStatus = 'inactive';
+        serverStreamError = null;
+        broadcastStreamStatus();
+        broadcastState();
+    }
+    console.log('[Playout Engine] Full engine stopped.');
+};
+
+const pausePlayout = async (broadcast = true) => {
+    if (playoutInterval) clearInterval(playoutInterval);
+    playoutInterval = null;
+
+    killProcess(currentFeederCommand);
+    currentFeederCommand = null;
+    currentFeederTrackId = null;
+
+    db.data.sharedPlayerState.isPlaying = false;
+    db.data.sharedPlayerState.trackProgress = 0;
+
+    await db.write();
+    await updateIcecastMetadata(null);
 
     if (broadcast) {
         broadcastState();
-        serverStreamStatus = 'inactive';
-        broadcastStreamStatus();
     }
-    console.log('[Playout Engine] Stopped.');
+    console.log('[Playout Engine] Paused.');
 };
 
-
 const startStreamingEngine = () => {
+    if (icecastStreamCommand) return Promise.resolve();
+    if (isEngineStarting) return Promise.reject(new Error("Streaming engine is already starting."));
+
+    isEngineStarting = true;
+
     return new Promise((resolve, reject) => {
         killProcess(icecastStreamCommand);
 
@@ -602,6 +638,7 @@ const startStreamingEngine = () => {
 
         if (!streamConfig || !streamConfig.isEnabled) {
             console.log('[Playout] Streaming is disabled. Engine will not connect to Icecast.');
+            isEngineStarting = false;
             resolve();
             return;
         }
@@ -656,6 +693,12 @@ const startStreamingEngine = () => {
             icecastStreamCommand.removeListener('error', onError);
             icecastStreamCommand.removeListener('exit', onExitEarly);
             icecastStreamCommand.on('exit', permanentExitHandler);
+            icecastStreamCommand.stdin.on('error', (err) => {
+                if (err.code !== 'EPIPE') {
+                     console.error('[FFMPEG] Main stream stdin error:', err);
+                }
+            });
+            isEngineStarting = false;
             resolve();
         };
 
@@ -665,6 +708,7 @@ const startStreamingEngine = () => {
             serverStreamError = 'Failed to start FFmpeg master process.';
             broadcastStreamStatus();
             icecastStreamCommand = null;
+            isEngineStarting = false;
             reject(err);
         };
 
@@ -675,16 +719,14 @@ const startStreamingEngine = () => {
             serverStreamError = errorMessage;
             broadcastStreamStatus();
             icecastStreamCommand = null;
+            isEngineStarting = false;
             reject(new Error(errorMessage));
         };
         
         icecastStreamCommand.once('spawn', onSpawn);
         icecastStreamCommand.once('error', onError);
         icecastStreamCommand.once('exit', onExitEarly);
-
-        icecastStreamCommand.stderr.on('data', (data) => {
-            console.error(`[FFMPEG Main Stderr] ${data.toString()}`);
-        });
+        icecastStreamCommand.stderr.on('data', (data) => console.error(`[FFMPEG Main Stderr] ${data.toString()}`));
     });
 };
 
@@ -716,6 +758,7 @@ const startPlayoutForTrack = async (trackIndex) => {
 
     if (!streamConfig || !streamConfig.isEnabled) {
         console.log(`[Playout] Streaming is disabled. Simulating playback for track: "${track.title}"`);
+        // Simulating playback end for non-streaming mode
         setTimeout(() => {
             if (currentFeederTrackId === track.id && db.data.sharedPlayerState.isPlaying) {
                 advanceTrack();
@@ -732,25 +775,13 @@ const startPlayoutForTrack = async (trackIndex) => {
     
     console.log(`[Playout] Starting feeder for track: "${track.title}"`);
     try {
-        const args = [
-            '-i', trackPath,
-            '-f', 's16le',
-            '-acodec', 'pcm_s16le',
-            '-ar', '44100',
-            '-ac', '2',
-            '-loglevel', 'error',
-            '-' // Output to stdout
-        ];
-
+        const args = ['-i', trackPath, '-f', 's16le', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', '-loglevel', 'error', '-'];
         const feeder = spawn('ffmpeg', args);
         currentFeederCommand = feeder;
 
         feeder.stdout.pipe(icecastStreamCommand.stdin, { end: false });
         
-        feeder.stderr.on('data', (data) => {
-            console.error(`[FFMPEG Feeder Stderr for ${track.title}] ${data.toString()}`);
-        });
-
+        feeder.stderr.on('data', (data) => console.error(`[FFMPEG Feeder Stderr for ${track.title}] ${data.toString()}`));
         feeder.on('exit', (code, signal) => {
             if (signal !== 'SIGTERM' && currentFeederTrackId === track.id) {
                 console.log(`[FFMPEG] Feeder for '${track.title}' finished.`);
@@ -761,18 +792,49 @@ const startPlayoutForTrack = async (trackIndex) => {
                 }
             }
         });
-
         feeder.stdout.on('error', (err) => {
              console.error(`[FFMPEG] Feeder stdout pipe error for '${track.title}':`, err);
-             advanceTrack();
+             if(db.data.sharedPlayerState.isPlaying) advanceTrack();
         });
-
     } catch (e) {
         console.error('[FFMPEG] Failed to initialize feeder command:', e);
-        advanceTrack(); // Try to recover
+        if(db.data.sharedPlayerState.isPlaying) advanceTrack();
     }
 };
 
+const startPlayoutEngine = async (startIndex) => {
+    if (playoutInterval) clearInterval(playoutInterval);
+
+    const { sharedPlaylist } = db.data;
+    if (startIndex >= sharedPlaylist.length) {
+        console.warn(`[Playout] Cannot start playout at index ${startIndex}, it's out of bounds. Stopping.`);
+        await pausePlayout();
+        return;
+    }
+
+    db.data.sharedPlayerState.isPlaying = true;
+    db.data.sharedPlayerState.currentTrackIndex = startIndex;
+    db.data.sharedPlayerState.currentPlayingItemId = sharedPlaylist[startIndex]?.id;
+    db.data.sharedPlayerState.trackProgress = 0;
+    playheadAnchorTime = Date.now();
+    
+    try {
+        await startStreamingEngine();
+    } catch (err) {
+        console.error('[Playout Engine] Failed to start streaming engine. Aborting playout.', err);
+        db.data.sharedPlayerState.isPlaying = false;
+        await db.write();
+        broadcastState();
+        return;
+    }
+    
+    await startPlayoutForTrack(startIndex);
+    playoutInterval = setInterval(playoutTick, PLAYBACK_TICK_RATE);
+
+    await db.write();
+    broadcastState();
+    console.log(`[Playout Engine] Started from index ${startIndex}.`);
+};
 
 const advanceTrack = async (jumpToIndex = -1) => {
     killProcess(currentFeederCommand);
@@ -786,7 +848,6 @@ const advanceTrack = async (jumpToIndex = -1) => {
     let nextIndex;
     const previousIndex = sharedPlayerState.currentTrackIndex;
 
-    // --- Marker Cleanup Logic ---
     let effectiveJumpToIndex = jumpToIndex;
     let markerCleanupIndex = -1;
     const startIndexForCleanup = jumpToIndex !== -1 ? jumpToIndex : previousIndex + 1;
@@ -852,7 +913,7 @@ const advanceTrack = async (jumpToIndex = -1) => {
     } else {
         console.log('[Playout] End of playlist reached.');
         db.data.sharedPlaylist = [];
-        await stopPlayoutEngine();
+        await pausePlayout();
         if (policy.isAutoFillEnabled) {
             console.log('[Playout] End of playlist, triggering autofill.');
             await performAutofill();
@@ -883,51 +944,6 @@ const playoutTick = async () => {
         return;
     }
     broadcastState();
-};
-
-const startPlayoutEngine = async (startIndex) => {
-    if (playoutInterval) clearInterval(playoutInterval);
-
-    const { sharedPlayerState, sharedPlaylist } = db.data;
-    if (startIndex >= sharedPlaylist.length) {
-        console.warn(`[Playout] Cannot start playout at index ${startIndex}, it's out of bounds. Stopping.`);
-        await stopPlayoutEngine();
-        return;
-    }
-
-    sharedPlayerState.isPlaying = true;
-    sharedPlayerState.currentTrackIndex = startIndex;
-    sharedPlayerState.currentPlayingItemId = sharedPlaylist[startIndex]?.id;
-    sharedPlayerState.trackProgress = 0;
-    playheadAnchorTime = Date.now();
-    
-    try {
-        await startStreamingEngine();
-    } catch (err) {
-        console.error('[Playout Engine] Failed to start streaming engine. Aborting playout.', err);
-        sharedPlayerState.isPlaying = false;
-        await db.write();
-        broadcastState();
-        return;
-    }
-    
-    await startPlayoutForTrack(startIndex);
-    playoutInterval = setInterval(playoutTick, PLAYBACK_TICK_RATE);
-
-    await db.write();
-    broadcastState();
-    console.log(`[Playout Engine] Started from index ${startIndex}.`);
-};
-
-const broadcastStreamStatus = () => {
-    if (!studioClientEmail) return;
-    const studioWs = clients.get(studioClientEmail);
-    if (studioWs && studioWs.readyState === WebSocket.OPEN) {
-        studioWs.send(JSON.stringify({
-            type: 'stream-status-update',
-            payload: { status: serverStreamStatus, error: serverStreamError }
-        }));
-    }
 };
 
 let autoFillInterval = null;
@@ -1425,6 +1441,7 @@ wss.on('connection', async (ws, req) => {
                                                 if (fs.existsSync(artworkPath)) await fsPromises.unlink(artworkPath);
                                             }
                                             if (db.data.persistentMetadata?.[id]) {
+                                                // FIX: Replaced `delete` with `Reflect.deleteProperty` to avoid strict mode errors.
                                                 Reflect.deleteProperty(db.data.persistentMetadata, id);
                                             }
                                         }
@@ -1481,13 +1498,13 @@ wss.on('connection', async (ws, req) => {
                                 const direction = command === 'next' ? 1 : -1;
                                 const nextIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, direction);
                                 if (nextIndex !== -1) {
-                                    advanceTrack(nextIndex);
+                                    await advanceTrack(nextIndex);
                                 }
                                 break;
                             }
                             case 'togglePlay': {
                                 if (sharedPlayerState.isPlaying) {
-                                    await stopPlayoutEngine();
+                                    await pausePlayout();
                                 } else {
                                     if (sharedPlaylist[sharedPlayerState.currentTrackIndex]) {
                                         await startPlayoutEngine(sharedPlayerState.currentTrackIndex);
@@ -1502,9 +1519,9 @@ wss.on('connection', async (ws, req) => {
                                     studioData.settings.isAutoModeEnabled = payload.enabled;
                                     
                                     if (payload.enabled && !sharedPlayerState.isPlaying && sharedPlaylist.length > 0) {
-                                        startPlayoutEngine(sharedPlayerState.currentTrackIndex);
+                                        await startPlayoutEngine(sharedPlayerState.currentTrackIndex);
                                     } else if (!payload.enabled && sharedPlayerState.isPlaying) {
-                                        await stopPlayoutEngine();
+                                        await stopStreamingEngine();
                                     }
                                     setupAutoMode();
                                     await db.write();
@@ -1516,7 +1533,7 @@ wss.on('connection', async (ws, req) => {
                                 const { itemId } = payload;
                                 const targetIndex = sharedPlaylist.findIndex(item => item.id === itemId);
                                 if (targetIndex !== -1 && !sharedPlaylist[targetIndex].markerType) {
-                                    advanceTrack(targetIndex);
+                                    await advanceTrack(targetIndex);
                                 }
                                 break;
                             }
@@ -1574,9 +1591,9 @@ wss.on('connection', async (ws, req) => {
                                 if (wasPlayingThisItem) {
                                     if (newPlaylist.length > 0) {
                                        const newIndex = Math.min(removedItemIndex, newPlaylist.length - 1);
-                                       advanceTrack(newIndex);
+                                       await advanceTrack(newIndex);
                                     } else {
-                                       await stopPlayoutEngine();
+                                       await stopStreamingEngine();
                                     }
                                 } else {
                                      const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
@@ -1615,7 +1632,7 @@ wss.on('connection', async (ws, req) => {
                                 sharedPlayerState.currentTrackIndex = 0;
                                 sharedPlayerState.trackProgress = 0;
                                 sharedPlayerState.stopAfterTrackId = null;
-                                await stopPlayoutEngine(false); // Stop engine, don't broadcast yet
+                                await stopStreamingEngine(false); // Stop engine, don't broadcast yet
                                 await db.write();
 
                                 const studioData = db.data.userdata[studioClientEmail];
@@ -1722,7 +1739,7 @@ wss.on('connection', async (ws, req) => {
                 case 'presenter-state-change':
                     if (studioClientEmail) {
                         const studioWs = clients.get(studioClientEmail);
-                        if (studioWs && studioWs.readyState === ws.OPEN) {
+                        if (studioWs && studioWs.readyState === WebSocket.OPEN) {
                             console.log(`[WebSocket] Relaying on-air status change from ${email} to studio.`);
                             studioWs.send(JSON.stringify({
                                 type: 'presenter-on-air-request',
@@ -1887,7 +1904,7 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
             const cleanArtist = artist.toLowerCase().trim();
             const cleanTitle = title.toLowerCase().trim();
             const searchTerm = encodeURIComponent(artist + ' ' + title);
-            const url = 'https://itunes.apple.com/search?term=' + searchTerm + '&entity=song&media=music&limit=5&country=US';
+            const url = `https://itunes.apple.com/search?term=${searchTerm}&entity=song&media=music&limit=5&country=US`;
             try {
                 const response = await fetch(url);
                 if (!response.ok) return null;
@@ -2144,7 +2161,7 @@ app.post('/api/userdata/:email', async (req, res) => {
     if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
         console.log('[Config] Streaming config changed. Restarting playout if active.');
         if (db.data.sharedPlayerState.isPlaying) {
-            advanceTrack(db.data.sharedPlayerState.currentTrackIndex);
+            await advanceTrack(db.data.sharedPlayerState.currentTrackIndex);
         }
     }
 
@@ -2343,7 +2360,7 @@ if (fs.existsSync(distPath)) {
         db.data.sharedPlayerState.currentPlayingItemId = db.data.sharedPlaylist[startIndex]?.id;
         db.data.sharedPlayerState.trackProgress = 0;
         await db.write();
-        startPlayoutEngine(startIndex);
+        await startPlayoutEngine(startIndex);
     }
     
     if (studioData?.settings?.isAutoBackupOnStartupEnabled) {
