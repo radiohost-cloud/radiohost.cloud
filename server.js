@@ -1833,7 +1833,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             padding: 20px; 
             box-sizing: border-box; 
             overflow: hidden; 
-            transition: background 1s ease-in-out, color 1s ease-in-out;
+            transition: background 1s ease-in-out, color 1s ease-in-out, padding-bottom 0.4s ease;
             animation: gradient-animation 15s ease infinite;
         }
         @keyframes gradient-animation {
@@ -1842,6 +1842,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             100% { background-position: 0% 50%; }
         }
         .player-container { 
+            position: relative;
             max-width: 350px; 
             width: 100%; 
             background: var(--container-bg); 
@@ -1851,8 +1852,11 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
             border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: opacity 0.4s ease, transform 0.4s ease;
         }
         #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease, box-shadow 0.3s ease; box-shadow: 0 5px 20px rgba(0,0,0,0.3); }
+        #stationLogoOverlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 35%; max-width: 90px; height: auto; pointer-events: none; z-index: 10; opacity: 0.9; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); transition: opacity 0.3s ease; }
+        #stationLogoOverlay.hidden { opacity: 0; }
         #title { font-size: 1.5rem; font-weight: bold; margin: 0; min-height: 2.25rem; }
         #artist { font-size: 1rem; color: var(--subtext-color); margin: 5px 0 20px; min-height: 1.5rem; transition: color 1s ease-in-out; }
         .play-button { background-color: var(--accent-color); color: white; border: none; border-radius: 50%; width: 60px; height: 60px; font-size: 2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; margin: 0 auto; transition: background-color 0.2s; }
@@ -1883,11 +1887,33 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #message-input { flex-grow: 1; background-color: #3a3a3a; border: 1px solid #555; border-radius: 15px; color: white; padding: 8px 12px; font-size: 0.9rem; }
         #send-btn { background: var(--accent-color); border: none; color: white; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
         #send-btn svg { width: 20px; height: 20px; }
+        
+        @media (max-width: 600px) {
+            body { padding-bottom: 70px; }
+            body.chat-open .player-container { opacity: 0; transform: translateY(-50px); pointer-events: none; }
+            #chat-bubble { display: none; }
+            #chat-window {
+                position: fixed; top: auto; bottom: 0; left: 0; right: 0;
+                width: 100%; height: calc(100% - 40px); max-width: 100%;
+                border-radius: 20px 20px 0 0; box-shadow: 0 -5px 25px rgba(0,0,0,0.5);
+                transform: translateY(calc(100% - 50px)); /* Initial state: header visible */
+                transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+                display: flex; opacity: 1; transform-origin: bottom center;
+            }
+            #chat-window.open { transform: translateY(0); }
+            .chat-header { cursor: grab; user-select: none; -webkit-tap-highlight-color: transparent; position: relative; }
+            .chat-header::before {
+                content: ''; position: absolute; top: 8px; left: 50%;
+                transform: translateX(-50%); width: 40px; height: 4px;
+                background-color: #555; border-radius: 2px;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="player-container">
         <img id="artwork" src="https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png" alt="Album Art">
+        <img id="stationLogoOverlay" src="" alt="Station Logo" class="hidden">
         <h1 id="title">RadioHost.cloud</h1>
         <h2 id="artist">Live Stream</h2>
         <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
@@ -1925,11 +1951,15 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         const titleEl = document.getElementById('title');
         const artistEl = document.getElementById('artist');
         const artworkEl = document.getElementById('artwork');
+        const stationLogoOverlay = document.getElementById('stationLogoOverlay');
         const rootEl = document.documentElement;
+        const bodyEl = document.body;
+        const playerContainer = document.querySelector('.player-container');
 
         const chatBubble = document.getElementById('chat-bubble');
         const chatNotification = document.getElementById('chat-notification');
         const chatWindow = document.getElementById('chat-window');
+        const chatHeader = document.querySelector('.chat-header');
         const closeChatBtn = document.getElementById('close-chat-btn');
         const chatMessages = document.getElementById('chat-messages');
         const chatForm = document.getElementById('chat-footer-form');
@@ -1955,7 +1985,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
             const colorCounts = {};
             
-            for (let i = 0; i < imageData.length; i += 16) { // Sample pixels for performance
+            for (let i = 0; i < imageData.length; i += 16) {
                 const r = imageData[i], g = imageData[i + 1], b = imageData[i + 2], a = imageData[i + 3];
                 if (a < 128) continue;
                 const key = [Math.round(r/16)*16, Math.round(g/16)*16, Math.round(b/16)*16].join(',');
@@ -1968,8 +1998,8 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             const filteredColors = sortedColorKeys.filter(key => {
                 const [r, g, b] = key.split(',').map(Number);
                 const max = Math.max(r, g, b), min = Math.min(r, g, b);
-                if ((r + g + b) / 3 < 25 || (r + g + b) / 3 > 230) return false; // Filter near black/white
-                if (max - min < 15) return false; // Filter greys
+                if ((r + g + b) / 3 < 25 || (r + g + b) / 3 > 230) return false;
+                if (max - min < 15) return false;
                 return true;
             });
 
@@ -2002,10 +2032,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 rootEl.style.setProperty('--subtext-color', textColor === 'white' ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)');
                 rootEl.style.setProperty('--container-bg', textColor === 'white' ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)');
             };
-            img.onerror = () => {
-                // If image fails to load (e.g., CORS), revert to default
-                updateDynamicBackground(null);
-            }
+            img.onerror = () => updateDynamicBackground(null);
         };
 
         const fetchArtwork = async (artist, title) => {
@@ -2056,38 +2083,30 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 
         const pollMetadata = async () => {
             try {
-                const response = await fetch('/api/stream-metadata'); // Fetch from our server proxy
+                const response = await fetch('/api/stream-metadata');
                 const data = await response.json();
                 const currentTitle = data.title;
                 
                 if (currentTitle && currentTitle !== lastKnownTitle) {
                     lastKnownTitle = currentTitle;
-                    console.log('New metadata from server:', currentTitle);
-                    
                     let [artist, title] = currentTitle.split(' - ').map(s => s.trim());
                     if (!title) {
                         title = artist;
-                        artist = stationName; // Use stationName as fallback artist
+                        artist = stationName;
                     }
                     updateMetadataDisplay(title, artist);
                 }
-            } catch (e) {
-                console.error('Error polling metadata from server proxy:', e);
-            }
-            setTimeout(pollMetadata, 5000); // Poll every 5 seconds
+            } catch (e) { console.error('Error polling metadata:', e); }
+            setTimeout(pollMetadata, 5000);
         };
 
         playBtn.addEventListener('click', () => {
             if (audioPlayer.paused) {
-                if (publicStreamUrl && !audioPlayer.src) {
-                    audioPlayer.src = publicStreamUrl;
-                }
-                if (audioPlayer.src) {
-                    audioPlayer.play().catch(e => {
-                        console.error("Playback failed:", e);
-                        artistEl.textContent = 'Playback failed. Tap to retry.';
-                    });
-                }
+                if (publicStreamUrl && !audioPlayer.src) audioPlayer.src = publicStreamUrl;
+                if (audioPlayer.src) audioPlayer.play().catch(e => {
+                    console.error("Playback failed:", e);
+                    artistEl.textContent = 'Playback failed. Tap to retry.';
+                });
             } else {
                 audioPlayer.pause();
             }
@@ -2110,15 +2129,27 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 if (data.type === 'initial-state') {
                     const { payload } = data;
                     publicStreamUrl = payload.publicStreamUrl;
-                    if (payload.logoSrc) defaultLogoSrc = payload.logoSrc;
                     stationName = payload.stationName;
-
-                    if (publicStreamUrl && !audioPlayer.src) {
-                        audioPlayer.src = publicStreamUrl;
+                    if (payload.logoSrc) {
+                        defaultLogoSrc = payload.logoSrc;
+                        stationLogoOverlay.src = payload.logoSrc;
+                        stationLogoOverlay.classList.remove('hidden');
+                    } else {
+                        stationLogoOverlay.classList.add('hidden');
+                    }
+                    if (publicStreamUrl && !audioPlayer.src) audioPlayer.src = publicStreamUrl;
+                } else if (data.type === 'configUpdate') {
+                    const { logoSrc } = data.payload;
+                    if (logoSrc) {
+                        defaultLogoSrc = logoSrc;
+                        stationLogoOverlay.src = logoSrc;
+                        stationLogoOverlay.classList.remove('hidden');
+                    } else {
+                        stationLogoOverlay.classList.add('hidden');
                     }
                 } else if (data.type === 'chatMessage') {
                     addChatMessage(data.payload);
-                    if (!chatWindow.classList.contains('open')) {
+                    if (!chatWindow.classList.contains('open') && window.innerWidth > 600) {
                         chatNotification.style.display = 'block';
                     }
                 }
@@ -2130,14 +2161,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             const isMe = msg.from === nicknameInput.value;
             const msgDiv = document.createElement('div');
             msgDiv.className = 'chat-message ' + (isMe ? 'me' : 'other');
-            
-            let content = '';
-            if (!isMe) {
-                content += '<p class="from">' + escapeHtml(msg.from) + '</p>';
-            }
+            let content = !isMe ? '<p class="from">' + escapeHtml(msg.from) + '</p>' : '';
             content += '<p>' + escapeHtml(msg.text) + '</p>';
             msgDiv.innerHTML = content;
-            
             chatMessages.appendChild(msgDiv);
             chatMessages.scrollTop = chatMessages.scrollHeight;
         };
@@ -2148,36 +2174,89 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             return div.innerHTML;
         }
 
-        chatBubble.addEventListener('click', () => {
-            chatWindow.classList.toggle('open');
-            chatNotification.style.display = 'none';
-            if (chatWindow.classList.contains('open')) {
-                chatMessages.scrollTop = chatMessages.scrollHeight;
-                messageInput.focus();
-            }
-        });
-
-        closeChatBtn.addEventListener('click', () => {
-            chatWindow.classList.remove('open');
-        });
-
         nicknameInput.value = localStorage.getItem('chatNickname') || 'Listener' + Math.floor(Math.random() * 999);
-        nicknameInput.addEventListener('change', () => {
-            localStorage.setItem('chatNickname', nicknameInput.value);
-        });
+        nicknameInput.addEventListener('change', () => localStorage.setItem('chatNickname', nicknameInput.value));
 
         chatForm.addEventListener('submit', (e) => {
             e.preventDefault();
             const text = messageInput.value.trim();
             if (text && ws && ws.readyState === WebSocket.OPEN) {
-                const message = {
-                    type: 'chatMessage',
-                    payload: { from: nicknameInput.value, text }
-                };
-                ws.send(JSON.stringify(message));
+                ws.send(JSON.stringify({ type: 'chatMessage', payload: { from: nicknameInput.value, text } }));
                 messageInput.value = '';
             }
         });
+        
+        // --- Mobile Drawer Logic ---
+        if (window.innerWidth <= 600) {
+            let isDragging = false, startY, startTransformY;
+            const closedY = window.innerHeight - 50; // Chat header height
+
+            const snapOpen = () => {
+                chatWindow.style.transition = 'transform 0.4s cubic-bezier(0.4, 0, 0.2, 1)';
+                chatWindow.classList.add('open');
+                bodyEl.classList.add('chat-open');
+                chatWindow.style.transform = '';
+            };
+
+            const snapClose = () => {
+                chatWindow.style.transition = 'transform 0.4s cubic-bezier(0.4, 0, 0.2, 1)';
+                chatWindow.classList.remove('open');
+                bodyEl.classList.remove('chat-open');
+                chatWindow.style.transform = '';
+            };
+
+            chatHeader.addEventListener('touchstart', (e) => {
+                isDragging = true;
+                startY = e.touches[0].clientY;
+                const currentTransform = new WebKitCSSMatrix(window.getComputedStyle(chatWindow).transform);
+                startTransformY = currentTransform.m42;
+                chatWindow.style.transition = 'none';
+            });
+
+            window.addEventListener('touchmove', (e) => {
+                if (!isDragging) return;
+                const currentY = e.touches[0].clientY;
+                const deltaY = currentY - startY;
+                let newTransformY = startTransformY + deltaY;
+                newTransformY = Math.max(0, Math.min(closedY, newTransformY)); // Clamp
+                chatWindow.style.transform = \`translateY(\${newTransformY}px)\`;
+                
+                const dragProgress = 1 - (newTransformY / closedY);
+                playerContainer.style.opacity = 1 - (dragProgress * 1.5);
+            }, { passive: true });
+
+            window.addEventListener('touchend', (e) => {
+                if (!isDragging) return;
+                isDragging = false;
+                const currentTransform = new WebKitCSSMatrix(window.getComputedStyle(chatWindow).transform);
+                const finalY = currentTransform.m42;
+                playerContainer.style.opacity = ''; // Reset opacity for CSS transition
+
+                if (finalY < window.innerHeight * 0.5) {
+                    snapOpen();
+                } else {
+                    snapClose();
+                }
+            });
+            chatHeader.addEventListener('click', () => {
+                if (isDragging) return;
+                if (chatWindow.classList.contains('open')) {
+                    snapClose();
+                } else {
+                    snapOpen();
+                }
+            });
+
+        } else {
+            // Desktop chat bubble logic
+            chatBubble.addEventListener('click', () => {
+                chatWindow.classList.toggle('open');
+                chatNotification.style.display = 'none';
+            });
+            closeChatBtn.addEventListener('click', () => {
+                chatWindow.classList.remove('open');
+            });
+        }
         
         connectWs();
         pollMetadata();
