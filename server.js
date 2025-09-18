@@ -1810,7 +1810,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>${stationName || 'RadioHost.cloud Live Player'}</title>
     <style>
         :root { 
@@ -1841,6 +1841,19 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             50% { background-position: 100% 50%; }
             100% { background-position: 0% 50%; }
         }
+        #logo-container {
+            margin-bottom: 20px;
+            text-align: center;
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+            z-index: 5;
+        }
+        #station-logo {
+            max-height: 80px;
+            max-width: 80%;
+            object-fit: contain;
+            display: inline-block;
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+        }
         .player-container { 
             max-width: 350px; 
             width: 100%; 
@@ -1851,6 +1864,8 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
             border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+            z-index: 5;
         }
         #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease, box-shadow 0.3s ease; box-shadow: 0 5px 20px rgba(0,0,0,0.3); }
         #title { font-size: 1.5rem; font-weight: bold; margin: 0; min-height: 2.25rem; }
@@ -1860,12 +1875,13 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; transition: color 1s ease-in-out; }
         .footer a { color: var(--text-color); text-decoration: none; transition: color 1s ease-in-out; }
         
-        #chat-bubble { position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 15px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
+        /* Desktop Chat */
+        .desktop-only { display: flex; }
+        #chat-bubble { position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 15px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
         #chat-bubble:hover { transform: scale(1.1); }
         #chat-bubble svg { width: 32px; height: 32px; color: white; }
         #chat-notification { position: absolute; top: 0; right: 0; width: 12px; height: 12px; background-color: #3b82f6; border-radius: 50%; border: 2px solid var(--accent-color); display: none; }
-        
-        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 320px; height: 450px; background-color: #1a1a1a; border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; }
+        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 320px; height: 450px; background-color: #1a1a1a; border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
         #chat-window.open { display: flex; opacity: 1; transform: scale(1); }
         #chat-window:not(.open) { opacity: 0; transform: scale(0.9); }
         .chat-header { padding: 10px 15px; background-color: #2a2a2a; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
@@ -1883,9 +1899,27 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #message-input { flex-grow: 1; background-color: #3a3a3a; border: 1px solid #555; border-radius: 15px; color: white; padding: 8px 12px; font-size: 0.9rem; }
         #send-btn { background: var(--accent-color); border: none; color: white; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
         #send-btn svg { width: 20px; height: 20px; }
+        
+        /* Mobile Chat */
+        .mobile-only { display: none; }
+        @media (max-width: 768px) {
+            body { justify-content: flex-start; padding-top: 5vh; }
+            .player-container { margin-bottom: 80px; }
+            .desktop-only { display: none !important; }
+            .mobile-only { display: flex; }
+            
+            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background-color: #1a1a1a; flex-direction: column; transform: translateY(calc(100% - 80px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); }
+            #chat-drawer.transitioning { transition: transform 0.3s ease-out; }
+            #chat-drawer-header { padding: 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; }
+            .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 10px; }
+            #chat-drawer-header h3 { margin: 0; font-size: 1rem; }
+            #chat-drawer-content { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; }
+            #mobile-chat-notification { position: absolute; top: 18px; right: 20px; width: 10px; height: 10px; background-color: #3b82f6; border-radius: 50%; display: none; }
+        }
     </style>
 </head>
 <body>
+    <div id="logo-container"></div>
     <div class="player-container">
         <img id="artwork" src="https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png" alt="Album Art">
         <h1 id="title">RadioHost.cloud</h1>
@@ -1897,12 +1931,12 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
     </div>
     <audio id="audioPlayer" preload="none" crossOrigin="anonymous"></audio>
 
-    <div id="chat-bubble">
+    <div id="chat-bubble" class="desktop-only">
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.068.158 2.148.279 3.238.364.466.037.893.281 1.153.671L12 21l2.652-3.978c.26-.39.687-.634 1.153-.67 1.09-.086 2.17-.206 3.238-.365 1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>
         <span id="chat-notification"></span>
     </div>
 
-    <div id="chat-window">
+    <div id="chat-window" class="desktop-only">
         <div class="chat-header">
             <h3>Live Chat</h3>
             <button id="close-chat-btn">&times;</button>
@@ -1919,6 +1953,17 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         </div>
     </div>
 
+    <div id="chat-drawer" class="mobile-only">
+        <div id="chat-drawer-header">
+            <div class="grab-handle"></div>
+            <h3>Live Chat</h3>
+            <span id="mobile-chat-notification"></span>
+        </div>
+        <div id="chat-drawer-content">
+            <!-- Content will be moved here from desktop chat elements -->
+        </div>
+    </div>
+
     <script>
         const playBtn = document.getElementById('playBtn');
         const audioPlayer = document.getElementById('audioPlayer');
@@ -1926,15 +1971,15 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         const artistEl = document.getElementById('artist');
         const artworkEl = document.getElementById('artwork');
         const rootEl = document.documentElement;
+        const logoContainer = document.getElementById('logo-container');
+        const stationLogo = document.createElement('img');
+        stationLogo.id = 'station-logo';
 
         const chatBubble = document.getElementById('chat-bubble');
         const chatNotification = document.getElementById('chat-notification');
         const chatWindow = document.getElementById('chat-window');
         const closeChatBtn = document.getElementById('close-chat-btn');
-        const chatMessages = document.getElementById('chat-messages');
-        const chatForm = document.getElementById('chat-footer-form');
-        const nicknameInput = document.getElementById('nickname-input');
-        const messageInput = document.getElementById('message-input');
+        let chatMessages, chatForm, nicknameInput, messageInput; // Defer initialization
 
         let publicStreamUrl = '';
         let stationName = ${JSON.stringify(stationName || 'Live Stream')};
@@ -1955,7 +2000,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
             const colorCounts = {};
             
-            for (let i = 0; i < imageData.length; i += 16) { // Sample pixels for performance
+            for (let i = 0; i < imageData.length; i += 16) {
                 const r = imageData[i], g = imageData[i + 1], b = imageData[i + 2], a = imageData[i + 3];
                 if (a < 128) continue;
                 const key = [Math.round(r/16)*16, Math.round(g/16)*16, Math.round(b/16)*16].join(',');
@@ -1968,8 +2013,8 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             const filteredColors = sortedColorKeys.filter(key => {
                 const [r, g, b] = key.split(',').map(Number);
                 const max = Math.max(r, g, b), min = Math.min(r, g, b);
-                if ((r + g + b) / 3 < 25 || (r + g + b) / 3 > 230) return false; // Filter near black/white
-                if (max - min < 15) return false; // Filter greys
+                if ((r + g + b) / 3 < 25 || (r + g + b) / 3 > 230) return false;
+                if (max - min < 15) return false;
                 return true;
             });
 
@@ -2002,10 +2047,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 rootEl.style.setProperty('--subtext-color', textColor === 'white' ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)');
                 rootEl.style.setProperty('--container-bg', textColor === 'white' ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)');
             };
-            img.onerror = () => {
-                // If image fails to load (e.g., CORS), revert to default
-                updateDynamicBackground(null);
-            }
+            img.onerror = () => updateDynamicBackground(null);
         };
 
         const fetchArtwork = async (artist, title) => {
@@ -2036,6 +2078,19 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             }
         };
         
+        const updateLogo = (logoSrc) => {
+            if (logoSrc) {
+                stationLogo.src = logoSrc;
+                if (!logoContainer.contains(stationLogo)) {
+                    logoContainer.appendChild(stationLogo);
+                }
+            } else {
+                if (logoContainer.contains(stationLogo)) {
+                    logoContainer.removeChild(stationLogo);
+                }
+            }
+        };
+
         const updateMetadataDisplay = async (title, artist) => {
             titleEl.textContent = title || '...';
             artistEl.textContent = artist || '...';
@@ -2056,38 +2111,29 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 
         const pollMetadata = async () => {
             try {
-                const response = await fetch('/api/stream-metadata'); // Fetch from our server proxy
+                const response = await fetch('/api/stream-metadata');
                 const data = await response.json();
                 const currentTitle = data.title;
                 
                 if (currentTitle && currentTitle !== lastKnownTitle) {
                     lastKnownTitle = currentTitle;
-                    console.log('New metadata from server:', currentTitle);
-                    
                     let [artist, title] = currentTitle.split(' - ').map(s => s.trim());
                     if (!title) {
                         title = artist;
-                        artist = stationName; // Use stationName as fallback artist
+                        artist = stationName;
                     }
                     updateMetadataDisplay(title, artist);
                 }
             } catch (e) {
                 console.error('Error polling metadata from server proxy:', e);
             }
-            setTimeout(pollMetadata, 5000); // Poll every 5 seconds
+            setTimeout(pollMetadata, 5000);
         };
 
         playBtn.addEventListener('click', () => {
             if (audioPlayer.paused) {
-                if (publicStreamUrl && !audioPlayer.src) {
-                    audioPlayer.src = publicStreamUrl;
-                }
-                if (audioPlayer.src) {
-                    audioPlayer.play().catch(e => {
-                        console.error("Playback failed:", e);
-                        artistEl.textContent = 'Playback failed. Tap to retry.';
-                    });
-                }
+                if (publicStreamUrl && !audioPlayer.src) audioPlayer.src = publicStreamUrl;
+                if (audioPlayer.src) audioPlayer.play().catch(e => { console.error("Playback failed:", e); artistEl.textContent = 'Playback failed. Tap to retry.'; });
             } else {
                 audioPlayer.pause();
             }
@@ -2101,6 +2147,26 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             navigator.mediaSession.setActionHandler('pause', () => playBtn.click());
         }
 
+        const escapeHtml = (text) => {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        const addChatMessage = (msg) => {
+            const isMe = nicknameInput && msg.from === nicknameInput.value;
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'chat-message ' + (isMe ? 'me' : 'other');
+            let content = '';
+            if (!isMe) content += '<p class="from">' + escapeHtml(msg.from) + '</p>';
+            content += '<p>' + escapeHtml(msg.text) + '</p>';
+            msgDiv.innerHTML = content;
+            if(chatMessages) {
+                chatMessages.appendChild(msgDiv);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+        };
+        
         const connectWs = () => {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(protocol + '//' + window.location.host + '/socket?clientType=playerPage');
@@ -2110,15 +2176,18 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 if (data.type === 'initial-state') {
                     const { payload } = data;
                     publicStreamUrl = payload.publicStreamUrl;
-                    if (payload.logoSrc) defaultLogoSrc = payload.logoSrc;
+                    if (payload.logoSrc) { defaultLogoSrc = payload.logoSrc; updateLogo(payload.logoSrc); }
                     stationName = payload.stationName;
-
-                    if (publicStreamUrl && !audioPlayer.src) {
-                        audioPlayer.src = publicStreamUrl;
-                    }
+                    if (publicStreamUrl && !audioPlayer.src) audioPlayer.src = publicStreamUrl;
+                } else if (data.type === 'configUpdate') {
+                    if (data.payload.logoSrc) { defaultLogoSrc = data.payload.logoSrc; updateLogo(data.payload.logoSrc); }
                 } else if (data.type === 'chatMessage') {
                     addChatMessage(data.payload);
-                    if (!chatWindow.classList.contains('open')) {
+                    if (window.innerWidth <= 768) {
+                        const drawer = document.getElementById('chat-drawer');
+                        const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
+                        if (currentTransform.m42 > 0) document.getElementById('mobile-chat-notification').style.display = 'block';
+                    } else if (!chatWindow.classList.contains('open')) {
                         chatNotification.style.display = 'block';
                     }
                 }
@@ -2126,58 +2195,103 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             ws.onclose = () => setTimeout(connectWs, 5000);
         };
         
-        const addChatMessage = (msg) => {
-            const isMe = msg.from === nicknameInput.value;
-            const msgDiv = document.createElement('div');
-            msgDiv.className = 'chat-message ' + (isMe ? 'me' : 'other');
+        if (window.innerWidth > 768) {
+            chatMessages = document.getElementById('chat-messages');
+            chatForm = document.getElementById('chat-footer-form');
+            nicknameInput = document.getElementById('nickname-input');
+            messageInput = document.getElementById('message-input');
+            chatBubble.addEventListener('click', () => { chatWindow.classList.toggle('open'); chatNotification.style.display = 'none'; if(chatWindow.classList.contains('open')) messageInput.focus(); });
+            closeChatBtn.addEventListener('click', () => { chatWindow.classList.remove('open'); });
+        } else {
+            // Mobile drawer logic
+            const drawer = document.getElementById('chat-drawer');
+            const drawerHeader = document.getElementById('chat-drawer-header');
+            const drawerContent = document.getElementById('chat-drawer-content');
+            const playerContainer = document.querySelector('.player-container');
             
-            let content = '';
-            if (!isMe) {
-                content += '<p class="from">' + escapeHtml(msg.from) + '</p>';
-            }
-            content += '<p>' + escapeHtml(msg.text) + '</p>';
-            msgDiv.innerHTML = content;
+            const desktopChatWindow = document.getElementById('chat-window');
+            drawerContent.appendChild(desktopChatWindow.querySelector('.chat-header').parentElement); // Move all children
             
-            chatMessages.appendChild(msgDiv);
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        };
-        
-        const escapeHtml = (text) => {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            chatMessages = document.getElementById('chat-messages');
+            chatForm = document.getElementById('chat-footer-form');
+            nicknameInput = document.getElementById('nickname-input');
+            messageInput = document.getElementById('message-input');
+            const mobileChatNotification = document.getElementById('mobile-chat-notification');
+
+            let startY, startPos, isDragging = false;
+            const minPos = 0;
+            const maxPos = window.innerHeight - 80;
+            let isDrawerOpen = false;
+
+            const setDrawerPosition = (y, transitioning = false) => {
+                if(transitioning) drawer.classList.add('transitioning');
+                else drawer.classList.remove('transitioning');
+                drawer.style.transform = \`translateY(\${y}px)\`;
+                
+                const openRatio = 1 - (y / maxPos);
+                const clampedRatio = Math.max(0, Math.min(1, openRatio));
+                
+                const playerOpacity = 1 - clampedRatio;
+                const playerScale = 1 - (clampedRatio * 0.1);
+                const playerTranslateY = clampedRatio * -50;
+                
+                playerContainer.style.opacity = playerOpacity;
+                playerContainer.style.transform = \`translateY(\${playerTranslateY}px) scale(\${playerScale})\`;
+                logoContainer.style.opacity = playerOpacity;
+                logoContainer.style.transform = \`translateY(\${playerTranslateY}px) scale(\${playerScale})\`;
+            };
+
+            const openDrawer = () => { setDrawerPosition(minPos, true); isDrawerOpen = true; messageInput.focus(); mobileChatNotification.style.display = 'none'; };
+            const closeDrawer = () => { setDrawerPosition(maxPos, true); isDrawerOpen = false; messageInput.blur(); };
+
+            drawerHeader.addEventListener('touchstart', e => {
+                isDragging = true;
+                startY = e.touches[0].clientY;
+                const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
+                startPos = currentTransform.m42;
+                drawer.classList.remove('transitioning');
+            });
+
+            document.body.addEventListener('touchmove', e => {
+                if (!isDragging) return;
+                const currentY = e.touches[0].clientY;
+                const deltaY = currentY - startY;
+                let newY = startPos + deltaY;
+                newY = Math.max(minPos, Math.min(maxPos, newY));
+                setDrawerPosition(newY);
+            });
+
+            document.body.addEventListener('touchend', e => {
+                if (!isDragging) return;
+                isDragging = false;
+                const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
+                const currentY = currentTransform.m42;
+                if (isDrawerOpen) {
+                    if (currentY > window.innerHeight * 0.3) closeDrawer();
+                    else openDrawer();
+                } else {
+                    if (currentY < window.innerHeight * 0.7) openDrawer();
+                    else closeDrawer();
+                }
+            });
         }
-
-        chatBubble.addEventListener('click', () => {
-            chatWindow.classList.toggle('open');
-            chatNotification.style.display = 'none';
-            if (chatWindow.classList.contains('open')) {
-                chatMessages.scrollTop = chatMessages.scrollHeight;
-                messageInput.focus();
-            }
-        });
-
-        closeChatBtn.addEventListener('click', () => {
-            chatWindow.classList.remove('open');
-        });
-
-        nicknameInput.value = localStorage.getItem('chatNickname') || 'Listener' + Math.floor(Math.random() * 999);
-        nicknameInput.addEventListener('change', () => {
-            localStorage.setItem('chatNickname', nicknameInput.value);
-        });
-
-        chatForm.addEventListener('submit', (e) => {
-            e.preventDefault();
-            const text = messageInput.value.trim();
-            if (text && ws && ws.readyState === WebSocket.OPEN) {
-                const message = {
-                    type: 'chatMessage',
-                    payload: { from: nicknameInput.value, text }
-                };
-                ws.send(JSON.stringify(message));
-                messageInput.value = '';
-            }
-        });
+        
+        if (nicknameInput) {
+            nicknameInput.value = localStorage.getItem('chatNickname') || 'Listener' + Math.floor(Math.random() * 999);
+            nicknameInput.addEventListener('change', () => { localStorage.setItem('chatNickname', nicknameInput.value); });
+        }
+        
+        if(chatForm) {
+            chatForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                const text = messageInput.value.trim();
+                if (text && ws && ws.readyState === WebSocket.OPEN) {
+                    const message = { type: 'chatMessage', payload: { from: nicknameInput.value, text } };
+                    ws.send(JSON.stringify(message));
+                    messageInput.value = '';
+                }
+            });
+        }
         
         connectWs();
         pollMetadata();
