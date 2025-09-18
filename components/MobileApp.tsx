@@ -1,7 +1,6 @@
 
 
 
-
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { type User, type Track, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, type VtMixDetails, ChatMessage } from '../types';
 import RemoteStudio from './RemoteStudio';
@@ -51,21 +50,19 @@ const MobilePlayer: React.FC<{
 
     useEffect(() => {
         let isMounted = true;
-        setArtworkUrl(null); // Reset immediately to prevent stale image
-
         const fetchArtwork = async () => {
             if (displayTrack) {
                 const url = await getArtworkUrl(displayTrack);
                 if (isMounted) {
                     setArtworkUrl(url);
                 }
+            } else {
+                 if (isMounted) {
+                    setArtworkUrl(null);
+                }
             }
         };
-
-        if (displayTrack) {
-            fetchArtwork();
-        }
-        
+        fetchArtwork();
         return () => { isMounted = false; };
     }, [displayTrack]);
 

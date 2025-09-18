@@ -2079,6 +2079,35 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 setDefaultColors();
             };
         };
+
+        const fetchArtwork = async (artist, title) => {
+            if (!artist || !title) return null;
+            const cleanArtist = artist.toLowerCase().trim();
+            const cleanTitle = title.toLowerCase().trim();
+            const searchTerm = encodeURIComponent(artist + ' ' + title);
+            const itunesUrl = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=5&country=US\`;
+            try {
+                const response = await fetch(itunesUrl);
+                if (!response.ok) return null;
+                const data = await response.json();
+                if (data.resultCount > 0) {
+                    const bestMatch = data.results.find(result =>
+                        result.artistName && result.trackName &&
+                        result.artistName.toLowerCase().includes(cleanArtist) &&
+                        result.trackName.toLowerCase().includes(cleanTitle)
+                    );
+                    const result = bestMatch || data.results[0];
+                    if (result && result.artworkUrl100) {
+                        const artworkUrl = result.artworkUrl100.replace('100x100', '600x600');
+                        return \`/api/artwork-proxy?url=\${encodeURIComponent(artworkUrl)}\`;
+                    }
+                }
+                return null;
+            } catch (e) {
+                console.error('Artwork fetch error:', e);
+                return null;
+            }
+        };
         
         const updateLogo = (logoSrc) => {
             if (logoSrc) {
@@ -2093,19 +2122,27 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             }
         };
 
-        const updateMetadataDisplay = (title, artist, artworkUrl) => {
+        const updateMetadataDisplay = async (title, artist) => {
             titleEl.textContent = title || '...';
             artistEl.textContent = artist || '...';
-            artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-            updateDynamicBackground(artworkUrl);
-
-            if ('mediaSession' in navigator) {
-                navigator.mediaSession.metadata = new MediaMetadata({
-                    title: title || '...',
-                    artist: artist || 'RadioHost.cloud',
-                    album: stationName,
-                    artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
-                });
+            
+            try {
+                const artworkUrl = await fetchArtwork(artist, title);
+                artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+                updateDynamicBackground(artworkUrl);
+    
+                if ('mediaSession' in navigator) {
+                    navigator.mediaSession.metadata = new MediaMetadata({
+                        title: title || '...',
+                        artist: artist || 'RadioHost.cloud',
+                        album: stationName,
+                        artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
+                    });
+                }
+            } catch (e) {
+                console.error("Failed to update display with new metadata:", e);
+                artworkEl.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+                updateDynamicBackground(null);
             }
         };
 
@@ -2113,14 +2150,19 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             try {
                 const response = await fetch('/api/stream-metadata');
                 const data = await response.json();
-                const currentFullTitle = \`\${data.artist || ''} - \${data.title || ''}\`;
+                const currentTitle = data.title;
                 
-                if (currentFullTitle && currentFullTitle !== lastKnownTitle) {
-                    lastKnownTitle = currentFullTitle;
-                    updateMetadataDisplay(data.title, data.artist, data.artworkUrl);
+                if (currentTitle && currentTitle !== lastKnownTitle) {
+                    lastKnownTitle = currentTitle;
+                    let [artist, title] = currentTitle.split(' - ').map(s => s.trim());
+                    if (!title) {
+                        title = artist;
+                        artist = stationName;
+                    }
+                    updateMetadataDisplay(title, artist);
                 }
             } catch (e) {
-                console.error('Error polling metadata:', e);
+                console.error('Error polling metadata from server proxy:', e);
             }
             setTimeout(pollMetadata, 5000);
         };
@@ -2616,49 +2658,35 @@ app.post('/api/folder', async (req, res) => {
 
 app.get('/api/stream-metadata', async (req, res) => {
     try {
-        const { sharedPlayerState, sharedPlaylist } = db.data;
-        const { isPlaying, currentPlayingItemId } = sharedPlayerState;
-        const stationSettings = await getStationSettings();
+        const { streamingConfig, stationName } = await getStationSettings();
+        const icecastStatusUrl = streamingConfig?.icecastStatusUrl;
 
-        let trackInfo = {
-            title: stationSettings.stationName || 'Live Stream',
-            artist: '',
-            artworkUrl: null,
-        };
+        if (!icecastStatusUrl) {
+            // If no status URL, just return the station name as the title
+            return res.json({ title: stationName || 'Live Stream' });
+        }
 
-        if (isPlaying && currentPlayingItemId) {
-            const currentTrack = sharedPlaylist.find(t => t.id === currentPlayingItemId);
-            if (currentTrack && !currentTrack.markerType) {
-                const suppression = getSuppressionSettingsFromServer(currentTrack);
-                if (suppression?.enabled) {
-                    const customText = suppression.customText || stationSettings.stationName || 'RadioHost.cloud';
-                    const parts = customText.split(' - ');
-                    trackInfo.title = parts[0];
-                    trackInfo.artist = parts.length > 1 ? parts.slice(1).join(' - ') : '';
-                    trackInfo.artworkUrl = null;
-                } else {
-                    trackInfo.title = currentTrack.title;
-                    trackInfo.artist = currentTrack.artist || '';
-                    
-                    let artworkUrl = null;
-                    if (currentTrack.remoteArtworkUrl) {
-                        artworkUrl = `/api/artwork-proxy?url=${encodeURIComponent(currentTrack.remoteArtworkUrl)}`;
-                    } else if (currentTrack.hasEmbeddedArtwork) {
-                        const trackId = currentTrack.originalId || currentTrack.id;
-                        const artworkPath = trackId.replace(/\.[^/.]+$/, ".jpg");
-                        artworkUrl = `/artwork/${encodeURIComponent(artworkPath)}`;
-                    }
-                    trackInfo.artworkUrl = artworkUrl;
-                }
-            }
+        const url = new URL(icecastStatusUrl);
+        url.searchParams.set('_', new Date().getTime()); // Cache buster
+
+        const icecastResponse = await fetch(url);
+        if (!icecastResponse.ok) {
+            throw new Error(`Icecast server responded with status ${icecastResponse.status}`);
         }
         
-        res.json(trackInfo);
+        const data = await icecastResponse.json();
+        const source = data?.icestats?.source;
+        // Icecast can return source as an object or an array of objects
+        const sourceInfo = Array.isArray(source) ? source[0] : source;
+        const currentTitle = sourceInfo?.title || stationName || 'Live Stream';
+        
+        res.json({ title: currentTitle });
 
     } catch (error) {
-        console.error('Error serving stream metadata:', error.message);
+        console.error('Error proxying Icecast metadata:', error.message);
+        // On error, gracefully fall back to the station name
         const { stationName } = await getStationSettings();
-        res.json({ title: stationName || 'Live Stream', artist: '', artworkUrl: null });
+        res.json({ title: stationName || 'Live Stream' });
     }
 });
 
