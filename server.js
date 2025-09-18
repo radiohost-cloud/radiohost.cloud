@@ -1904,7 +1904,7 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
             const cleanArtist = artist.toLowerCase().trim();
             const cleanTitle = title.toLowerCase().trim();
             const searchTerm = encodeURIComponent(artist + ' ' + title);
-            const url = `https://itunes.apple.com/search?term=${searchTerm}&entity=song&media=music&limit=5&country=US`;
+            const url = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=5&country=US\`;
             try {
                 const response = await fetch(url);
                 if (!response.ok) return null;
