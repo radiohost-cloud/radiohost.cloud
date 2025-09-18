@@ -1904,11 +1904,11 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         .mobile-only { display: none; }
         @media (max-width: 768px) {
             body { justify-content: flex-start; padding-top: 5vh; }
-            .player-container { margin-bottom: 80px; }
+            .player-container { margin-bottom: 100px; }
             .desktop-only { display: none !important; }
             .mobile-only { display: flex; }
             
-            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background-color: #1a1a1a; flex-direction: column; transform: translateY(calc(100% - 80px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); }
+            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background-color: #1a1a1a; flex-direction: column; transform: translateY(calc(100% - 90px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); }
             #chat-drawer.transitioning { transition: transform 0.3s ease-out; }
             #chat-drawer-header { padding: 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; }
             .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 10px; }
@@ -1921,7 +1921,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 <body>
     <div id="logo-container"></div>
     <div class="player-container">
-        <img id="artwork" src="https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png" alt="Album Art">
+        <img id="artwork" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art">
         <h1 id="title">RadioHost.cloud</h1>
         <h2 id="artist">Live Stream</h2>
         <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
@@ -1983,7 +1983,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 
         let publicStreamUrl = '';
         let stationName = ${JSON.stringify(stationName || 'Live Stream')};
-        let defaultLogoSrc = ${JSON.stringify(logoSrc || null)} || 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
+        let defaultLogoSrc = ${JSON.stringify(logoSrc || null)};
         let ws;
         let lastKnownTitle = '';
 
@@ -2096,7 +2096,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             artistEl.textContent = artist || '...';
             
             const artworkUrl = await fetchArtwork(artist, title);
-            artworkEl.src = artworkUrl || defaultLogoSrc;
+            artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
             updateDynamicBackground(artworkUrl);
 
             if ('mediaSession' in navigator) {
@@ -2209,18 +2209,22 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             const drawerContent = document.getElementById('chat-drawer-content');
             const playerContainer = document.querySelector('.player-container');
             
+            const desktopChatMessages = document.getElementById('chat-messages');
+            const desktopChatFooter = document.querySelector('.chat-footer');
+            if (desktopChatMessages) drawerContent.appendChild(desktopChatMessages);
+            if (desktopChatFooter) drawerContent.appendChild(desktopChatFooter);
             const desktopChatWindow = document.getElementById('chat-window');
-            drawerContent.appendChild(desktopChatWindow.querySelector('.chat-header').parentElement); // Move all children
+            if (desktopChatWindow) desktopChatWindow.style.display = 'none';
             
-            chatMessages = document.getElementById('chat-messages');
-            chatForm = document.getElementById('chat-footer-form');
-            nicknameInput = document.getElementById('nickname-input');
-            messageInput = document.getElementById('message-input');
+            chatMessages = drawerContent.querySelector('#chat-messages');
+            chatForm = drawerContent.querySelector('#chat-footer-form');
+            nicknameInput = drawerContent.querySelector('#nickname-input');
+            messageInput = drawerContent.querySelector('#message-input');
             const mobileChatNotification = document.getElementById('mobile-chat-notification');
 
             let startY, startPos, isDragging = false;
             const minPos = 0;
-            const maxPos = window.innerHeight - 80;
+            const maxPos = window.innerHeight - 90;
             let isDrawerOpen = false;
 
             const setDrawerPosition = (y, transitioning = false) => {
@@ -2241,8 +2245,8 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 logoContainer.style.transform = \`translateY(\${playerTranslateY}px) scale(\${playerScale})\`;
             };
 
-            const openDrawer = () => { setDrawerPosition(minPos, true); isDrawerOpen = true; messageInput.focus(); mobileChatNotification.style.display = 'none'; };
-            const closeDrawer = () => { setDrawerPosition(maxPos, true); isDrawerOpen = false; messageInput.blur(); };
+            const openDrawer = () => { setDrawerPosition(minPos, true); isDrawerOpen = true; if (messageInput) messageInput.focus(); mobileChatNotification.style.display = 'none'; };
+            const closeDrawer = () => { setDrawerPosition(maxPos, true); isDrawerOpen = false; if (messageInput) messageInput.blur(); };
 
             drawerHeader.addEventListener('touchstart', e => {
                 isDragging = true;
@@ -2295,6 +2299,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         
         connectWs();
         pollMetadata();
+        updateLogo(defaultLogoSrc);
     </script>
 </body>
 </html>`;
