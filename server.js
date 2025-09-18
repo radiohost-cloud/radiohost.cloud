@@ -227,7 +227,6 @@ const scanMediaToTree = async (dirPath, relativePath = '') => {
 
         for (const cachedPath in db.data.mediaCache) {
             if (!allFilePaths.has(cachedPath)) {
-                // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
                 Reflect.deleteProperty(db.data.mediaCache, cachedPath);
                 console.log(`[Cache] Cleaned up stale cache for: ${cachedPath}`);
                 cacheChanged = true;
@@ -594,88 +593,99 @@ const stopPlayoutEngine = async (broadcast = true) => {
 };
 
 
-const startStreamingEngine = async () => {
-    killProcess(icecastStreamCommand); // Ensure no lingering process
+const startStreamingEngine = () => {
+    return new Promise((resolve, reject) => {
+        killProcess(icecastStreamCommand);
 
-    const studioData = db.data.userdata[studioClientEmail];
-    const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
+        const studioData = db.data.userdata[studioClientEmail];
+        const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
 
-    if (!streamConfig || !streamConfig.isEnabled) {
-        console.log('[Playout] Streaming is disabled. Engine will not connect to Icecast.');
-        return;
-    }
+        if (!streamConfig || !streamConfig.isEnabled) {
+            console.log('[Playout] Streaming is disabled. Engine will not connect to Icecast.');
+            resolve();
+            return;
+        }
 
-    console.log('[FFMPEG] Starting persistent Icecast streaming process...');
-    
-    try {
-        const bitrateK = streamConfig.bitrate || 128;
-        const { username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
+        console.log('[FFMPEG] Starting persistent Icecast streaming process...');
+        
+        const { bitrate, username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
         const outputUrl = `icecast://${username}:${password}@${serverAddress}`;
-
         const args = [
-            // Input options for raw PCM from stdin
-            '-acodec', 'pcm_s16le',
-            '-f', 's16le',
-            '-ar', '44100',
-            '-ac', '2',
-            '-re',
-            '-i', '-', // Read from stdin
-            // Output options
-            '-acodec', 'libmp3lame',
-            '-b:a', `${bitrateK}k`,
-            '-ar', '44100',
-            '-ac', '2',
-            '-f', 'mp3',
-            '-loglevel', 'error',
-            '-content_type', 'audio/mpeg',
+            '-acodec', 'pcm_s16le', '-f', 's16le', '-ar', '44100', '-ac', '2', '-re', '-i', '-',
+            '-acodec', 'libmp3lame', '-b:a', `${bitrate || 128}k`, '-ar', '44100', '-ac', '2', '-f', 'mp3',
+            '-loglevel', 'error', '-content_type', 'audio/mpeg',
             '-ice_name', stationName || 'RadioHost.cloud',
             '-ice_genre', stationGenre || 'Various',
             '-ice_url', stationUrl || 'https://radiohost.cloud',
             '-ice_description', stationDescription || 'Powered by RadioHost.cloud',
-            '-ice_public', '1',
-            '-reconnect', '1',
-            '-reconnect_streamed', '1',
-            '-reconnect_delay_max', '5',
+            '-ice_public', '1', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
             outputUrl
         ];
 
         icecastStreamCommand = spawn('ffmpeg', args);
 
-        icecastStreamCommand.on('spawn', () => {
-            console.log('[FFMPEG] Persistent Icecast connection process spawned.');
-            serverStreamStatus = 'broadcasting';
-            serverStreamError = null;
-            broadcastStreamStatus();
-        });
+        const permanentExitHandler = async (code, signal) => {
+            const wasPlaying = db.data.sharedPlayerState.isPlaying;
+            icecastStreamCommand = null;
 
-        icecastStreamCommand.stderr.on('data', (data) => {
-            console.error(`[FFMPEG Main Stderr] ${data.toString()}`);
-        });
-        
-        icecastStreamCommand.on('exit', (code, signal) => {
             if (signal !== 'SIGTERM') {
                 const errorMessage = `Main streaming process exited unexpectedly with code ${code}, signal ${signal}`;
                 console.error(`[FFMPEG] ${errorMessage}`);
                 serverStreamStatus = 'error';
                 serverStreamError = errorMessage;
                 broadcastStreamStatus();
-                 if (db.data.sharedPlayerState.isPlaying) {
-                    console.log('[Playout] Restarting playout engine due to main stream error.');
-                    stopPlayoutEngine(false);
-                    startPlayoutEngine(db.data.sharedPlayerState.currentTrackIndex);
+
+                if (wasPlaying) {
+                    console.log('[Playout] Attempting to restart playout engine due to main stream error.');
+                    if (playoutInterval) clearInterval(playoutInterval);
+                    playoutInterval = null;
+                    killProcess(currentFeederCommand);
+                    currentFeederCommand = null;
+                    await startPlayoutEngine(db.data.sharedPlayerState.currentTrackIndex);
                 }
             } else {
-                 console.log(`[FFMPEG] Main streaming process was intentionally terminated.`);
+                console.log(`[FFMPEG] Main streaming process was intentionally terminated.`);
             }
-            icecastStreamCommand = null;
-        });
+        };
 
-    } catch(e) {
-        console.error('[FFMPEG] Failed to initialize main streaming command:', e);
-        serverStreamStatus = 'error';
-        serverStreamError = 'Failed to start FFmpeg master process.';
-        broadcastStreamStatus();
-    }
+        const onSpawn = () => {
+            console.log('[FFMPEG] Persistent Icecast connection process spawned.');
+            serverStreamStatus = 'broadcasting';
+            serverStreamError = null;
+            broadcastStreamStatus();
+            icecastStreamCommand.removeListener('error', onError);
+            icecastStreamCommand.removeListener('exit', onExitEarly);
+            icecastStreamCommand.on('exit', permanentExitHandler);
+            resolve();
+        };
+
+        const onError = (err) => {
+            console.error('[FFMPEG] Failed to spawn main stream process:', err);
+            serverStreamStatus = 'error';
+            serverStreamError = 'Failed to start FFmpeg master process.';
+            broadcastStreamStatus();
+            icecastStreamCommand = null;
+            reject(err);
+        };
+
+        const onExitEarly = (code, signal) => {
+            const errorMessage = `Main streaming process exited prematurely with code ${code}, signal ${signal}`;
+            console.error(`[FFMPEG] ${errorMessage}`);
+            serverStreamStatus = 'error';
+            serverStreamError = errorMessage;
+            broadcastStreamStatus();
+            icecastStreamCommand = null;
+            reject(new Error(errorMessage));
+        };
+        
+        icecastStreamCommand.once('spawn', onSpawn);
+        icecastStreamCommand.once('error', onError);
+        icecastStreamCommand.once('exit', onExitEarly);
+
+        icecastStreamCommand.stderr.on('data', (data) => {
+            console.error(`[FFMPEG Main Stderr] ${data.toString()}`);
+        });
+    });
 };
 
 const startPlayoutForTrack = async (trackIndex) => {
@@ -715,10 +725,8 @@ const startPlayoutForTrack = async (trackIndex) => {
     }
 
     if (!icecastStreamCommand || !icecastStreamCommand.stdin) {
-        console.error('[Playout] Main stream command is not running. Cannot start feeder.');
-        // Attempt to recover by restarting the whole engine
-        await stopPlayoutEngine(false);
-        await startPlayoutEngine(db.data.sharedPlayerState.currentTrackIndex);
+        console.error('[Playout] Main stream command is not running. Cannot start feeder. Advancing to let recovery logic take over.');
+        advanceTrack();
         return;
     }
     
@@ -879,16 +887,31 @@ const playoutTick = async () => {
 
 const startPlayoutEngine = async (startIndex) => {
     if (playoutInterval) clearInterval(playoutInterval);
+
     const { sharedPlayerState, sharedPlaylist } = db.data;
+    if (startIndex >= sharedPlaylist.length) {
+        console.warn(`[Playout] Cannot start playout at index ${startIndex}, it's out of bounds. Stopping.`);
+        await stopPlayoutEngine();
+        return;
+    }
+
     sharedPlayerState.isPlaying = true;
     sharedPlayerState.currentTrackIndex = startIndex;
     sharedPlayerState.currentPlayingItemId = sharedPlaylist[startIndex]?.id;
     sharedPlayerState.trackProgress = 0;
     playheadAnchorTime = Date.now();
     
-    await startStreamingEngine();
-
-    startPlayoutForTrack(startIndex);
+    try {
+        await startStreamingEngine();
+    } catch (err) {
+        console.error('[Playout Engine] Failed to start streaming engine. Aborting playout.', err);
+        sharedPlayerState.isPlaying = false;
+        await db.write();
+        broadcastState();
+        return;
+    }
+    
+    await startPlayoutForTrack(startIndex);
     playoutInterval = setInterval(playoutTick, PLAYBACK_TICK_RATE);
 
     await db.write();
@@ -1328,7 +1351,6 @@ wss.on('connection', async (ws, req) => {
                                     await fsPromises.rename(oldPath, newPath);
                                     if (db.data.persistentMetadata?.[itemId]) {
                                         db.data.persistentMetadata[newId] = db.data.persistentMetadata[itemId];
-                                        // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
                                         Reflect.deleteProperty(db.data.persistentMetadata, itemId);
                                         await db.write();
                                     }
@@ -1403,7 +1425,6 @@ wss.on('connection', async (ws, req) => {
                                                 if (fs.existsSync(artworkPath)) await fsPromises.unlink(artworkPath);
                                             }
                                             if (db.data.persistentMetadata?.[id]) {
-                                                // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
                                                 Reflect.deleteProperty(db.data.persistentMetadata, id);
                                             }
                                         }
@@ -1435,7 +1456,6 @@ wss.on('connection', async (ws, req) => {
 
                                     if (db.data.persistentMetadata?.[itemId]) {
                                         db.data.persistentMetadata[newId] = db.data.persistentMetadata[itemId];
-                                        // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
                                         Reflect.deleteProperty(db.data.persistentMetadata, itemId);
                                     }
 
@@ -1466,13 +1486,12 @@ wss.on('connection', async (ws, req) => {
                                 break;
                             }
                             case 'togglePlay': {
-                                sharedPlayerState.isPlaying = !sharedPlayerState.isPlaying;
                                 if (sharedPlayerState.isPlaying) {
-                                    if(sharedPlaylist[sharedPlayerState.currentTrackIndex]) {
-                                       startPlayoutEngine(sharedPlayerState.currentTrackIndex);
-                                    }
-                                } else {
                                     await stopPlayoutEngine();
+                                } else {
+                                    if (sharedPlaylist[sharedPlayerState.currentTrackIndex]) {
+                                        await startPlayoutEngine(sharedPlayerState.currentTrackIndex);
+                                    }
                                 }
                                 break;
                             }
@@ -1868,7 +1887,7 @@ const getPlayerPageHTML = (stationName, streamingConfig) => `
             const cleanArtist = artist.toLowerCase().trim();
             const cleanTitle = title.toLowerCase().trim();
             const searchTerm = encodeURIComponent(artist + ' ' + title);
-            const url = `https://itunes.apple.com/search?term=${searchTerm}&entity=song&media=music&limit=5&country=US`;
+            const url = 'https://itunes.apple.com/search?term=' + searchTerm + '&entity=song&media=music&limit=5&country=US';
             try {
                 const response = await fetch(url);
                 if (!response.ok) return null;
@@ -2160,7 +2179,6 @@ app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
         };
         const trackObject = await createTrackObject(req.file.path, relativePath, req.file.originalname, clientMetadata);
         
-        // FIX: Persist metadata for non-ID3 files like VTs
         if (/\.webm$/i.test(trackObject.id)) {
             db.data.persistentMetadata[trackObject.id] = {
                 title: trackObject.title,
@@ -2195,11 +2213,9 @@ app.post('/api/track/delete', async (req, res) => {
             }
 
             if (db.data.mediaCache[id]) {
-                // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
                 Reflect.deleteProperty(db.data.mediaCache, id);
             }
             if (db.data.persistentMetadata?.[id]) {
-                // FIX: Replaced delete operator with Reflect.deleteProperty to avoid potential strict mode issues with some JS runtimes.
                 Reflect.deleteProperty(db.data.persistentMetadata, id);
             }
             await db.write();
