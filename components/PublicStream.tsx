@@ -90,6 +90,11 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                         <input type="password" id="password" value={streamingConfig.password} onChange={e => handleConfigChange('password', e.target.value)} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed"/>
                     </div>
                 </div>
+                <div>
+                    <label htmlFor="metadataHeader" className="block text-sm font-medium mb-1">Metadata Header</label>
+                    <input type="text" id="metadataHeader" value={streamingConfig.metadataHeader || ''} onChange={e => handleConfigChange('metadataHeader', e.target.value)} disabled={isSettingsDisabled} className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed" placeholder="e.g., Your Station Jingle"/>
+                    <p className="text-xs text-neutral-500 mt-1">Default text for suppressed items (e.g., jingles).</p>
+                </div>
             </div>
             
             <hr className="border-neutral-200 dark:border-neutral-800" />

@@ -472,6 +472,92 @@ let serverStreamStatus = 'inactive';
 let serverStreamError = null;
 const LOCAL_STREAM_PORT = 12345;
 
+// --- NEW: Metadata Update Logic ---
+
+const findTrackAndPathInServerTree = (node, trackId, currentPath = []) => {
+    const pathWithCurrentNode = [...currentPath, node];
+    for (const child of node.children) {
+        if (child.type !== 'folder' && child.id === trackId) {
+            return pathWithCurrentNode;
+        }
+        if (child.type === 'folder') {
+            const foundPath = findTrackAndPathInServerTree(child, trackId, pathWithCurrentNode);
+            if (foundPath) return foundPath;
+        }
+    }
+    return null;
+};
+
+const getSuppressionSettingsFromServer = (track) => {
+    const originalId = track.originalId || track.id;
+    const path = findTrackAndPathInServerTree(libraryState, originalId);
+    if (!path) return null;
+
+    for (let i = path.length - 1; i >= 0; i--) {
+        const folder = path[i];
+        if (folder.suppressMetadata?.enabled) {
+            return folder.suppressMetadata;
+        }
+    }
+    return null;
+};
+
+const updateIcecastMetadata = async (track) => {
+    const studioData = db.data.userdata[studioClientEmail];
+    const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
+
+    if (!streamConfig || !streamConfig.isEnabled || !streamConfig.serverAddress) {
+        return;
+    }
+    
+    try {
+        const { serverAddress, username, password, stationName, metadataHeader } = streamConfig;
+        
+        let url;
+        try {
+            url = new URL(`http://${serverAddress}`);
+        } catch(e) {
+            console.error(`[Metadata] Invalid Icecast server address: ${serverAddress}`);
+            return;
+        }
+
+        const adminUrl = `${url.origin}/admin/metadata`;
+        const mountpoint = url.pathname;
+        
+        let metadataString;
+        if (!track) {
+            metadataString = stationName || 'RadioHost.cloud';
+        } else {
+            const suppression = getSuppressionSettingsFromServer(track);
+            if (suppression?.enabled) {
+                metadataString = suppression.customText || metadataHeader || stationName || 'RadioHost.cloud';
+            } else {
+                metadataString = track.artist ? `${track.artist} - ${track.title}` : track.title;
+            }
+        }
+        
+        const encodedSong = encodeURIComponent(metadataString);
+        const updateUrl = `${adminUrl}?mount=${mountpoint}&mode=updinfo&song=${encodedSong}`;
+        
+        const auth = 'Basic ' + Buffer.from(username + ':' + password).toString('base64');
+        
+        const response = await fetch(updateUrl, {
+            method: 'GET',
+            headers: { 'Authorization': auth }
+        });
+        
+        if (response.ok) {
+            console.log(`[Metadata] Successfully updated Icecast metadata to: "${metadataString}"`);
+        } else {
+            const responseText = await response.text();
+            console.error(`[Metadata] Failed to update Icecast metadata. Status: ${response.status}. Response: ${responseText}`);
+        }
+    } catch (error) {
+        console.error('[Metadata] Error sending metadata update to Icecast:', error);
+    }
+};
+
+
 const stopStreamingEngine = () => {
     if (icecastStreamCommand) {
         icecastStreamCommand.kill('SIGTERM');
@@ -480,7 +566,7 @@ const stopStreamingEngine = () => {
     }
 };
 
-const stopPlayoutEngine = (broadcast = true) => {
+const stopPlayoutEngine = async (broadcast = true) => {
     if (playoutInterval) clearInterval(playoutInterval);
     playoutInterval = null;
 
@@ -493,7 +579,10 @@ const stopPlayoutEngine = (broadcast = true) => {
     stopStreamingEngine();
 
     db.data.sharedPlayerState.isPlaying = false;
-    db.write();
+    await db.write();
+
+    await updateIcecastMetadata(null); // Clear metadata on stop
+
     if (broadcast) {
         broadcastState();
         serverStreamStatus = 'inactive';
@@ -594,6 +683,8 @@ const startPlayoutForTrack = async (trackIndex) => {
         return;
     }
     
+    await updateIcecastMetadata(track);
+
     const trackPath = path.join(mediaDir, track.originalId || track.id);
     if (!fs.existsSync(trackPath)) {
         console.error(`[FFMPEG] File not found: ${trackPath}. Skipping track.`);
@@ -737,7 +828,7 @@ const advanceTrack = async (jumpToIndex = -1) => {
     } else {
         console.log('[Playout] End of playlist reached.');
         db.data.sharedPlaylist = [];
-        stopPlayoutEngine();
+        await stopPlayoutEngine();
         if (policy.isAutoFillEnabled) {
             console.log('[Playout] End of playlist, triggering autofill.');
             await performAutofill();
@@ -1364,7 +1455,7 @@ wss.on('connection', async (ws, req) => {
                                        startPlayoutEngine(sharedPlayerState.currentTrackIndex);
                                     }
                                 } else {
-                                    stopPlayoutEngine();
+                                    await stopPlayoutEngine();
                                 }
                                 break;
                             }
@@ -1377,7 +1468,7 @@ wss.on('connection', async (ws, req) => {
                                     if (payload.enabled && !sharedPlayerState.isPlaying && sharedPlaylist.length > 0) {
                                         startPlayoutEngine(sharedPlayerState.currentTrackIndex);
                                     } else if (!payload.enabled && sharedPlayerState.isPlaying) {
-                                        stopPlayoutEngine();
+                                        await stopPlayoutEngine();
                                     }
                                     setupAutoMode();
                                     await db.write();
@@ -1449,7 +1540,7 @@ wss.on('connection', async (ws, req) => {
                                        const newIndex = Math.min(removedItemIndex, newPlaylist.length - 1);
                                        advanceTrack(newIndex);
                                     } else {
-                                       stopPlayoutEngine();
+                                       await stopPlayoutEngine();
                                     }
                                 } else {
                                      const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
@@ -1488,7 +1579,7 @@ wss.on('connection', async (ws, req) => {
                                 sharedPlayerState.currentTrackIndex = 0;
                                 sharedPlayerState.trackProgress = 0;
                                 sharedPlayerState.stopAfterTrackId = null;
-                                stopPlayoutEngine(false); // Stop engine, don't broadcast yet
+                                await stopPlayoutEngine(false); // Stop engine, don't broadcast yet
                                 await db.write();
 
                                 const studioData = db.data.userdata[studioClientEmail];
