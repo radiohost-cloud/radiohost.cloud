@@ -1125,7 +1125,6 @@ const sendInitialPublicState = async (ws) => {
     
     const initialState = {
         publicStreamUrl: config.publicStreamUrl,
-        icecastStatusUrl: config.icecastStatusUrl,
         logoSrc: settings.logoSrc,
         stationName: settings.stationName,
     };
@@ -1938,7 +1937,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         const messageInput = document.getElementById('message-input');
 
         let publicStreamUrl = '';
-        let icecastStatusUrl = ${JSON.stringify(streamingConfig?.icecastStatusUrl || null)};
         let stationName = ${JSON.stringify(stationName || 'Live Stream')};
         let defaultLogoSrc = ${JSON.stringify(logoSrc || null)} || 'https://radiohost.cloud/wp-content/uploads/2024/11/cropped-moje-rad.io_.png';
         let ws;
@@ -2057,36 +2055,26 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         };
 
         const pollMetadata = async () => {
-            if (!icecastStatusUrl) {
-                setTimeout(pollMetadata, 10000); // Check again later if URL appears
-                return;
-            }
             try {
-                // Add a cache-busting query parameter
-                const url = new URL(icecastStatusUrl);
-                url.searchParams.set('_', new Date().getTime());
-                
-                const response = await fetch(url);
+                const response = await fetch('/api/stream-metadata'); // Fetch from our server proxy
                 const data = await response.json();
-                const source = data?.icestats?.source;
-                const sourceInfo = Array.isArray(source) ? source[0] : source;
-                const currentTitle = sourceInfo?.title || stationName || 'Live Stream';
+                const currentTitle = data.title;
                 
-                if (currentTitle !== lastKnownTitle) {
+                if (currentTitle && currentTitle !== lastKnownTitle) {
                     lastKnownTitle = currentTitle;
-                    console.log('New metadata from Icecast:', currentTitle);
+                    console.log('New metadata from server:', currentTitle);
                     
                     let [artist, title] = currentTitle.split(' - ').map(s => s.trim());
                     if (!title) {
                         title = artist;
-                        artist = stationName;
+                        artist = stationName; // Use stationName as fallback artist
                     }
                     updateMetadataDisplay(title, artist);
                 }
             } catch (e) {
-                console.error('Error polling Icecast metadata:', e);
+                console.error('Error polling metadata from server proxy:', e);
             }
-            setTimeout(pollMetadata, 5000);
+            setTimeout(pollMetadata, 5000); // Poll every 5 seconds
         };
 
         playBtn.addEventListener('click', () => {
@@ -2122,7 +2110,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 if (data.type === 'initial-state') {
                     const { payload } = data;
                     publicStreamUrl = payload.publicStreamUrl;
-                    icecastStatusUrl = payload.icecastStatusUrl;
                     if (payload.logoSrc) defaultLogoSrc = payload.logoSrc;
                     stationName = payload.stationName;
 
@@ -2378,6 +2365,40 @@ app.post('/api/folder', async (req, res) => {
     } catch (error) {
         console.error(`Failed to create folder ${folderPath}:`, error);
         res.status(500).json({ message: 'Failed to create folder.' });
+    }
+});
+
+app.get('/api/stream-metadata', async (req, res) => {
+    try {
+        const { streamingConfig, stationName } = await getStationSettings();
+        const icecastStatusUrl = streamingConfig?.icecastStatusUrl;
+
+        if (!icecastStatusUrl) {
+            // If no status URL, just return the station name as the title
+            return res.json({ title: stationName || 'Live Stream' });
+        }
+
+        const url = new URL(icecastStatusUrl);
+        url.searchParams.set('_', new Date().getTime()); // Cache buster
+
+        const icecastResponse = await fetch(url);
+        if (!icecastResponse.ok) {
+            throw new Error(`Icecast server responded with status ${icecastResponse.status}`);
+        }
+        
+        const data = await icecastResponse.json();
+        const source = data?.icestats?.source;
+        // Icecast can return source as an object or an array of objects
+        const sourceInfo = Array.isArray(source) ? source[0] : source;
+        const currentTitle = sourceInfo?.title || stationName || 'Live Stream';
+        
+        res.json({ title: currentTitle });
+
+    } catch (error) {
+        console.error('Error proxying Icecast metadata:', error.message);
+        // On error, gracefully fall back to the station name
+        const { stationName } = await getStationSettings();
+        res.json({ title: stationName || 'Live Stream' });
     }
 });
 
