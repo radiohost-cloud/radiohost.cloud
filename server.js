@@ -625,7 +625,7 @@ const pausePlayout = async (broadcast = true) => {
 };
 
 const startStreamingEngine = () => {
-    if (icecastStreamCommand) return Promise.resolve();
+    if (icecastStreamCommand && !icecastStreamCommand.killed) return Promise.resolve();
     if (isEngineStarting) return Promise.reject(new Error("Streaming engine is already starting."));
 
     isEngineStarting = true;
@@ -739,6 +739,21 @@ const startPlayoutForTrack = async (trackIndex) => {
         advanceTrack(trackIndex + 1);
         return;
     }
+
+    if (!icecastStreamCommand || !icecastStreamCommand.stdin || icecastStreamCommand.killed) {
+        console.error('[Playout] Main stream command is not running. Attempting to restart engine before feeding track.');
+        try {
+            await startStreamingEngine();
+            if (!icecastStreamCommand || !icecastStreamCommand.stdin || icecastStreamCommand.killed) {
+                throw new Error("Main stream process is still not available after restart attempt.");
+            }
+            console.log('[Playout] Engine restarted successfully. Retrying feeder for the current track.');
+        } catch (err) {
+            console.error('[Playout] Critical error: Could not restart streaming engine. Advancing track to allow further recovery.', err);
+            advanceTrack(); // Fallback to old behavior on critical failure
+            return;
+        }
+    }
     
     await updateIcecastMetadata(track);
 
@@ -764,12 +779,6 @@ const startPlayoutForTrack = async (trackIndex) => {
                 advanceTrack();
             }
         }, track.duration * 1000);
-        return;
-    }
-
-    if (!icecastStreamCommand || !icecastStreamCommand.stdin) {
-        console.error('[Playout] Main stream command is not running. Cannot start feeder. Advancing to let recovery logic take over.');
-        advanceTrack();
         return;
     }
     
