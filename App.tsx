@@ -32,7 +32,6 @@ import { LogoIcon } from './components/icons/LogoIcon';
 import MobileApp from './components/MobileApp';
 import Chat from './components/Chat';
 import { UsersIcon } from './components/icons/UsersIcon';
-import { ChatIcon } from './components/icons/ChatIcon';
 
 
 const createInitialLibrary = (): Folder => ({
@@ -451,7 +450,7 @@ const AppInternal: React.FC = () => {
     const [hasUnreadChat, setHasUnreadChat] = useState(false);
     
     // --- NEW: Server Stream Status State ---
-    const [serverStreamStatus, setServerStreamStatus] = useState<StreamStatus>('inactive');
+    const [serverStreamStatus, setServerStreamStatus] = useState<string>('inactive');
     const [serverStreamError, setServerStreamError] = useState<string | null>(null);
 
 
@@ -1419,7 +1418,7 @@ const AppInternal: React.FC = () => {
         };
     }, []);
 
-    const handleInsertTrackInPlaylist = useCallback((track: Track, beforeItemId: string | null = null) => {
+    const handleInsertTrackInPlaylist = useCallback((track: Track, beforeItemId: string | null) => {
         const newPlaylistItem: Track = {
             ...track,
             id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
@@ -1976,6 +1975,7 @@ const AppInternal: React.FC = () => {
         }
     }, []);
 
+
     if (isLoadingSession) {
         return (
             <div className="flex flex-col h-screen bg-white dark:bg-black items-center justify-center space-y-6">
@@ -2066,7 +2066,7 @@ const AppInternal: React.FC = () => {
                     <div style={{ flexBasis: `${displayedColumnWidths[0]}%` }} className={`flex-shrink-0 h-full overflow-hidden transition-all duration-300 ease-in-out ${!isLibraryCollapsed && 'border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900'}`}>
                         <MediaLibrary
                             rootFolder={mediaLibrary}
-                            onAddToPlaylist={handleInsertTrackInPlaylist}
+                            onAddToPlaylist={(track) => handleInsertTrackInPlaylist(track, null)}
                             onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
                             onRemoveFromLibrary={handleRemoveFromLibrary}
                             onMoveItem={handleMoveItemInLibrary}

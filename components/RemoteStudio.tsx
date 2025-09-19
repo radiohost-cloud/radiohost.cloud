@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from 'react';
 import { MicrophoneIcon } from './icons/MicrophoneIcon';
 import VolumeMeter from './VolumeMeter';
@@ -40,7 +39,7 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
     const audioContextRef = useRef<AudioContext | null>(null);
 
     // WebRTC refs
-    const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+    const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
 
     const visualize = useCallback(() => {
         if (analyserRef.current) {
@@ -127,7 +126,7 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
     useEffect(() => {
         return () => {
             streamRef.current?.getTracks().forEach(track => track.stop());
-            peerConnectionRef.current?.close();
+            peerConnectionsRef.current.forEach(pc => pc.close());
             audioContextRef.current?.close().catch(e => {});
             if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
         };
@@ -137,78 +136,69 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         ws?.send(JSON.stringify({ type: 'webrtc-signal', target, payload }));
     };
 
+    const createPeerConnection = useCallback((remoteUserEmail: string): RTCPeerConnection => {
+        const pc = new RTCPeerConnection();
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                sendSignal(remoteUserEmail, { candidate: event.candidate });
+            }
+        };
+
+        if (isStudio) {
+            pc.ontrack = (event) => {
+                if (event.track.kind !== 'audio') return;
+
+                console.log(`[WebRTC] Received remote audio track from ${remoteUserEmail}`);
+                const sourceId: AudioSourceId = `remote_${remoteUserEmail}`;
+                
+                const remoteStream = new MediaStream([event.track]);
+                onStreamAvailable(remoteStream, sourceId);
+                
+                onMixerChange(prevConfig => {
+                    if (prevConfig[sourceId]) return prevConfig;
+                    
+                    console.log(`[Mixer] Adding new channel for remote presenter: ${remoteUserEmail}`);
+                    const newConfig = { ...prevConfig };
+                    newConfig[sourceId] = { 
+                        gain: 1, 
+                        muted: false, 
+                        sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } 
+                    };
+                    return newConfig;
+                });
+            };
+        }
+
+        peerConnectionsRef.current.set(remoteUserEmail, pc);
+        return pc;
+    }, [isStudio, onStreamAvailable, onMixerChange, ws]);
+    
     const handleMicToggle = async () => {
         if (micStatus === 'connecting' || !isSecureContext) return;
         const willBeLive = !isLive;
     
-        if (!isStudio) { // Presenter logic
-            if (willBeLive) {
-                if (micStatus !== 'ready') {
-                    await connectMicrophone(selectedInputDeviceId);
-                }
-                
-                setTimeout(async () => {
-                    const micStream = streamRef.current;
-                    const cwStream = cartwallStream;
-
-                    if (!micStream) {
-                        console.error("Mic stream not available after connect attempt.");
-                        setErrorMessage("Could not start broadcast. Try again.");
-                        return;
-                    }
-
-                    let streamToSend: MediaStream;
-                    
-                    if (cwStream && cwStream.getAudioTracks().length > 0) {
-                        console.log("[WebRTC] Mixing microphone and cartwall streams.");
-                        
-                        if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-                           audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-                        }
-                        if (audioContextRef.current.state === 'suspended') {
-                            await audioContextRef.current.resume();
-                        }
-
-                        const audioCtx = audioContextRef.current;
-                        const destination = audioCtx.createMediaStreamDestination();
-
-                        const micSource = audioCtx.createMediaStreamSource(micStream);
-                        micSource.connect(destination);
-
-                        const cwSource = audioCtx.createMediaStreamSource(cwStream);
-                        cwSource.connect(destination);
-                        
-                        streamToSend = destination.stream;
-                    } else {
-                        console.log("[WebRTC] Sending microphone stream only.");
-                        streamToSend = micStream;
-                    }
-
-                    console.log("[WebRTC] Presenter going on-air. Initiating connection to server.");
-                    const pc = new RTCPeerConnection();
-                    peerConnectionRef.current = pc;
+        if (willBeLive) {
+            if (micStatus !== 'ready') await connectMicrophone(selectedInputDeviceId);
+            if (!isStudio && ws && streamRef.current) {
+                const micStream = streamRef.current;
+                const combinedStream = new MediaStream();
     
-                    pc.onicecandidate = (event) => {
-                        if (event.candidate) {
-                            sendSignal('server', { candidate: event.candidate });
-                        }
-                    };
-                    
-                    streamToSend.getAudioTracks().forEach(track => {
-                        pc.addTrack(track, streamToSend);
-                    });
-                    
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    sendSignal('server', { sdp: offer });
-
-                }, 100);
-    
-            } else { // Going off-air
-                if (peerConnectionRef.current) {
-                    peerConnectionRef.current.close();
-                    peerConnectionRef.current = null;
+                micStream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
+                if (cartwallStream) {
+                    cartwallStream.getAudioTracks().forEach(track => combinedStream.addTrack(track.clone()));
                 }
+    
+                const pc = createPeerConnection('studio');
+                combinedStream.getTracks().forEach(track => pc.addTrack(track, combinedStream));
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                sendSignal('studio', { sdp: offer });
+            }
+        } else {
+            if (!isStudio) {
+                peerConnectionsRef.current.get('studio')?.close();
+                peerConnectionsRef.current.delete('studio');
             }
         }
         
@@ -226,24 +216,26 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         if (!incomingSignal || !ws) return;
         
         const { sender, payload } = incomingSignal;
+        let pc = peerConnectionsRef.current.get(sender);
         
-        if (!isStudio && sender === 'server') { // Presenter receiving signals from the server
-            const pc = peerConnectionRef.current;
-            if (!pc) {
-                console.warn("[WebRTC] Received signal from server but no peer connection is active.");
-                return;
-            };
-
-            if (payload.sdp) {
-                pc.setRemoteDescription(new RTCSessionDescription(payload.sdp)).catch(e => console.error("Failed to set remote description:", e));
-            } else if (payload.candidate) {
-                pc.addIceCandidate(new RTCIceCandidate(payload.candidate)).catch(e => console.error("Failed to add ICE candidate:", e));
-            }
-        } else if (isStudio) { // Studio receiving relayed signals
-             // This logic is now mostly obsolete for audio, as server handles connections.
-             // Kept for potential future P2P data channels, but audio streams will come from server.
+        if (!pc && payload.sdp?.type === 'offer') {
+            pc = createPeerConnection(sender);
         }
-    }, [incomingSignal, ws, isStudio]);
+        
+        if (!pc) return;
+
+        if (payload.sdp) {
+            pc.setRemoteDescription(new RTCSessionDescription(payload.sdp)).then(async () => {
+                if (pc?.remoteDescription?.type === 'offer') {
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    sendSignal(sender, { sdp: answer });
+                }
+            });
+        } else if (payload.candidate) {
+            pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        }
+    }, [incomingSignal, ws, createPeerConnection]);
 
 
     const handleDeviceSelectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -261,7 +253,12 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
             }
         },
         cleanupConnection: (email: string) => {
-            // This is now handled by the server on disconnect
+            const pc = peerConnectionsRef.current.get(email);
+            if (pc) {
+                pc.close();
+                peerConnectionsRef.current.delete(email);
+                console.log(`[WebRTC] Cleaned up connection for ${email}`);
+            }
         }
     }));
     

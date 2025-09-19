@@ -1,3 +1,4 @@
+
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -8,7 +9,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import http from 'http';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer } from 'ws';
 import NodeID3 from 'node-id3';
 import ffmpeg from 'fluent-ffmpeg';
 import { spawn } from 'child_process';
@@ -490,7 +491,6 @@ let playheadAnchorTime = 0;
 let icecastStreamCommand = null;
 let currentFeederCommand = null;
 let currentFeederTrackId = null;
-let presenterFeederCommand = null;
 let serverStreamStatus = 'inactive';
 let serverStreamError = null;
 let isEngineStarting = false;
@@ -524,61 +524,7 @@ const getSuppressionSettingsFromServer = (track) => {
     return null;
 };
 
-const getArtworkUrlOnServer = (track) => {
-    if (!track) return null;
-    if (track.remoteArtworkUrl) {
-        return `/api/artwork-proxy?url=${encodeURIComponent(track.remoteArtworkUrl)}`;
-    }
-    if (track.hasEmbeddedArtwork) {
-        const trackId = track.originalId || track.id;
-        const artworkPath = trackId.replace(/\.[^/.]+$/, ".jpg");
-        return `/artwork/${encodeURIComponent(artworkPath)}`;
-    }
-    return null;
-};
-
-const broadcastNowPlaying = async () => {
-    try {
-        const { sharedPlayerState, sharedPlaylist } = db.data;
-        const { isPlaying, currentPlayingItemId } = sharedPlayerState;
-        const { stationName } = await getStationSettings();
-
-        let payload;
-
-        if (!isPlaying || !currentPlayingItemId) {
-            payload = { artist: stationName || 'RadioHost.cloud', title: 'Silence', artworkUrl: null };
-        } else {
-            const currentTrack = sharedPlaylist.find(item => item.id === currentPlayingItemId);
-            if (!currentTrack || currentTrack.markerType) {
-                payload = { artist: stationName || 'RadioHost.cloud', title: '...', artworkUrl: null };
-            } else {
-                const suppression = getSuppressionSettingsFromServer(currentTrack);
-                if (suppression?.enabled) {
-                    const customText = suppression.customText || stationName || 'RadioHost.cloud';
-                    const parts = customText.split(' - ');
-                    payload = { title: parts[0], artist: parts.length > 1 ? parts.slice(1).join(' - ') : '', artworkUrl: null };
-                } else {
-                    const libraryTrack = findTrackInServerTree(libraryState, currentTrack.originalId || currentTrack.id);
-                    const artworkUrl = getArtworkUrlOnServer(libraryTrack);
-                    payload = { title: currentTrack.title, artist: currentTrack.artist, artworkUrl };
-                }
-            }
-        }
-        
-        const message = JSON.stringify({ type: 'now-playing', payload });
-        browserPlayerClients.forEach(ws => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(message);
-            }
-        });
-
-    } catch (error) {
-        console.error('Error in broadcastNowPlaying:', error);
-    }
-};
-
-
-const updateIcecastMetadata = async (metadata) => {
+const updateIcecastMetadata = async (track) => {
     if (!studioUserEmail) return;
     const studioData = db.data.userdata[studioUserEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
@@ -602,17 +548,15 @@ const updateIcecastMetadata = async (metadata) => {
         const mountpoint = url.pathname;
         
         let metadataString;
-        if (typeof metadata === 'string') {
-            metadataString = metadata;
-        } else if (metadata) { // is a track object
-            const suppression = getSuppressionSettingsFromServer(metadata);
+        if (!track) {
+            metadataString = stationName || 'RadioHost.cloud';
+        } else {
+            const suppression = getSuppressionSettingsFromServer(track);
             if (suppression?.enabled) {
                 metadataString = suppression.customText || metadataHeader || stationName || 'RadioHost.cloud';
             } else {
-                metadataString = metadata.artist ? `${metadata.artist} - ${metadata.title}` : metadata.title;
+                metadataString = track.artist ? `${track.artist} - ${track.title}` : track.title;
             }
-        } else { // metadata is null
-            metadataString = stationName || 'RadioHost.cloud';
         }
         
         const encodedSong = encodeURIComponent(metadataString);
@@ -635,7 +579,6 @@ const updateIcecastMetadata = async (metadata) => {
         console.error('[Metadata] Error sending metadata update to Icecast:', error);
     }
 };
-
 
 const killProcess = (process) => {
     if (process && !process.killed) {
@@ -666,9 +609,6 @@ const stopStreamingEngine = async (broadcast = true) => {
     currentFeederCommand = null;
     currentFeederTrackId = null;
 
-    killProcess(presenterFeederCommand);
-    presenterFeederCommand = null;
-
     killProcess(icecastStreamCommand);
     icecastStreamCommand = null;
     
@@ -676,7 +616,6 @@ const stopStreamingEngine = async (broadcast = true) => {
     await db.write();
 
     await updateIcecastMetadata(null);
-    await broadcastNowPlaying();
 
     if (broadcast) {
         serverStreamStatus = 'inactive';
@@ -700,7 +639,6 @@ const pausePlayout = async (broadcast = true) => {
 
     await db.write();
     await updateIcecastMetadata(null);
-    await broadcastNowPlaying();
 
     if (broadcast) {
         broadcastState();
@@ -731,9 +669,7 @@ const startStreamingEngine = () => {
             resolve();
             return;
         }
-        
-        serverStreamStatus = 'starting';
-        broadcastStreamStatus();
+
         console.log('[FFMPEG] Starting persistent Icecast streaming process...');
         
         const { bitrate, username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
@@ -827,18 +763,23 @@ const startPlayoutForTrack = async (trackIndex) => {
     
     if (!track || track.markerType) {
         console.warn(`[Playout] Attempted to play invalid item at index ${trackIndex}. Skipping.`);
-        advanceTrack();
+        advanceTrack(trackIndex + 1);
         return;
     }
     
     await updateIcecastMetadata(track);
-    await broadcastNowPlaying();
     
     const studioData = db.data.userdata[studioUserEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
 
     if (!streamConfig || !streamConfig.isEnabled) {
         console.log(`[Playout] Streaming is disabled. Simulating playback for track: "${track.title}"`);
+        // Simulating playback end for non-streaming mode
+        setTimeout(() => {
+            if (currentFeederTrackId === track.id && db.data.sharedPlayerState.isPlaying) {
+                advanceTrack();
+            }
+        }, track.duration * 1000);
         return;
     }
     
@@ -880,14 +821,16 @@ const startPlayoutForTrack = async (trackIndex) => {
         feeder.on('exit', (code, signal) => {
             if (signal !== 'SIGTERM' && currentFeederTrackId === track.id) {
                 console.log(`[FFMPEG] Feeder for '${track.title}' finished.`);
-            }
-            if (currentFeederTrackId === track.id) {
-                 currentFeederCommand = null;
-                 currentFeederTrackId = null;
+                currentFeederCommand = null;
+                currentFeederTrackId = null;
+                if(db.data.sharedPlayerState.isPlaying) {
+                   advanceTrack();
+                }
             }
         });
         feeder.stdout.on('error', (err) => {
              console.error(`[FFMPEG] Feeder stdout pipe error for '${track.title}':`, err);
+             if(db.data.sharedPlayerState.isPlaying) advanceTrack();
         });
     } catch (e) {
         console.error('[FFMPEG] Failed to initialize feeder command:', e);
@@ -1019,48 +962,27 @@ const advanceTrack = async (jumpToIndex = -1) => {
 };
 
 const playoutTick = async () => {
-    if (!db.data.sharedPlayerState.isPlaying) {
-        if (playoutInterval) {
-            clearInterval(playoutInterval);
-            playoutInterval = null;
-        }
-        return;
-    }
-
+    if (!db.data.sharedPlayerState.isPlaying) return;
     const { sharedPlayerState, sharedPlaylist } = db.data;
-    const { currentTrackIndex } = sharedPlayerState;
-    
-    // Check for hard markers first
-    for (let i = currentTrackIndex + 1; i < sharedPlaylist.length; i++) {
+    const progress = (Date.now() - playheadAnchorTime) / 1000;
+    sharedPlayerState.trackProgress = progress;
+    for (let i = sharedPlayerState.currentTrackIndex + 1; i < sharedPlaylist.length; i++) {
         const item = sharedPlaylist[i];
         if (item.markerType === 'hard') {
             if (item.time <= Date.now()) {
                 console.log(`[Playout] Hard marker triggered at ${new Date(item.time).toLocaleTimeString()}. Jumping.`);
-                await advanceTrack(i + 1);
+                advanceTrack(i + 1);
                 return;
             }
-            break; // Stop at the first future hard marker
+            break;
         }
     }
-    
-    // Then, update progress and check for natural track end
-    const progress = (Date.now() - playheadAnchorTime) / 1000;
-    sharedPlayerState.trackProgress = progress;
-    const currentTrack = sharedPlaylist[currentTrackIndex];
-
-    if (currentTrack && !currentTrack.markerType && progress >= currentTrack.duration) {
-        if (sharedPlayerState.stopAfterTrackId === currentTrack.id) {
-            console.log(`[Playout] Stopping after track: "${currentTrack.title}" as requested.`);
-            sharedPlayerState.stopAfterTrackId = null;
-            await pausePlayout();
-        } else {
-            console.log(`[Playout] Track "${currentTrack.title}" finished naturally. Advancing.`);
-            await advanceTrack();
-        }
-        return; // Stop further processing for this tick
+    const currentTrack = sharedPlaylist[sharedPlayerState.currentTrackIndex];
+    if (currentTrack && !currentTrack.markerType && progress > currentTrack.duration + 5) { // 5 second grace period
+        console.warn(`[Playout] Watchdog: Track has overrun its duration by 5s. Forcing advance.`);
+        advanceTrack();
+        return;
     }
-    
-    // Broadcast state on every tick
     broadcastState();
 };
 
@@ -1240,7 +1162,6 @@ const sendInitialPublicState = async (ws) => {
     if (ws.readyState === WebSocket.OPEN) {
         ws.send(message);
     }
-    broadcastNowPlaying();
 };
 
 // --- NEW SCHEDULER ENGINE ---
@@ -1376,6 +1297,41 @@ const setupScheduler = () => {
 // --- NEW: WebRTC Handling ---
 const peerConnections = new Map();
 
+const createPeerConnection = (email) => {
+    const pc = new RTCPeerConnection();
+    
+    pc.onicecandidate = (event) => {
+        if (event.candidate) {
+            const clientWs = clients.get(email);
+            if (clientWs && clientWs.readyState === WebSocket.OPEN) {
+                clientWs.send(JSON.stringify({
+                    type: 'webrtc-signal',
+                    target: email,
+                    sender: 'server',
+                    payload: { candidate: event.candidate }
+                }));
+            }
+        }
+    };
+
+    pc.ontrack = (event) => {
+        console.log(`[WebRTC] Received audio track from ${email}.`);
+        // TODO: This is where we will pipe the audio track into the main FFmpeg mixer
+    };
+
+    pc.onconnectionstatechange = () => {
+        console.log(`[WebRTC] Connection state for ${email} changed to: ${pc.connectionState}`);
+        if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+            pc.close();
+            peerConnections.delete(email);
+        }
+    };
+    
+    peerConnections.set(email, pc);
+    return pc;
+};
+
+
 wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const email = url.searchParams.get('email');
@@ -1467,57 +1423,37 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'webrtc-signal': {
-                    if (data.target === 'server') {
-                        console.log(`[WebRTC] Received signal for server from ${email}`);
-                        const payload = data.payload;
+                    const { target, payload } = data;
+                    if (target === 'server') {
                         let pc = peerConnections.get(email);
+                        if (!pc) {
+                            pc = createPeerConnection(email);
+                        }
 
-                        if (payload.sdp && payload.sdp.type === 'offer') {
-                            if (pc) pc.close();
-                            
-                            pc = new RTCPeerConnection();
-                            peerConnections.set(email, pc);
-
-                            pc.ontrack = (event) => {
-                                console.log(`[WebRTC] Received audio track from ${email}`);
-                                // We don't need to do anything with the track directly here.
-                                // The on-air logic will handle feeding it to FFmpeg.
-                            };
-                            
-                            pc.onicecandidate = (event) => {
-                                if (event.candidate && ws.readyState === WebSocket.OPEN) {
-                                    ws.send(JSON.stringify({
-                                        type: 'webrtc-signal',
-                                        sender: 'server',
-                                        payload: { candidate: event.candidate }
-                                    }));
-                                }
-                            };
-
-                            pc.onconnectionstatechange = () => {
-                                console.log(`[WebRTC] Connection state for ${email}: ${pc.connectionState}`);
-                                if (['disconnected', 'closed', 'failed'].includes(pc.connectionState)) {
-                                    pc.close();
-                                    peerConnections.delete(email);
-                                }
-                            };
-
+                        if (payload.sdp) {
                             await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-
-                            if (ws.readyState === WebSocket.OPEN) {
+                            if (payload.sdp.type === 'offer') {
+                                const answer = await pc.createAnswer();
+                                await pc.setLocalDescription(answer);
                                 ws.send(JSON.stringify({
                                     type: 'webrtc-signal',
+                                    target: email,
                                     sender: 'server',
                                     payload: { sdp: answer }
                                 }));
                             }
-
                         } else if (payload.candidate) {
-                            if (pc && pc.remoteDescription) {
-                                await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
-                            }
+                            await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+                        }
+                    } else {
+                        // Relay to another client (presenter-to-studio, etc.)
+                        const targetClient = clients.get(target);
+                        if (targetClient && targetClient.readyState === ws.OPEN) {
+                            targetClient.send(JSON.stringify({
+                                type: 'webrtc-signal',
+                                payload: data.payload,
+                                sender: email
+                            }));
                         }
                     }
                     break;
@@ -1927,7 +1863,7 @@ wss.on('connection', async (ws, req) => {
         if (pc) {
             pc.close();
             peerConnections.delete(email);
-            console.log(`[WebRTC] Cleaned up peer connection for disconnected user ${email}`);
+            console.log(`[WebRTC] Cleaned up peer connection for ${email}.`);
         }
     });
 });
@@ -1956,6 +1892,20 @@ app.use('/media', express.static(mediaDir, {
     }
 }));
 app.use('/artwork', express.static(artworkDir));
+
+const getArtworkUrlOnServer = (track) => {
+    if (!track) return null;
+    if (track.remoteArtworkUrl) {
+        // Use the proxy for remote URLs to avoid CORS issues on the client
+        return `/api/artwork-proxy?url=${encodeURIComponent(track.remoteArtworkUrl)}`;
+    }
+    if (track.hasEmbeddedArtwork) {
+        const trackId = track.originalId || track.id;
+        const artworkPath = trackId.replace(/\.[^/.]+$/, ".jpg");
+        return `/artwork/${encodeURIComponent(artworkPath)}`;
+    }
+    return null;
+};
 
 const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 <!DOCTYPE html>
@@ -2038,7 +1988,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #chat-window { position: fixed; bottom: 90px; right: 20px; width: 380px; height: 550px; background-color: #1a1a1a; border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
         #chat-window.open { display: flex; opacity: 1; transform: scale(1); }
         #chat-window:not(.open) { opacity: 0; transform: scale(0.9); }
-        .chat-header { padding: 10px 15px; background-color: var(--header-bg-color); transition: background 1s ease-in-out; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+        .chat-header { padding: 10px 15px; background-color: #2a2a2a; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
         .chat-header h3 { margin: 0; font-size: 1rem; }
         .chat-header button { background: none; border: none; color: white; font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1; }
         #chat-messages { flex-grow: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; }
@@ -2047,7 +1997,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         .chat-message .from { font-size: 0.75rem; font-weight: bold; margin-bottom: 2px; opacity: 0.8; }
         .chat-message.me { background-color: #007bff; align-self: flex-end; border-bottom-right-radius: 4px; }
         .chat-message.other { background-color: #3a3a3a; align-self: flex-start; border-bottom-left-radius: 4px; }
-        .chat-footer { padding: 10px; background-color: var(--header-bg-color); transition: background 1s ease-in-out; flex-shrink: 0; }
+        .chat-footer { padding: 10px; background-color: #2a2a2a; flex-shrink: 0; }
         #chat-footer-form { display: flex; gap: 10px; }
         #nickname-input { width: 80px; background-color: #3a3a3a; border: 1px solid #555; border-radius: 5px; color: white; font-size: 0.8rem; padding: 5px; }
         #message-input { flex-grow: 1; background-color: #3a3a3a; border: 1px solid #555; border-radius: 15px; color: white; padding: 8px 12px; font-size: 0.9rem; }
@@ -2212,6 +2162,35 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 setDefaultColors();
             };
         };
+
+        const fetchArtwork = async (artist, title) => {
+            if (!artist || !title) return null;
+            const cleanArtist = artist.toLowerCase().trim();
+            const cleanTitle = title.toLowerCase().trim();
+            const searchTerm = encodeURIComponent(artist + ' ' + title);
+            const itunesUrl = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=5&country=US\`;
+            try {
+                const response = await fetch(itunesUrl);
+                if (!response.ok) return null;
+                const data = await response.json();
+                if (data.resultCount > 0) {
+                    const bestMatch = data.results.find(result =>
+                        result.artistName && result.trackName &&
+                        result.artistName.toLowerCase().includes(cleanArtist) &&
+                        result.trackName.toLowerCase().includes(cleanTitle)
+                    );
+                    const result = bestMatch || data.results[0];
+                    if (result && result.artworkUrl100) {
+                        const artworkUrl = result.artworkUrl100.replace('100x100', '600x600');
+                        return \`/api/artwork-proxy?url=\${encodeURIComponent(artworkUrl)}\`;
+                    }
+                }
+                return null;
+            } catch (e) {
+                console.error('Artwork fetch error:', e);
+                return null;
+            }
+        };
         
         const updateLogo = (logoSrc) => {
             if (logoSrc) {
@@ -2224,6 +2203,38 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     logoContainer.removeChild(stationLogo);
                 }
             }
+        };
+        
+        const pollMetadata = async () => {
+            try {
+                const response = await fetch('/api/stream-metadata');
+                if (!response.ok) return;
+                const data = await response.json();
+                const currentFullTitle = \`\${data.artist || ''} - \${data.title || ''}\`;
+                
+                if (currentFullTitle !== lastKnownTitle) {
+                    lastKnownTitle = currentFullTitle;
+                    
+                    titleEl.textContent = data.title || '...';
+                    artistEl.textContent = data.artist || '...';
+                    
+                    const artworkUrl = data.artworkUrl || await fetchArtwork(data.artist, data.title);
+                    artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+                    updateDynamicBackground(artworkUrl);
+        
+                    if ('mediaSession' in navigator) {
+                        navigator.mediaSession.metadata = new MediaMetadata({
+                            title: data.title || '...',
+                            artist: data.artist || stationName,
+                            album: stationName,
+                            artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
+                        });
+                    }
+                }
+            } catch (e) {
+                console.error('Error polling metadata:', e);
+            }
+            setTimeout(pollMetadata, 5000);
         };
 
         playBtn.addEventListener('click', () => {
@@ -2282,25 +2293,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     if (publicStreamUrl && !audioPlayer.src) audioPlayer.src = publicStreamUrl;
                 } else if (data.type === 'configUpdate') {
                     if (data.payload.logoSrc) { defaultLogoSrc = data.payload.logoSrc; updateLogo(data.payload.logoSrc); }
-                } else if (data.type === 'now-playing') {
-                    const { title, artist, artworkUrl } = data.payload;
-                    const currentFullTitle = \`\${artist || ''} - \${title || ''}\`;
-                    if (currentFullTitle !== lastKnownTitle) {
-                        lastKnownTitle = currentFullTitle;
-                        titleEl.textContent = title || '...';
-                        artistEl.textContent = artist || '...';
-                        artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-                        updateDynamicBackground(artworkUrl);
-                
-                        if ('mediaSession' in navigator) {
-                            navigator.mediaSession.metadata = new MediaMetadata({
-                                title: title || '...',
-                                artist: artist || stationName,
-                                album: stationName,
-                                artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
-                            });
-                        }
-                    }
                 } else if (data.type === 'chatMessage') {
                     addChatMessage(data.payload);
                     if (window.innerWidth <= 768) {
@@ -2542,6 +2534,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         }
 
         connectWs();
+        pollMetadata();
         updateLogo(defaultLogoSrc);
     </script>
 </body>

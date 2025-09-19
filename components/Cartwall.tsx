@@ -25,7 +25,7 @@ interface CartwallProps {
 
 const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId, onSetActivePageId, gridConfig, onGridConfigChange, audioContext, destinationNode, onActivePlayerCountChange, policy, onUpdatePolicy }) => {
     const playersRef = useRef<HTMLAudioElement[]>([]);
-    const sourcesRef = useRef<Map<number, MediaElementAudioSourceNode>>(new Map());
+    const sourcesRef = useRef<(MediaElementAudioSourceNode | null)[]>([]);
     const [activePlayers, setActivePlayers] = useState<Map<number, { progress: number, duration: number }>>(new Map());
     const [contextMenu, setContextMenu] = useState<{ x: number, y: number, index: number } | null>(null);
     const contextMenuRef = useRef<HTMLDivElement>(null);
@@ -41,11 +41,7 @@ const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId,
 
     // Create audio players on mount
     useEffect(() => {
-        playersRef.current = Array.from({ length: MAX_SIMULTANEOUS_PLAYERS }, () => {
-             const audio = document.createElement('audio');
-             audio.crossOrigin = "anonymous";
-             return audio;
-        });
+        playersRef.current = Array.from({ length: MAX_SIMULTANEOUS_PLAYERS }, () => document.createElement('audio'));
         return () => {
             playersRef.current.forEach(player => {
                 if (player.src && player.src.startsWith('blob:')) URL.revokeObjectURL(player.src);
@@ -53,6 +49,20 @@ const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId,
             if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
         };
     }, []);
+
+    // Connect players to audio graph
+    useEffect(() => {
+        if (audioContext && destinationNode) {
+            sourcesRef.current.forEach(source => source?.disconnect());
+            sourcesRef.current = playersRef.current.map(player => {
+                try {
+                    const source = audioContext.createMediaElementSource(player);
+                    source.connect(destinationNode);
+                    return source;
+                } catch (e) { return null; }
+            });
+        }
+    }, [audioContext, destinationNode]);
 
     useEffect(() => onActivePlayerCountChange(activePlayers.size), [activePlayers, onActivePlayerCountChange]);
 
@@ -111,15 +121,16 @@ const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId,
         if (!activePage || !activePage.items[index]) return;
         const track = activePage.items[index];
         
-        const activePlayerInstance = Array.from(activePlayers.entries()).find(([key]) => playersRef.current[key]?.dataset.cartIndex === String(index));
+        const activePlayerIndex = Array.from(activePlayers.keys()).find(key => playersRef.current[key]?.dataset.cartIndex === String(index));
 
-        if (activePlayerInstance) {
-            const player = playersRef.current[activePlayerInstance[0]];
+        if (activePlayerIndex !== undefined) {
+            const player = playersRef.current[activePlayerIndex];
             player.pause();
             player.currentTime = 0;
+            // Immediately update state for better UI responsiveness
             setActivePlayers(prev => {
                 const newActive = new Map(prev);
-                newActive.delete(activePlayerInstance[0]);
+                newActive.delete(activePlayerIndex);
                 return newActive;
             });
             return;
@@ -137,31 +148,15 @@ const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId,
             if (player.src && player.src.startsWith('blob:')) URL.revokeObjectURL(player.src);
             player.src = src;
             player.dataset.cartIndex = String(index);
-
-            if (audioContext && destinationNode) {
-                if(audioContext.state === 'suspended') await audioContext.resume();
-                if (!sourcesRef.current.has(freePlayerIndex)) {
-                    try {
-                        const source = audioContext.createMediaElementSource(player);
-                        source.connect(destinationNode);
-                        sourcesRef.current.set(freePlayerIndex, source);
-                    } catch (e) {
-                         if (e instanceof DOMException && e.name === 'InvalidStateError') {
-                            console.warn(`[Cartwall] Audio source for player ${freePlayerIndex} already exists.`);
-                        } else {
-                            console.error("Error connecting cartwall player to audio graph:", e);
-                        }
-                    }
-                }
-            }
             try {
+                if (audioContext?.state === 'suspended') await audioContext.resume();
                 await player.play();
                 setActivePlayers(prev => new Map(prev).set(freePlayerIndex, { progress: 0, duration: player.duration }));
             } catch (e) {
                 console.error("Cartwall playback failed:", e);
             }
         }
-    }, [activePage, activePlayers, audioContext, destinationNode]);
+    }, [activePage, activePlayers, audioContext]);
     
     const handleDrop = useCallback((e: React.DragEvent, index: number) => {
         e.preventDefault();
@@ -327,9 +322,9 @@ const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId,
             <div className="flex-grow p-1 overflow-auto">
                 <div className="grid gap-1 h-full w-full" style={gridStyle}>
                     {activePage?.items.map((item, index) => {
-                        const activePlayerInstance = Array.from(activePlayers.entries()).find(([key]) => playersRef.current[key]?.dataset.cartIndex === String(index));
-                        const isPlaying = !!activePlayerInstance;
-                        const activePlayer = activePlayerInstance ? activePlayerInstance[1] : undefined;
+                        const activePlayerEntry = Array.from(activePlayers.entries()).find(([key]) => playersRef.current[key]?.dataset.cartIndex === String(index));
+                        const isPlaying = !!activePlayerEntry;
+                        const activePlayer = activePlayerEntry ? activePlayerEntry[1] : undefined;
                         const progress = activePlayer ? (activePlayer.progress / activePlayer.duration) * 100 : 0;
                         const hoverColor = 'hover:bg-neutral-300 dark:hover:bg-neutral-700';
 
