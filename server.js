@@ -503,7 +503,7 @@ const findTrackAndPathInServerTree = (node, trackId, currentPath = []) => {
             return pathWithCurrentNode;
         }
         if (child.type === 'folder') {
-            const foundPath = findTrackAndPathInServerTree(child, trackId, currentPathWithNode);
+            const foundPath = findTrackAndPathInServerTree(child, trackId, pathWithCurrentNode);
             if (foundPath) return foundPath;
         }
     }
@@ -523,6 +523,60 @@ const getSuppressionSettingsFromServer = (track) => {
     }
     return null;
 };
+
+const getArtworkUrlOnServer = (track) => {
+    if (!track) return null;
+    if (track.remoteArtworkUrl) {
+        return `/api/artwork-proxy?url=${encodeURIComponent(track.remoteArtworkUrl)}`;
+    }
+    if (track.hasEmbeddedArtwork) {
+        const trackId = track.originalId || track.id;
+        const artworkPath = trackId.replace(/\.[^/.]+$/, ".jpg");
+        return `/artwork/${encodeURIComponent(artworkPath)}`;
+    }
+    return null;
+};
+
+const broadcastNowPlaying = async () => {
+    try {
+        const { sharedPlayerState, sharedPlaylist } = db.data;
+        const { isPlaying, currentPlayingItemId } = sharedPlayerState;
+        const { stationName } = await getStationSettings();
+
+        let payload;
+
+        if (!isPlaying || !currentPlayingItemId) {
+            payload = { artist: stationName || 'RadioHost.cloud', title: 'Silence', artworkUrl: null };
+        } else {
+            const currentTrack = sharedPlaylist.find(item => item.id === currentPlayingItemId);
+            if (!currentTrack || currentTrack.markerType) {
+                payload = { artist: stationName || 'RadioHost.cloud', title: '...', artworkUrl: null };
+            } else {
+                const suppression = getSuppressionSettingsFromServer(currentTrack);
+                if (suppression?.enabled) {
+                    const customText = suppression.customText || stationName || 'RadioHost.cloud';
+                    const parts = customText.split(' - ');
+                    payload = { title: parts[0], artist: parts.length > 1 ? parts.slice(1).join(' - ') : '', artworkUrl: null };
+                } else {
+                    const libraryTrack = findTrackInServerTree(libraryState, currentTrack.originalId || currentTrack.id);
+                    const artworkUrl = getArtworkUrlOnServer(libraryTrack);
+                    payload = { title: currentTrack.title, artist: currentTrack.artist, artworkUrl };
+                }
+            }
+        }
+        
+        const message = JSON.stringify({ type: 'now-playing', payload });
+        browserPlayerClients.forEach(ws => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(message);
+            }
+        });
+
+    } catch (error) {
+        console.error('Error in broadcastNowPlaying:', error);
+    }
+};
+
 
 const updateIcecastMetadata = async (metadata) => {
     if (!studioUserEmail) return;
@@ -622,6 +676,7 @@ const stopStreamingEngine = async (broadcast = true) => {
     await db.write();
 
     await updateIcecastMetadata(null);
+    await broadcastNowPlaying();
 
     if (broadcast) {
         serverStreamStatus = 'inactive';
@@ -645,6 +700,7 @@ const pausePlayout = async (broadcast = true) => {
 
     await db.write();
     await updateIcecastMetadata(null);
+    await broadcastNowPlaying();
 
     if (broadcast) {
         broadcastState();
@@ -776,6 +832,7 @@ const startPlayoutForTrack = async (trackIndex) => {
     }
     
     await updateIcecastMetadata(track);
+    await broadcastNowPlaying();
     
     const studioData = db.data.userdata[studioUserEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
@@ -1183,6 +1240,7 @@ const sendInitialPublicState = async (ws) => {
     if (ws.readyState === WebSocket.OPEN) {
         ws.send(message);
     }
+    broadcastNowPlaying();
 };
 
 // --- NEW SCHEDULER ENGINE ---
@@ -1899,20 +1957,6 @@ app.use('/media', express.static(mediaDir, {
 }));
 app.use('/artwork', express.static(artworkDir));
 
-const getArtworkUrlOnServer = (track) => {
-    if (!track) return null;
-    if (track.remoteArtworkUrl) {
-        // Use the proxy for remote URLs to avoid CORS issues on the client
-        return `/api/artwork-proxy?url=${encodeURIComponent(track.remoteArtworkUrl)}`;
-    }
-    if (track.hasEmbeddedArtwork) {
-        const trackId = track.originalId || track.id;
-        const artworkPath = trackId.replace(/\.[^/.]+$/, ".jpg");
-        return `/artwork/${encodeURIComponent(artworkPath)}`;
-    }
-    return null;
-};
-
 const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 <!DOCTYPE html>
 <html lang="en" class="dark">
@@ -1994,7 +2038,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #chat-window { position: fixed; bottom: 90px; right: 20px; width: 380px; height: 550px; background-color: #1a1a1a; border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
         #chat-window.open { display: flex; opacity: 1; transform: scale(1); }
         #chat-window:not(.open) { opacity: 0; transform: scale(0.9); }
-        .chat-header { padding: 10px 15px; background-color: #2a2a2a; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+        .chat-header { padding: 10px 15px; background-color: var(--header-bg-color); transition: background 1s ease-in-out; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
         .chat-header h3 { margin: 0; font-size: 1rem; }
         .chat-header button { background: none; border: none; color: white; font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1; }
         #chat-messages { flex-grow: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; }
@@ -2003,7 +2047,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         .chat-message .from { font-size: 0.75rem; font-weight: bold; margin-bottom: 2px; opacity: 0.8; }
         .chat-message.me { background-color: #007bff; align-self: flex-end; border-bottom-right-radius: 4px; }
         .chat-message.other { background-color: #3a3a3a; align-self: flex-start; border-bottom-left-radius: 4px; }
-        .chat-footer { padding: 10px; background-color: #2a2a2a; flex-shrink: 0; }
+        .chat-footer { padding: 10px; background-color: var(--header-bg-color); transition: background 1s ease-in-out; flex-shrink: 0; }
         #chat-footer-form { display: flex; gap: 10px; }
         #nickname-input { width: 80px; background-color: #3a3a3a; border: 1px solid #555; border-radius: 5px; color: white; font-size: 0.8rem; padding: 5px; }
         #message-input { flex-grow: 1; background-color: #3a3a3a; border: 1px solid #555; border-radius: 15px; color: white; padding: 8px 12px; font-size: 0.9rem; }
@@ -2168,35 +2212,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 setDefaultColors();
             };
         };
-
-        const fetchArtwork = async (artist, title) => {
-            if (!artist || !title) return null;
-            const cleanArtist = artist.toLowerCase().trim();
-            const cleanTitle = title.toLowerCase().trim();
-            const searchTerm = encodeURIComponent(artist + ' ' + title);
-            const itunesUrl = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=5&country=US\`;
-            try {
-                const response = await fetch(itunesUrl);
-                if (!response.ok) return null;
-                const data = await response.json();
-                if (data.resultCount > 0) {
-                    const bestMatch = data.results.find(result =>
-                        result.artistName && result.trackName &&
-                        result.artistName.toLowerCase().includes(cleanArtist) &&
-                        result.trackName.toLowerCase().includes(cleanTitle)
-                    );
-                    const result = bestMatch || data.results[0];
-                    if (result && result.artworkUrl100) {
-                        const artworkUrl = result.artworkUrl100.replace('100x100', '600x600');
-                        return \`/api/artwork-proxy?url=\${encodeURIComponent(artworkUrl)}\`;
-                    }
-                }
-                return null;
-            } catch (e) {
-                console.error('Artwork fetch error:', e);
-                return null;
-            }
-        };
         
         const updateLogo = (logoSrc) => {
             if (logoSrc) {
@@ -2209,38 +2224,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     logoContainer.removeChild(stationLogo);
                 }
             }
-        };
-        
-        const pollMetadata = async () => {
-            try {
-                const response = await fetch('/api/stream-metadata');
-                if (!response.ok) return;
-                const data = await response.json();
-                const currentFullTitle = \`\${data.artist || ''} - \${data.title || ''}\`;
-                
-                if (currentFullTitle !== lastKnownTitle) {
-                    lastKnownTitle = currentFullTitle;
-                    
-                    titleEl.textContent = data.title || '...';
-                    artistEl.textContent = data.artist || '...';
-                    
-                    const artworkUrl = data.artworkUrl || await fetchArtwork(data.artist, data.title);
-                    artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-                    updateDynamicBackground(artworkUrl);
-        
-                    if ('mediaSession' in navigator) {
-                        navigator.mediaSession.metadata = new MediaMetadata({
-                            title: data.title || '...',
-                            artist: data.artist || stationName,
-                            album: stationName,
-                            artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
-                        });
-                    }
-                }
-            } catch (e) {
-                console.error('Error polling metadata:', e);
-            }
-            setTimeout(pollMetadata, 5000);
         };
 
         playBtn.addEventListener('click', () => {
@@ -2299,6 +2282,25 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     if (publicStreamUrl && !audioPlayer.src) audioPlayer.src = publicStreamUrl;
                 } else if (data.type === 'configUpdate') {
                     if (data.payload.logoSrc) { defaultLogoSrc = data.payload.logoSrc; updateLogo(data.payload.logoSrc); }
+                } else if (data.type === 'now-playing') {
+                    const { title, artist, artworkUrl } = data.payload;
+                    const currentFullTitle = \`\${artist || ''} - \${title || ''}\`;
+                    if (currentFullTitle !== lastKnownTitle) {
+                        lastKnownTitle = currentFullTitle;
+                        titleEl.textContent = title || '...';
+                        artistEl.textContent = artist || '...';
+                        artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+                        updateDynamicBackground(artworkUrl);
+                
+                        if ('mediaSession' in navigator) {
+                            navigator.mediaSession.metadata = new MediaMetadata({
+                                title: title || '...',
+                                artist: artist || stationName,
+                                album: stationName,
+                                artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
+                            });
+                        }
+                    }
                 } else if (data.type === 'chatMessage') {
                     addChatMessage(data.payload);
                     if (window.innerWidth <= 768) {
@@ -2540,7 +2542,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         }
 
         connectWs();
-        pollMetadata();
         updateLogo(defaultLogoSrc);
     </script>
 </body>
