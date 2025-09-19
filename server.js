@@ -13,7 +13,8 @@ import { WebSocketServer } from 'ws';
 import NodeID3 from 'node-id3';
 import ffmpeg from 'fluent-ffmpeg';
 import { spawn } from 'child_process';
-import { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } from '@roamhq/wrtc';
+import wrtc from '@roamhq/wrtc';
+const { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } = wrtc;
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
