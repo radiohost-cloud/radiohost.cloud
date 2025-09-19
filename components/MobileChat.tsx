@@ -53,7 +53,7 @@ const MobileChat: React.FC<MobileChatProps> = ({ isOpen, onClose, messages, onSe
     }, [isOpen]);
     
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
     const handleNicknameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -80,7 +80,7 @@ const MobileChat: React.FC<MobileChatProps> = ({ isOpen, onClose, messages, onSe
     if (!isOpen) return null;
 
     return (
-        <div ref={containerRef} className="fixed top-0 left-0 w-full h-full bg-black/80 backdrop-blur-sm z-40 flex flex-col animate-slide-in-up">
+        <div ref={containerRef} className="fixed top-0 left-0 w-full h-full bg-black z-40 flex flex-col animate-slide-in-up">
             {/* Header */}
             <header className="flex-shrink-0 flex items-center justify-between p-2 bg-neutral-900 border-b border-neutral-800">
                 <div className="flex-grow pl-2">

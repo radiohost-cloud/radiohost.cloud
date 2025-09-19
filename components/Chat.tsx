@@ -13,7 +13,7 @@ const Chat: React.FC<ChatProps> = ({ messages, onSendMessage }) => {
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
     const handleSubmit = (e: React.FormEvent) => {
@@ -26,11 +26,11 @@ const Chat: React.FC<ChatProps> = ({ messages, onSendMessage }) => {
     };
 
     return (
-        <div className="p-4 h-full flex flex-col bg-neutral-100/90 dark:bg-neutral-900/90 backdrop-blur-sm">
+        <div className="p-4 h-full flex flex-col bg-neutral-100 dark:bg-neutral-900">
             <h3 className="text-lg font-semibold text-black dark:text-white flex-shrink-0 mb-4">
                 Listener Chat
             </h3>
-            <div className="flex-grow overflow-y-auto pr-2 space-y-4 flex flex-col">
+            <div className="flex-grow overflow-y-auto pr-2 space-y-4">
                 {messages.length === 0 ? (
                     <div className="h-full flex items-center justify-center text-center text-neutral-500">
                         <p>No messages yet. <br/> Listeners on the public stream page can chat with you here.</p>

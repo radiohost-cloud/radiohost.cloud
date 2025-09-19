@@ -1276,886 +1276,579 @@ const checkScheduledBroadcasts = async () => {
         
         if (nextOccurrence) {
             const nextTime = nextOccurrence.getTime();
-            if (now >= nextTime) {
-                console.log(`[Scheduler] Time for broadcast "${broadcast.title}".`);
+            if (nextTime <= now && nextTime > (now - SCHEDULER_CHECK_RATE) ) {
                 await loadBroadcastIntoPlaylist(broadcast);
-                broadcast.lastLoaded = now;
+                broadcast.lastLoaded = nextTime;
                 stateChanged = true;
             }
         }
     }
-
     if (stateChanged) {
         await db.write();
-        broadcastState(); // Broadcasts list has changed
     }
 };
 
-const startSchedulerEngine = () => {
+const setupScheduler = () => {
     if (schedulerInterval) clearInterval(schedulerInterval);
-    console.log('[Scheduler] Starting scheduler engine.');
+    console.log('[Scheduler] Setting up broadcast check interval.');
     schedulerInterval = setInterval(checkScheduledBroadcasts, SCHEDULER_CHECK_RATE);
 };
 
-// --- Initial Server Start ---
-const startServer = async () => {
-    await refreshAndBroadcastLibrary();
-    initStudioUser();
-    startSchedulerEngine();
-    await setupAutoMode();
+// --- NEW: WebRTC Handling ---
+const peerConnections = new Map();
+
+const createPeerConnection = (email) => {
+    const pc = new RTCPeerConnection();
+    
+    pc.onicecandidate = (event) => {
+        if (event.candidate) {
+            const clientWs = clients.get(email);
+            if (clientWs && clientWs.readyState === WebSocket.OPEN) {
+                clientWs.send(JSON.stringify({
+                    type: 'webrtc-signal',
+                    target: email,
+                    sender: 'server',
+                    payload: { candidate: event.candidate }
+                }));
+            }
+        }
+    };
+
+    pc.ontrack = (event) => {
+        console.log(`[WebRTC] Received audio track from ${email}.`);
+        // TODO: This is where we will pipe the audio track into the main FFmpeg mixer
+    };
+
+    pc.onconnectionstatechange = () => {
+        console.log(`[WebRTC] Connection state for ${email} changed to: ${pc.connectionState}`);
+        if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+            pc.close();
+            peerConnections.delete(email);
+        }
+    };
+    
+    peerConnections.set(email, pc);
+    return pc;
 };
 
-// --- Middleware ---
-app.use(cors());
-app.use(express.json());
-app.use('/media', express.static(mediaDir));
-app.use('/artwork', express.static(artworkDir));
 
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        const relativePath = path.dirname(req.body.webkitRelativePath);
-        const fullPath = path.join(mediaDir, relativePath);
-        fs.mkdirSync(fullPath, { recursive: true });
-        cb(null, fullPath);
-    },
-    filename: function (req, file, cb) {
-        cb(null, path.basename(req.body.webkitRelativePath));
-    }
-});
-const upload = multer({ storage: storage });
-
-// --- API Routes ---
-// Auth
-app.post('/api/signup', async (req, res) => {
-    const { email, password, nickname } = req.body;
-    if (db.data.users.find(u => u.email === email)) {
-        return res.status(409).json({ message: 'User with this email already exists.' });
-    }
-    const isFirstUser = db.data.users.length === 0;
-    const newUser = {
-        email,
-        password, // In a real app, hash this!
-        nickname,
-        role: isFirstUser ? 'studio' : 'presenter'
-    };
-    db.data.users.push(newUser);
-    await db.write();
-    if (isFirstUser) initStudioUser();
-    const { password: _, ...userToReturn } = newUser;
-    res.status(201).json(userToReturn);
-});
-
-app.post('/api/login', async (req, res) => {
-    const { email, password } = req.body;
-    const user = db.data.users.find(u => u.email === email && u.password === password);
-    if (user) {
-        const { password: _, ...userToReturn } = user;
-        res.json(userToReturn);
-    } else {
-        res.status(401).json({ message: 'Invalid credentials' });
-    }
-});
-
-app.get('/api/user/:email', async (req, res) => {
-    const user = db.data.users.find(u => u.email === req.params.email);
-    if(user) {
-        const { password: _, ...userToReturn } = user;
-        res.json(userToReturn);
-    } else {
-        res.status(404).json({ message: 'User not found' });
-    }
-});
-
-app.get('/api/users', async (req, res) => {
-    const users = db.data.users.map(({ password, ...user }) => user);
-    res.json(users);
-});
-
-app.put('/api/user/:email/role', async (req, res) => {
-    const { role } = req.body;
-    const userIndex = db.data.users.findIndex(u => u.email === req.params.email);
-
-    if (userIndex === -1) {
-        return res.status(404).json({ message: 'User not found' });
-    }
-    
-    // If setting a user to 'studio', ensure no other user has that role.
-    if (role === 'studio') {
-        db.data.users.forEach(u => {
-            if (u.role === 'studio' && u.email !== req.params.email) {
-                u.role = 'presenter'; // Demote existing studio user
-            }
-        });
-    }
-
-    db.data.users[userIndex].role = role;
-    await db.write();
-    initStudioUser(); // Re-initialize studio user after role change
-    await setupAutoMode(); // Re-check auto mode status
-    
-    const { password, ...updatedUser } = db.data.users[userIndex];
-    res.json(updatedUser);
-});
-
-
-// User Data
-app.get('/api/userdata/:email', async (req, res) => {
-    const data = db.data.userdata[req.params.email] || null;
-    res.json(data);
-});
-
-app.post('/api/userdata/:email', async (req, res) => {
-    db.data.userdata[req.params.email] = req.body;
-    await db.write();
-    // If the studio user's settings changed, we might need to react
-    if (req.params.email === studioUserEmail) {
-        const newSettings = req.body.settings || {};
-        const oldLogo = currentLogoSrc;
-        currentLogoSrc = newSettings.logoSrc || null;
-        if (oldLogo !== currentLogoSrc) {
-            const message = JSON.stringify({ type: 'configUpdate', payload: { logoSrc: currentLogoSrc } });
-            clients.forEach(ws => ws.send(message));
-            browserPlayerClients.forEach(ws => ws.send(message));
-        }
-        await setupAutoMode();
-    }
-    res.status(200).json({ message: 'Data saved' });
-});
-
-// Media Library
-app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
-    try {
-        const trackObject = await createTrackObject(req.file.path, req.body.webkitRelativePath, req.file.originalname, req.body);
-        db.data.mediaCache[req.body.webkitRelativePath] = { ...trackObject, mtime: Date.now() };
-        await db.write();
-        res.status(201).json(trackObject);
-        refreshAndBroadcastLibrary();
-    } catch (error) {
-        console.error("Error during upload processing:", error);
-        res.status(500).json({ message: "Failed to process uploaded file." });
-    }
-});
-
-app.post('/api/track/delete', async (req, res) => {
-    const { id: relativePath } = req.body;
-    const fullPath = path.join(mediaDir, relativePath);
-    const artworkPath = path.join(artworkDir, relativePath.replace(/\.[^/.]+$/, ".jpg"));
-
-    try {
-        if (fs.existsSync(fullPath)) await fsPromises.unlink(fullPath);
-        if (fs.existsSync(artworkPath)) await fsPromises.unlink(artworkPath);
-        
-        Reflect.deleteProperty(db.data.mediaCache, relativePath);
-        Reflect.deleteProperty(db.data.persistentMetadata, relativePath);
-        
-        await db.write();
-        res.status(200).json({ message: 'Track deleted' });
-        refreshAndBroadcastLibrary();
-    } catch (error) {
-        console.error(`Failed to delete track ${relativePath}:`, error);
-        res.status(500).json({ message: 'Failed to delete track files.' });
-    }
-});
-
-// --- Public Stream Page ---
-app.get('/stream', async (req, res) => {
-    const settings = await getStationSettings();
-    const config = settings?.streamingConfig;
-
-    if (!config || !config.publicPlayerEnabled) {
-        return res.status(403).send('<h1>Public Player is Disabled</h1>');
-    }
-
-    const { stationName, publicStreamUrl, icecastStatusUrl, stationDescription, stationUrl, stationGenre } = config;
-    const logoUrl = settings.logoSrc;
-
-    res.setHeader('Content-Type', 'text/html');
-    res.send(`
-        <!DOCTYPE html>
-        <html lang="en" class="dark">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-            <title>${stationName || 'Live Radio Stream'}</title>
-            <meta name="description" content="${stationDescription || '24/7 Live Internet Radio'}">
-            <meta name="theme-color" content="#111827">
-            <style>
-                :root { --accent-color: #3b82f6; }
-                body {
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-                    margin: 0;
-                    background-color: #111827; /* bg-gray-900 */
-                    color: white;
-                    display: flex;
-                    flex-direction: column;
-                    height: 100vh;
-                    overflow: hidden;
-                    -webkit-tap-highlight-color: transparent;
-                }
-                .main-container {
-                    flex-grow: 1;
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    justify-content: center;
-                    text-align: center;
-                    padding: 1rem;
-                }
-                #station-logo { width: 100px; height: 100px; border-radius: 0.75rem; object-fit: cover; margin-bottom: 1rem; background-color: #1f2937; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.4); }
-                #artwork { width: 80vw; max-width: 300px; aspect-ratio: 1/1; border-radius: 0.75rem; object-fit: cover; margin-bottom: 1.5rem; background-color: #1f2937; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.4); transition: transform 0.3s ease; }
-                #title { font-size: 1.5rem; font-weight: bold; margin: 0.5rem 0 0.25rem; }
-                #artist { font-size: 1.1rem; color: #9ca3af; }
-                .controls { position: fixed; bottom: 0; left: 0; right: 0; padding: 1.5rem; background: linear-gradient(to top, rgba(17,24,39,1), rgba(17,24,39,0)); display: flex; justify-content: center; align-items: center; gap: 1rem; }
-                #play-pause-btn { width: 72px; height: 72px; border-radius: 50%; border: none; background-color: var(--accent-color); color: white; display: flex; justify-content: center; align-items: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: transform 0.1s ease; }
-                #play-pause-btn:active { transform: scale(0.95); }
-                .icon { width: 40px; height: 40px; }
-                #volume-slider { width: 100px; -webkit-appearance: none; appearance: none; background: #374151; height: 8px; border-radius: 4px; outline: none; transition: opacity 0.2s; }
-                #volume-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; background: white; border-radius: 50%; cursor: pointer; }
-                #volume-slider::-moz-range-thumb { width: 18px; height: 18px; background: white; border-radius: 50%; cursor: pointer; }
-
-                /* Chat Styles */
-                #chat-toggle-btn { position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; border-radius: 50%; background-color: var(--accent-color); border: none; color: white; display: flex; justify-content: center; align-items: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3); z-index: 1002; }
-                #chat-icon-badge { position: absolute; top: 8px; right: 8px; width: 12px; height: 12px; background-color: #ef4444; border-radius: 50%; border: 2px solid var(--accent-color); display: none; }
-                #chat-box { display: none; position: fixed; bottom: 20px; right: 20px; width: 350px; height: 500px; background-color: rgba(31, 41, 55, 0.85); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 0.5rem; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05); flex-direction: column; overflow: hidden; z-index: 1000; }
-                #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 80%; max-height: 0; background-color: rgba(17, 24, 39, 0.85); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); border-top: 1px solid rgba(255, 255, 255, 0.1); border-top-left-radius: 1rem; border-top-right-radius: 1rem; transition: max-height 0.3s ease-out; overflow: hidden; z-index: 1001; display: flex; flex-direction: column; }
-                #chat-drawer.open { max-height: 80%; }
-                #chat-header { padding: 1rem; font-weight: bold; border-bottom: 1px solid #374151; }
-                #chat-messages, #mobile-chat-messages { flex-grow: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
-                .chat-message { max-width: 80%; padding: 0.5rem 0.75rem; border-radius: 1rem; }
-                .chat-message p { margin: 0; }
-                .chat-message.me { background-color: var(--accent-color); color: white; align-self: flex-end; border-bottom-right-radius: 0.25rem; }
-                .chat-message.other { background-color: #374151; color: white; align-self: flex-start; border-bottom-left-radius: 0.25rem; }
-                .chat-message .from { font-size: 0.75rem; font-weight: bold; margin-bottom: 0.25rem; color: #9ca3af; }
-                #chat-input-form { display: flex; padding: 1rem; border-top: 1px solid #374151; gap: 0.5rem; }
-                #chat-input { flex-grow: 1; background-color: #374151; border: 1px solid #4b5563; color: white; padding: 0.5rem 1rem; border-radius: 1.5rem; }
-                #chat-send-btn { background-color: var(--accent-color); border: none; color: white; border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; }
-
-                @media (min-width: 640px) {
-                    #chat-toggle-btn { display: flex; }
-                    #chat-box { display: flex; }
-                    #chat-drawer { display: none; }
-                    .main-container { justify-content: center; }
-                    .controls { position: static; background: none; padding: 2rem; }
-                }
-                @media (max-width: 639px) {
-                    #chat-toggle-btn { display: flex; }
-                    #chat-box { display: none; }
-                    #chat-drawer { display: flex; }
-                    .main-container { justify-content: flex-start; padding-top: 10vh; }
-                }
-            </style>
-        </head>
-        <body>
-            <audio id="audio-player" preload="none" src="${publicStreamUrl}"></audio>
-
-            <div class="main-container">
-                <img id="artwork" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art">
-                <h1 id="title">Loading...</h1>
-                <p id="artist"></p>
-            </div>
-
-            <div class="controls">
-                <button id="play-pause-btn" aria-label="Play">
-                    <svg id="play-icon" class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                    <svg id="pause-icon" class="icon" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                </button>
-            </div>
-
-            <!-- Mobile Chat Drawer -->
-            <div id="chat-drawer">
-                <div id="chat-header">Live Chat</div>
-                <div id="mobile-chat-messages"></div>
-                <form id="mobile-chat-input-form" class="chat-input-form">
-                    <input id="mobile-nickname-input" type="text" placeholder="Your Nickname" style="width: 100px; margin-right: 8px; background-color: #374151; border: 1px solid #4b5563; color: white; padding: 0.5rem; border-radius: 0.5rem;">
-                    <input id="mobile-chat-input" class="chat-input" type="text" placeholder="Type a message...">
-                    <button id="mobile-chat-send-btn" class="chat-send-btn" type="submit" aria-label="Send">
-                        <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-                    </button>
-                </form>
-            </div>
-
-            <!-- Desktop Chat -->
-            <button id="chat-toggle-btn" aria-label="Toggle Chat">
-                 <svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28"><path d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z"/></svg>
-                 <div id="chat-icon-badge"></div>
-            </button>
-            <div id="chat-box">
-                <div id="chat-header">Live Chat</div>
-                <div id="chat-messages"></div>
-                <form id="chat-input-form" class="chat-input-form">
-                    <input id="nickname-input" type="text" placeholder="Nickname" style="width: 80px; margin-right: 8px; background-color: #374151; border: 1px solid #4b5563; color: white; padding: 0.5rem; border-radius: 0.5rem;">
-                    <input id="chat-input" class="chat-input" type="text" placeholder="Type a message...">
-                    <button id="chat-send-btn" class="chat-send-btn" type="submit" aria-label="Send">
-                        <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-                    </button>
-                </form>
-            </div>
-            
-            <script>
-                if ('serviceWorker' in navigator) {
-                    navigator.serviceWorker.register('/stream-service-worker.js').then(function(registration) {
-                        console.log('Service Worker registered with scope:', registration.scope);
-                    }).catch(function(error) {
-                        console.log('Service Worker registration failed:', error);
-                    });
-                }
-            </script>
-            <script>
-                const audio = document.getElementById('audio-player');
-                const playPauseBtn = document.getElementById('play-pause-btn');
-                const playIcon = document.getElementById('play-icon');
-                const pauseIcon = document.getElementById('pause-icon');
-                const artworkEl = document.getElementById('artwork');
-                const titleEl = document.getElementById('title');
-                const artistEl = document.getElementById('artist');
-                let userNickname = localStorage.getItem('chatNickname') || 'Listener-' + Math.floor(Math.random() * 9000 + 1000);
-                
-                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const ws = new WebSocket(wsProtocol + '//' + window.location.host + '/socket?role=listener');
-                let reconnectInterval;
-
-                function connect() {
-                    ws.onopen = () => {
-                        console.log('Connected to server for metadata.');
-                        clearInterval(reconnectInterval);
-                    };
-
-                    ws.onmessage = (event) => {
-                        const data = JSON.parse(event.data);
-                        if (data.type === 'now-playing-update') {
-                            updateMetadata(data.payload);
-                        } else if (data.type === 'initial-state') {
-                            if(data.payload.stationName) document.title = data.payload.stationName;
-                        } else if (data.type === 'chatMessage') {
-                            addChatMessage(data.payload);
-                            const chatDrawer = document.getElementById('chat-drawer');
-                            const chatBox = document.getElementById('chat-box');
-                            const chatIconBadge = document.getElementById('chat-icon-badge');
-                            const isDesktopChatVisible = window.getComputedStyle(chatBox).display !== 'none';
-
-                            if (!chatDrawer.classList.contains('open') && !isDesktopChatVisible && chatIconBadge) {
-                                chatIconBadge.style.display = 'block';
-                            }
-                        }
-                    };
-
-                    ws.onclose = () => {
-                        console.log('Disconnected from metadata server. Retrying in 5s...');
-                        reconnectInterval = setTimeout(connect, 5000);
-                    };
-                    ws.onerror = (err) => {
-                        console.error('WebSocket error:', err);
-                        ws.close();
-                    };
-                }
-                connect();
-
-                function updateMetadata(data) {
-                    titleEl.textContent = data.title || 'Unknown Title';
-                    artistEl.textContent = data.artist || 'Unknown Artist';
-                    artworkEl.src = data.artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-                }
-
-                function syncMetadata() {
-                    const icecastUrl = '${icecastStatusUrl}';
-                    if (!icecastUrl) { 
-                        console.log("Icecast status URL not configured. Relying on WebSocket only.");
-                        return;
-                    }
-
-                    fetch(icecastUrl)
-                    .then(response => response.json())
-                    .then(data => {
-                        const source = data?.icestats?.source;
-                        if (source) {
-                            const nowPlaying = source.title || '';
-                            const [artist, ...titleParts] = nowPlaying.split(' - ');
-                            const title = titleParts.join(' - ');
-                            ws.send(JSON.stringify({ type: 'metadata-sync-request', payload: { artist: artist.trim(), title: title.trim() } }));
-                        }
-                    })
-                    .catch(error => console.error('Error fetching Icecast status:', error));
-                }
-
-                setInterval(syncMetadata, 10000);
-                syncMetadata();
-
-                playPauseBtn.addEventListener('click', () => {
-                    if (audio.paused) {
-                        audio.play().catch(e => console.error("Playback failed", e));
-                    } else {
-                        audio.pause();
-                    }
-                });
-
-                audio.addEventListener('play', () => {
-                    playIcon.style.display = 'none';
-                    pauseIcon.style.display = 'block';
-                    playPauseBtn.setAttribute('aria-label', 'Pause');
-                    artworkEl.style.transform = 'scale(1.05)';
-                });
-
-                audio.addEventListener('pause', () => {
-                    playIcon.style.display = 'block';
-                    pauseIcon.style.display = 'none';
-                    playPauseBtn.setAttribute('aria-label', 'Play');
-                    artworkEl.style.transform = 'scale(1)';
-                });
-
-                // Chat Logic
-                const chatToggleButton = document.getElementById('chat-toggle-btn');
-                const chatBox = document.getElementById('chat-box');
-                const chatDrawer = document.getElementById('chat-drawer');
-                const chatIconBadge = document.getElementById('chat-icon-badge');
-
-                chatToggleButton.addEventListener('click', () => {
-                    const isMobile = window.innerWidth < 640;
-                    if (isMobile) {
-                        chatDrawer.classList.toggle('open');
-                        if (chatDrawer.classList.contains('open')) {
-                            chatIconBadge.style.display = 'none';
-                            setTimeout(() => {
-                                const mobileMessagesDiv = document.getElementById('mobile-chat-messages');
-                                if(mobileMessagesDiv) mobileMessagesDiv.scrollTop = mobileMessagesDiv.scrollHeight;
-                            }, 300); // Wait for animation
-                        }
-                    } else {
-                        chatBox.style.display = chatBox.style.display === 'flex' ? 'none' : 'flex';
-                         if (chatBox.style.display === 'flex') {
-                            chatIconBadge.style.display = 'none';
-                         }
-                    }
-                });
-
-                function addChatMessage(message) {
-                    const messagesDiv = document.getElementById('chat-messages');
-                    const mobileMessagesDiv = document.getElementById('mobile-chat-messages');
-
-                    const createMessageElement = (msg) => {
-                        const el = document.createElement('div');
-                        const isMe = msg.from === userNickname || msg.from === 'Studio' && ws.id === 'studio'; // A bit of a hack for studio self-messages
-                        
-                        el.className = 'chat-message ' + (isMe ? 'me' : 'other');
-                        
-                        let fromHtml = '';
-                        if (!isMe) {
-                            const fromEl = document.createElement('p');
-                            fromEl.className = 'from';
-                            fromEl.textContent = msg.from;
-                            fromHtml = fromEl.outerHTML;
-                        }
-                        
-                        const textEl = document.createElement('p');
-                        textEl.textContent = msg.text;
-
-                        el.innerHTML = fromHtml + textEl.outerHTML;
-                        return el;
-                    };
-                    
-                    if (messagesDiv) {
-                        messagesDiv.appendChild(createMessageElement(message));
-                        setTimeout(() => { messagesDiv.scrollTop = messagesDiv.scrollHeight; }, 0);
-                    }
-                    if (mobileMessagesDiv) {
-                        mobileMessagesDiv.appendChild(createMessageElement(message));
-                        setTimeout(() => { mobileMessagesDiv.scrollTop = mobileMessagesDiv.scrollHeight; }, 0);
-                    }
-                }
-                
-                function setupChatForm(formId, inputId, nickId) {
-                     const form = document.getElementById(formId);
-                     const input = document.getElementById(inputId);
-                     const nickInput = document.getElementById(nickId);
-
-                     nickInput.value = userNickname;
-                     nickInput.addEventListener('change', (e) => {
-                         userNickname = e.target.value;
-                         localStorage.setItem('chatNickname', userNickname);
-                         // Update other nickname input if it exists
-                         const otherNickId = nickId === 'nickname-input' ? 'mobile-nickname-input' : 'nickname-input';
-                         document.getElementById(otherNickId).value = userNickname;
-                     });
-                     
-                     form.addEventListener('submit', (e) => {
-                         e.preventDefault();
-                         const text = input.value.trim();
-                         if(text && userNickname) {
-                            const message = { from: userNickname, text, timestamp: Date.now() };
-                            ws.send(JSON.stringify({ type: 'chatMessage', payload: message }));
-                            addChatMessage(message);
-                            input.value = '';
-                         }
-                     });
-                }
-                
-                setupChatForm('chat-input-form', 'chat-input', 'nickname-input');
-                setupChatForm('mobile-chat-input-form', 'mobile-chat-input', 'mobile-nickname-input');
-
-            </script>
-        </body>
-        </html>
-    `);
-});
-
-// --- Vite Frontend Hosting (for development) ---
-if (process.env.NODE_ENV !== 'production') {
-    const { createProxyMiddleware } = await import('http-proxy-middleware');
-    app.use('/', createProxyMiddleware({
-        target: 'http://localhost:5173',
-        changeOrigin: true,
-        ws: true,
-    }));
-} else {
-    app.use(express.static(path.join(__dirname, 'dist')));
-    app.get('*', (req, res) => {
-        res.sendFile(path.join(__dirname, 'dist', 'index.html'));
-    });
-}
-
-
-// --- WebSocket Server Logic ---
-server.on('upgrade', (request, socket, head) => {
-    const url = new URL(request.url, `http://${request.headers.host}`);
+wss.on('connection', async (ws, req) => {
+    const url = new URL(req.url, `http://${req.headers.host}`);
     const email = url.searchParams.get('email');
-    const role = url.searchParams.get('role');
+    const clientType = url.searchParams.get('clientType');
 
-    if (role === 'listener') {
-        wss.handleUpgrade(request, socket, head, (ws) => {
-            wss.emit('connection', ws, request);
-        });
-    } else if (email && db.data.users.find(u => u.email === email)) {
-        wss.handleUpgrade(request, socket, head, (ws) => {
-            wss.emit('connection', ws, request, email);
-        });
-    } else {
-        socket.destroy();
-    }
-});
-
-wss.on('connection', async (ws, request, email) => {
-    
-    if (!email) { // This is a listener from the public page
-        console.log('[WebSocket] Public listener connected.');
+    if (clientType === 'playerPage') {
+        console.log('[WebSocket] Browser Player Page connected.');
+        ws.req = req;
         browserPlayerClients.add(ws);
-        await sendInitialPublicState(ws);
-        ws.on('close', () => {
-            browserPlayerClients.delete(ws);
-            console.log('[WebSocket] Public listener disconnected.');
-        });
+        
+        sendInitialPublicState(ws);
+        
         ws.on('message', (message) => {
             try {
-                const data = JSON.parse(message);
+                const data = JSON.parse(message.toString());
                 if (data.type === 'chatMessage') {
-                     // Broadcast to studio and other listeners
-                    const chatMessage = JSON.stringify({ type: 'chatMessage', payload: data.payload });
-                    clients.forEach(c => c.send(chatMessage));
-                    browserPlayerClients.forEach(c => { if(c !== ws) c.send(chatMessage); });
-                } else if(data.type === 'metadata-sync-request') {
-                    // When a listener's player drifts, it might request a metadata sync
-                    // We forward this to the studio to get the latest artwork etc.
-                    if(studioUserEmail && clients.has(studioUserEmail)) {
-                        clients.get(studioUserEmail).send(JSON.stringify({ type: 'metadata-sync-request', payload: data.payload }));
+                    console.log(`[WebSocket] Chat from listener '${data.payload.from}': ${data.payload.text}`);
+                    const listenerMessage = {
+                        from: data.payload.from.substring(0, 20),
+                        text: data.payload.text.substring(0, 280),
+                        timestamp: Date.now()
+                    };
+
+                    if (studioUserEmail) {
+                        const studioWs = clients.get(studioUserEmail);
+                        if (studioWs && studioWs.readyState === WebSocket.OPEN) {
+                            studioWs.send(JSON.stringify({ type: 'chatMessage', payload: listenerMessage }));
+                        }
                     }
+
+                    browserPlayerClients.forEach(clientWs => {
+                        if (clientWs.readyState === WebSocket.OPEN) {
+                            clientWs.send(JSON.stringify({ type: 'chatMessage', payload: listenerMessage }));
+                        }
+                    });
                 }
-            } catch (e) { console.error("Error processing listener message:", e); }
+            } catch (e) {
+                console.error('Error processing message from player page client:', e);
+            }
+        });
+
+        ws.on('close', () => {
+            console.log('[WebSocket] Browser Player Page disconnected.');
+            browserPlayerClients.delete(ws);
         });
         return;
     }
-    
-    console.log(`[WebSocket] Client connected: ${email}`);
-    clients.set(email, ws);
+
+    if (!email) {
+        console.log('[WebSocket] Connection attempt without email rejected.');
+        ws.close();
+        return;
+    }
+
     const user = db.data.users.find(u => u.email === email);
+    if (!user) {
+        console.log(`[WebSocket] Connection from unknown user ${email} rejected.`);
+        ws.close();
+        return;
+    }
+
+    console.log(`[WebSocket] Client connected: ${email} (Role: ${user.role})`);
+    clients.set(email, ws);
+
     if (user.role === 'presenter') {
         presenterEmails.add(email);
         broadcastPresenterList();
     }
 
-    // Send initial state to the newly connected client
-    const initialStatePayload = {
-        playlist: getPlaylistWithSkipStatus(),
-        playerState: db.data.sharedPlayerState,
-        broadcasts: (studioUserEmail && db.data.userdata[studioUserEmail]?.broadcasts) || [],
-    };
-    ws.send(JSON.stringify({ type: 'state-update', payload: initialStatePayload }));
-    ws.send(JSON.stringify({ type: 'library-update', payload: libraryState }));
-    ws.send(JSON.stringify({ type: 'stream-status-update', payload: { status: serverStreamStatus, error: serverStreamError } }));
-
+    if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'library-update', payload: libraryState }));
+        broadcastState();
+        if (user.role === 'studio') {
+            broadcastStreamStatus();
+        }
+    }
 
     ws.on('message', async (message) => {
         try {
-            const data = JSON.parse(message);
-
-            if(data.type === 'ping') {
-                ws.send(JSON.stringify({type: 'pong'}));
-                return;
+            const data = JSON.parse(message.toString());
+            
+            if (data.type !== 'ping') {
+                console.log(`[WebSocket] Received JSON message from ${email}:`, data.type);
             }
 
-            if(data.type === 'chatMessage'){
-                const chatMessage = JSON.stringify({ type: 'chatMessage', payload: data.payload });
-                clients.forEach(c => c.send(chatMessage));
-                browserPlayerClients.forEach(c => c.send(chatMessage));
-                return;
-            }
+            switch (data.type) {
+                case 'ping':
+                    ws.send(JSON.stringify({ type: 'pong' }));
+                    break;
+                
+                case 'webrtc-signal': {
+                    const { target, payload } = data;
+                    if (target === 'server') {
+                        let pc = peerConnections.get(email);
+                        if (!pc) {
+                            pc = createPeerConnection(email);
+                        }
 
-            // Presenter-specific messages
-            if (user.role === 'presenter') {
-                 if (data.type === 'webrtc-signal') {
-                    const studioWs = clients.get(studioUserEmail);
-                    if (studioWs) {
-                        studioWs.send(JSON.stringify({
-                            type: 'webrtc-signal',
-                            sender: email,
-                            payload: data.payload
-                        }));
+                        if (payload.sdp) {
+                            await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+                            if (payload.sdp.type === 'offer') {
+                                const answer = await pc.createAnswer();
+                                await pc.setLocalDescription(answer);
+                                ws.send(JSON.stringify({
+                                    type: 'webrtc-signal',
+                                    target: email,
+                                    sender: 'server',
+                                    payload: { sdp: answer }
+                                }));
+                            }
+                        } else if (payload.candidate) {
+                            await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+                        }
+                    } else {
+                        // Relay to another client (presenter-to-studio, etc.)
+                        const targetClient = clients.get(target);
+                        if (targetClient && targetClient.readyState === ws.OPEN) {
+                            targetClient.send(JSON.stringify({
+                                type: 'webrtc-signal',
+                                payload: data.payload,
+                                sender: email
+                            }));
+                        }
                     }
-                } else if (data.type === 'voiceTrackAdd') {
-                    const { voiceTrack, beforeItemId } = data.payload;
-                    const insertIndex = beforeItemId ? db.data.sharedPlaylist.findIndex(item => item.id === beforeItemId) : db.data.sharedPlaylist.length;
-                    db.data.sharedPlaylist.splice(insertIndex > -1 ? insertIndex : db.data.sharedPlaylist.length, 0, voiceTrack);
-                    await db.write();
-                    broadcastState();
-                } else if (data.type === 'presenter-state-change') {
-                    if(studioUserEmail && clients.has(studioUserEmail)) {
-                        clients.get(studioUserEmail).send(JSON.stringify({
-                            type: 'presenter-on-air-request',
-                            payload: { presenterEmail: email, onAir: data.payload.onAir }
-                        }));
-                    }
+                    break;
                 }
-                return; 
-            }
 
-            // Studio-only messages
-            if (user.role === 'studio') {
-                if (data.type === 'webrtc-signal') {
-                    const targetWs = clients.get(data.target);
-                    if (targetWs) {
-                        targetWs.send(JSON.stringify({
-                            type: 'webrtc-signal',
-                            sender: 'studio',
-                            payload: data.payload
-                        }));
+                case 'studio-command':
+                    if (studioUserEmail && studioUserEmail === email) {
+                        const { command, payload } = data.payload;
+                        console.log(`[WebSocket] Processing studio command: ${command}`);
+                
+                        const { sharedPlaylist, sharedPlayerState } = db.data;
+                
+                        switch (command) {
+                            case 'renameItemInLibrary': {
+                                const { itemId, newName } = payload;
+                                if (!itemId || !newName) break;
+                                const oldPath = path.join(mediaDir, itemId);
+                                const newPath = path.join(path.dirname(oldPath), newName);
+                                const newId = path.relative(mediaDir, newPath).replace(/\\/g, '/');
+                                try {
+                                    await fsPromises.rename(oldPath, newPath);
+                                    if (db.data.persistentMetadata?.[itemId]) {
+                                        db.data.persistentMetadata[newId] = db.data.persistentMetadata[itemId];
+                                        Reflect.deleteProperty(db.data.persistentMetadata, itemId);
+                                        await db.write();
+                                    }
+                                    const oldArtworkPath = path.join(artworkDir, itemId.replace(/\.[^/.]+$/, ".jpg"));
+                                    if (fs.existsSync(oldArtworkPath)) {
+                                        const newArtworkPath = path.join(path.dirname(oldArtworkPath), newName.replace(/\.[^/.]+$/, ".jpg"));
+                                        await fsPromises.rename(oldArtworkPath, newArtworkPath);
+                                    }
+                                    await refreshAndBroadcastLibrary();
+                                } catch (e) {
+                                    console.error(`[FS] Failed to rename ${itemId}:`, e);
+                                }
+                                break;
+                            }
+                            case 'updateMultipleItemsTags': {
+                                const { itemIds, tags } = payload;
+                                if (!itemIds || !tags) break;
+                                for (const itemId of itemIds) {
+                                    const fullPath = path.join(mediaDir, itemId);
+                                    NodeID3.update({ userDefinedText: [{ description: "RH_TAGS", value: tags.join(', ') }] }, fullPath);
+                                }
+                                await refreshAndBroadcastLibrary();
+                                break;
+                            }
+                            case 'updateFolderTags': {
+                                const { folderId, newTags } = payload;
+                                if (!folderId || !newTags) break;
+                            
+                                if (!db.data.folderMetadata) db.data.folderMetadata = {};
+                            
+                                db.data.folderMetadata[folderId] = {
+                                    ...(db.data.folderMetadata[folderId] || {}),
+                                    tags: newTags
+                                };
+                            
+                                await applyTagsRecursively(folderId, newTags);
+                            
+                                await db.write();
+                                await refreshAndBroadcastLibrary();
+                                break;
+                            }
+                            case 'updateFolderMetadata': {
+                                const { folderId, settings } = payload;
+                                if (!folderId || !settings) break;
+                                if (!db.data.folderMetadata) db.data.folderMetadata = {};
+                                db.data.folderMetadata[folderId] = { ...(db.data.folderMetadata[folderId] || {}), suppressMetadata: settings };
+                                await db.write();
+                                await refreshAndBroadcastLibrary();
+                                break;
+                            }
+                            case 'updateTrackMetadata': {
+                                const { trackId, newMetadata } = payload;
+                                const fullPath = path.join(mediaDir, trackId);
+                                const success = NodeID3.update({ title: newMetadata.title, artist: newMetadata.artist }, fullPath);
+                                if (success) {
+                                    console.log(`[Metadata] Updated metadata for ${trackId}`);
+                                    await refreshAndBroadcastLibrary();
+                                }
+                                break;
+                            }
+                            case 'removeFromLibrary': {
+                                const { ids } = payload;
+                                if (!ids || !Array.isArray(ids)) break;
+                                for (const id of ids) {
+                                    const itemPath = path.join(mediaDir, id);
+                                    try {
+                                        const stats = await fsPromises.stat(itemPath).catch(() => null);
+                                        if (stats) {
+                                            await fsPromises.rm(itemPath, { recursive: true, force: true });
+                                            if (stats.isFile()) {
+                                                const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
+                                                if (fs.existsSync(artworkPath)) await fsPromises.unlink(artworkPath);
+                                            }
+                                            if (db.data.persistentMetadata?.[id]) {
+                                                Reflect.deleteProperty(db.data.persistentMetadata, id);
+                                            }
+                                        }
+                                    } catch (e) { console.error(`[FS] Failed to delete item at ${itemPath}:`, e); }
+                                }
+                                await db.write();
+                                await refreshAndBroadcastLibrary();
+                                break;
+                            }
+                            case 'createFolder': {
+                                const { parentId, folderName } = payload;
+                                if (!folderName) break;
+                                const basePath = parentId === 'root' ? mediaDir : path.join(mediaDir, parentId);
+                                const fullPath = path.join(basePath, folderName);
+                                if (!fs.existsSync(fullPath)) {
+                                    await fsPromises.mkdir(fullPath, { recursive: true });
+                                    await refreshAndBroadcastLibrary();
+                                }
+                                break;
+                            }
+                            case 'moveItemInLibrary': {
+                                const { itemIds, destinationFolderId } = payload;
+                                if (!itemIds || !Array.isArray(itemIds) || !destinationFolderId) break;
+                                for (const itemId of itemIds) {
+                                    const sourcePath = path.join(mediaDir, itemId);
+                                    const destDir = destinationFolderId === 'root' ? mediaDir : path.join(mediaDir, destinationFolderId);
+                                    const destPath = path.join(destDir, path.basename(itemId));
+                                    const newId = path.relative(mediaDir, destPath).replace(/\\/g, '/');
+
+                                    if (db.data.persistentMetadata?.[itemId]) {
+                                        db.data.persistentMetadata[newId] = db.data.persistentMetadata[itemId];
+                                        Reflect.deleteProperty(db.data.persistentMetadata, itemId);
+                                    }
+
+                                    const artworkSourcePath = path.join(artworkDir, itemId.replace(/\.[^/.]+$/, ".jpg"));
+                                    const artworkDestDir = destinationFolderId === 'root' ? artworkDir : path.join(artworkDir, destinationFolderId);
+                                    const artworkDestPath = path.join(artworkDestDir, path.basename(itemId).replace(/\.[^/.]+$/, ".jpg"));
+                                    try {
+                                        const sourceStats = await fsPromises.stat(sourcePath).catch(() => null);
+                                        if (sourceStats && sourceStats.isFile() && fs.existsSync(artworkSourcePath)) {
+                                            await fsPromises.mkdir(path.dirname(artworkDestPath), { recursive: true });
+                                            await fsPromises.rename(artworkSourcePath, artworkDestPath);
+                                        }
+                                        if (sourceStats) await fsPromises.rename(sourcePath, destPath);
+                                    } catch (e) { console.error(`[FS] Failed to move item ${itemId}:`, e); }
+                                }
+                                await db.write();
+                                await refreshAndBroadcastLibrary();
+                                break;
+                            }
+                            case 'next':
+                            case 'previous': {
+                                if (!sharedPlayerState.isPlaying) break;
+                                const direction = command === 'next' ? 1 : -1;
+                                const nextIndex = findNextPlayableIndex(sharedPlaylist, sharedPlayerState.currentTrackIndex, direction);
+                                if (nextIndex !== -1) {
+                                    await advanceTrack(nextIndex);
+                                }
+                                break;
+                            }
+                            case 'togglePlay': {
+                                if (sharedPlayerState.isPlaying) {
+                                    await pausePlayout();
+                                } else {
+                                    if (sharedPlaylist[sharedPlayerState.currentTrackIndex]) {
+                                        await startPlayoutEngine(sharedPlayerState.currentTrackIndex);
+                                    }
+                                }
+                                break;
+                            }
+                            case 'toggleAutoMode': {
+                                const studioData = db.data.userdata[studioUserEmail];
+                                if (studioData) {
+                                    if (!studioData.settings) studioData.settings = {};
+                                    studioData.settings.isAutoModeEnabled = payload.enabled;
+                                    
+                                    if (payload.enabled && !sharedPlayerState.isPlaying && sharedPlaylist.length > 0) {
+                                        await startPlayoutEngine(sharedPlayerState.currentTrackIndex);
+                                    } else if (!payload.enabled && sharedPlayerState.isPlaying) {
+                                        await stopStreamingEngine();
+                                    }
+                                    setupAutoMode();
+                                    await db.write();
+                                    broadcastState();
+                                }
+                                break;
+                            }
+                            case 'playTrack': {
+                                const { itemId } = payload;
+                                const targetIndex = sharedPlaylist.findIndex(item => item.id === itemId);
+                                if (targetIndex !== -1 && !sharedPlaylist[targetIndex].markerType) {
+                                    await advanceTrack(targetIndex);
+                                }
+                                break;
+                            }
+                             case 'setStopAfterTrackId': {
+                                sharedPlayerState.stopAfterTrackId = payload.id;
+                                await db.write();
+                                broadcastState();
+                                break;
+                            }
+                            case 'insertTrack': {
+                                const { track, beforeItemId } = payload;
+                                if (!track || !track.id) break;
+                                const newPlaylist = [...sharedPlaylist];
+                                const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, track);
+                                db.data.sharedPlaylist = newPlaylist;
+                                await db.write();
+                                broadcastState();
+                                break;
+                            }
+                            case 'insertTimeMarker': {
+                                const { marker, beforeItemId } = payload;
+                                if (!marker || !marker.id) break;
+                                const newPlaylist = [...sharedPlaylist];
+                                const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                                newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, marker);
+                                db.data.sharedPlaylist = newPlaylist;
+                                await db.write();
+                                broadcastState();
+                                break;
+                            }
+                            case 'updateTimeMarker': {
+                                const { markerId, updates } = payload;
+                                if (!markerId || !updates) break;
+                                const newPlaylist = sharedPlaylist.map(item => {
+                                    if (item.id === markerId && item.type === 'marker') {
+                                        return { ...item, ...updates };
+                                    }
+                                    return item;
+                                });
+                                db.data.sharedPlaylist = newPlaylist;
+                                await db.write();
+                                broadcastState();
+                                break;
+                            }
+                             case 'removeFromPlaylist': {
+                                const itemId = payload.itemId;
+                                const currentIndex = sharedPlayerState.currentTrackIndex;
+                                const removedItemIndex = sharedPlaylist.findIndex(item => item.id === itemId);
+                                const wasPlayingThisItem = sharedPlayerState.currentPlayingItemId === itemId;
+
+                                const newPlaylist = sharedPlaylist.filter(item => item.id !== itemId);
+                                db.data.sharedPlaylist = newPlaylist;
+                                
+                                if (wasPlayingThisItem) {
+                                    if (newPlaylist.length > 0) {
+                                       const newIndex = Math.min(removedItemIndex, newPlaylist.length - 1);
+                                       await advanceTrack(newIndex);
+                                    } else {
+                                       await stopStreamingEngine();
+                                    }
+                                } else {
+                                     const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
+                                     if(newCurrentIndex > -1) {
+                                        sharedPlayerState.currentTrackIndex = newCurrentIndex;
+                                     } else if (removedItemIndex < currentIndex && newPlaylist.length > 0) {
+                                        sharedPlayerState.currentTrackIndex = currentIndex - 1;
+                                     }
+                                     await db.write();
+                                     broadcastState();
+                                }
+                                break;
+                            }
+                            case 'reorderPlaylist': {
+                                const { draggedId, dropTargetId } = payload;
+                                const newPlaylist = [...sharedPlaylist];
+                                const dragIndex = newPlaylist.findIndex(item => item.id === draggedId);
+                                if (dragIndex !== -1) {
+                                    const [draggedItem] = newPlaylist.splice(dragIndex, 1);
+                                    const dropIndex = dropTargetId ? newPlaylist.findIndex(item => item.id === dropTargetId) : newPlaylist.length;
+                                    newPlaylist.splice(dropIndex !== -1 ? dropIndex : newPlaylist.length, 0, draggedItem);
+                                    db.data.sharedPlaylist = newPlaylist;
+
+                                    if(sharedPlayerState.currentPlayingItemId) {
+                                        const newCurrentIndex = newPlaylist.findIndex(item => item.id === sharedPlayerState.currentPlayingItemId);
+                                        if (newCurrentIndex !== -1) sharedPlayerState.currentTrackIndex = newCurrentIndex;
+                                    }
+                                    await db.write();
+                                    broadcastState();
+                                }
+                                break;
+                            }
+                            case 'clearPlaylist': {
+                                db.data.sharedPlaylist = [];
+                                sharedPlayerState.currentPlayingItemId = null;
+                                sharedPlayerState.currentTrackIndex = 0;
+                                sharedPlayerState.trackProgress = 0;
+                                sharedPlayerState.stopAfterTrackId = null;
+                                await stopStreamingEngine(false); // Stop engine, don't broadcast yet
+                                await db.write();
+
+                                const studioData = db.data.userdata[studioUserEmail];
+                                if (studioData?.settings?.isAutoModeEnabled) {
+                                    console.log('[Auto-Fill] Triggering autofill after playlist clear.');
+                                    await performAutofill();
+                                }
+                                broadcastState();
+                                break;
+                            }
+                             case 'saveBroadcast': {
+                                const { broadcast } = payload;
+                                if (!broadcast) break;
+                                const studioData = db.data.userdata[studioUserEmail];
+                                if (studioData) {
+                                    if (!studioData.broadcasts) studioData.broadcasts = [];
+                                    const index = studioData.broadcasts.findIndex(b => b.id === broadcast.id);
+                                    if (index > -1) {
+                                        studioData.broadcasts[index] = broadcast;
+                                    } else {
+                                        studioData.broadcasts.push(broadcast);
+                                    }
+                                    await db.write();
+                                    broadcastState();
+                                }
+                                break;
+                            }
+                            case 'deleteBroadcast': {
+                                const { broadcastId } = payload;
+                                const studioData = db.data.userdata[studioUserEmail];
+                                if (studioData && studioData.broadcasts) {
+                                    studioData.broadcasts = studioData.broadcasts.filter(b => b.id !== broadcastId);
+                                    await db.write();
+                                    broadcastState();
+                                }
+                                break;
+                            }
+                             case 'loadBroadcast': {
+                                const { broadcastId } = payload;
+                                const studioData = db.data.userdata[studioUserEmail];
+                                const broadcast = studioData?.broadcasts?.find(b => b.id === broadcastId);
+                                if (broadcast) {
+                                    await loadBroadcastIntoPlaylist(broadcast);
+                                }
+                                break;
+                            }
+                        }
                     }
-                } else if (data.type === 'configUpdate') {
-                    currentLogoSrc = data.payload.logoSrc;
-                    // When the studio updates the logo, broadcast it to listeners
-                    const message = JSON.stringify({ type: 'configUpdate', payload: { logoSrc: currentLogoSrc } });
-                    browserPlayerClients.forEach(c => c.send(message));
-                } else if (data.type === 'studio-command') {
-                    const { command, payload } = data.payload;
-                    switch (command) {
-                        case 'togglePlay': {
-                            if (db.data.sharedPlayerState.isPlaying) {
-                                await pausePlayout();
-                            } else {
-                                await startPlayoutEngine(db.data.sharedPlayerState.currentTrackIndex);
+                    break;
+
+                case 'chatMessage':
+                    if (studioUserEmail && studioUserEmail === email) {
+                        const studioMessage = {
+                            from: 'Studio',
+                            text: data.payload.text,
+                            timestamp: Date.now(),
+                        };
+                        browserPlayerClients.forEach(clientWs => {
+                            if (clientWs.readyState === WebSocket.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'chatMessage', payload: studioMessage }));
                             }
-                            break;
-                        }
-                        case 'playTrack': {
-                            const { itemId } = payload;
-                            const index = db.data.sharedPlaylist.findIndex(item => item.id === itemId);
-                            if (index > -1) {
-                                await startPlayoutEngine(index);
+                        });
+                    }
+                    break;
+                
+                case 'configUpdate':
+                    if (studioUserEmail && studioUserEmail === email) {
+                        currentLogoSrc = data.payload.logoSrc;
+                        console.log(`[WebSocket] Studio updated logo.`);
+                        browserPlayerClients.forEach(clientWs => {
+                            if (clientWs.readyState === ws.OPEN) {
+                                clientWs.send(JSON.stringify({ type: 'configUpdate', payload: { logoSrc: currentLogoSrc } }));
                             }
-                            break;
-                        }
-                        case 'next': {
-                            if (db.data.sharedPlayerState.isPlaying) await advanceTrack();
-                            break;
-                        }
-                        case 'previous': {
-                            if (db.data.sharedPlayerState.isPlaying) {
-                                const newIndex = findNextPlayableIndex(db.data.sharedPlaylist, db.data.sharedPlayerState.currentTrackIndex, -1);
-                                if (newIndex > -1) await startPlayoutEngine(newIndex);
-                            }
-                            break;
-                        }
-                        case 'setStopAfterTrackId': {
-                            db.data.sharedPlayerState.stopAfterTrackId = payload.id;
-                            await db.write();
-                            broadcastState();
-                            break;
-                        }
-                        case 'insertTrack': {
-                            const { track, beforeItemId } = payload;
-                            const insertIndex = beforeItemId ? db.data.sharedPlaylist.findIndex(item => item.id === beforeItemId) : db.data.sharedPlaylist.length;
-                            db.data.sharedPlaylist.splice(insertIndex > -1 ? insertIndex : db.data.sharedPlaylist.length, 0, track);
-                            await db.write();
-                            broadcastState();
-                            break;
-                        }
-                        case 'removeFromPlaylist': {
-                            db.data.sharedPlaylist = db.data.sharedPlaylist.filter(item => item.id !== payload.itemId);
-                            await db.write();
-                            broadcastState();
-                            break;
-                        }
-                         case 'reorderPlaylist': {
-                            const { draggedId, dropTargetId } = payload;
+                        });
+                    }
+                    break;
+                
+                case 'voiceTrackAdd':
+                    if (user && user.role === 'presenter' && studioUserEmail) {
+                        console.log(`[WebSocket] Received VT from presenter ${email}. Adding to playlist.`);
+                        const { voiceTrack, beforeItemId } = data.payload;
+                        if (voiceTrack && voiceTrack.id) {
                             const newPlaylist = [...db.data.sharedPlaylist];
-                            const dragIndex = newPlaylist.findIndex(item => item.id === draggedId);
-                            if (dragIndex === -1) break;
-                            const [draggedItem] = newPlaylist.splice(dragIndex, 1);
-                            const dropIndex = dropTargetId ? newPlaylist.findIndex(item => item.id === dropTargetId) : newPlaylist.length;
-                            newPlaylist.splice(dropIndex !== -1 ? dropIndex : newPlaylist.length, 0, draggedItem);
+                            const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+                            newPlaylist.splice(insertIndex !== -1 ? insertIndex : newPlaylist.length, 0, voiceTrack);
                             db.data.sharedPlaylist = newPlaylist;
                             await db.write();
                             broadcastState();
-                            break;
-                        }
-                        case 'clearPlaylist': {
-                            db.data.sharedPlaylist = [];
-                            await db.write();
-                            broadcastState();
-                            break;
-                        }
-                        case 'addUrlTrackToLibrary': {
-                            // This would require a server-side download/transcode, skipping for now.
-                            break;
-                        }
-                        case 'removeFromLibrary': {
-                             for (const id of payload.ids) {
-                                const fullPath = path.join(mediaDir, id);
-                                const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
-                                try {
-                                    if (fs.existsSync(fullPath)) await fsPromises.unlink(fullPath);
-                                    if (fs.existsSync(artworkPath)) await fsPromises.unlink(artworkPath);
-                                    Reflect.deleteProperty(db.data.mediaCache, id);
-                                    Reflect.deleteProperty(db.data.persistentMetadata, id);
-                                } catch (error) { console.error(`Failed to delete track ${id}:`, error); }
-                            }
-                            await db.write();
-                            await refreshAndBroadcastLibrary();
-                            break;
-                        }
-                        case 'createFolder': {
-                            const { parentId, folderName } = payload;
-                            const newFolderPath = parentId === 'root' ? folderName : `${parentId}/${folderName}`;
-                            await fsPromises.mkdir(path.join(mediaDir, newFolderPath), { recursive: true });
-                            await refreshAndBroadcastLibrary();
-                            break;
-                        }
-                        case 'moveItemInLibrary': {
-                            const { itemIds, destinationFolderId } = payload;
-                             for(const itemId of itemIds) {
-                                const oldPath = path.join(mediaDir, itemId);
-                                const destPath = path.join(mediaDir, destinationFolderId, path.basename(itemId));
-                                try {
-                                    await fsPromises.rename(oldPath, destPath);
-                                } catch(e) { console.error(`Error moving ${itemId}:`, e); }
-                             }
-                             await refreshAndBroadcastLibrary();
-                            break;
-                        }
-                         case 'renameItemInLibrary': {
-                            const { itemId, newName } = payload;
-                            const oldPath = path.join(mediaDir, itemId);
-                            const newPath = path.join(path.dirname(oldPath), newName);
-                            try {
-                                await fsPromises.rename(oldPath, newPath);
-                                await refreshAndBroadcastLibrary();
-                            } catch (e) { console.error(`Error renaming ${itemId}:`, e); }
-                            break;
-                        }
-                        case 'updateFolderMetadata': {
-                            const { folderId, settings } = payload;
-                            db.data.folderMetadata[folderId] = settings;
-                            await db.write();
-                            await refreshAndBroadcastLibrary();
-                            break;
-                        }
-                        case 'updateTrackMetadata': {
-                            const { trackId, newMetadata } = payload;
-                            db.data.persistentMetadata[trackId] = {
-                                ...(db.data.persistentMetadata[trackId] || {}),
-                                ...newMetadata
-                            };
-                            if (newMetadata.remoteArtworkUrl === '') {
-                                db.data.persistentMetadata[trackId].remoteArtworkUrl = null;
-                            }
-                            await db.write();
-                            await refreshAndBroadcastLibrary();
-                            break;
-                        }
-                        case 'updateMultipleItemsTags': {
-                            const { itemIds, tags } = payload;
-                             for (const itemId of itemIds) {
-                                const fullPath = path.join(mediaDir, itemId);
-                                if (fs.existsSync(fullPath)) {
-                                    try {
-                                        NodeID3.update({ userDefinedText: [{ description: "RH_TAGS", value: tags.join(', ') }] }, fullPath);
-                                    } catch(e) { console.warn(`Could not write ID3 tags for non-MP3 file: ${itemId}`); }
-                                }
-                            }
-                            await refreshAndBroadcastLibrary();
-                            break;
-                        }
-                         case 'updateFolderTags': {
-                            const { folderId, newTags } = payload;
-                            db.data.folderMetadata[folderId] = { ...(db.data.folderMetadata[folderId] || {}), tags: newTags };
-                            await applyTagsRecursively(folderId, newTags);
-                            await db.write();
-                            await refreshAndBroadcastLibrary();
-                            break;
-                        }
-                        case 'toggleAutoMode': {
-                            db.data.userdata[studioUserEmail].settings.isAutoModeEnabled = payload.enabled;
-                            await db.write();
-                            await setupAutoMode();
-                            break;
-                        }
-                         case 'insertTimeMarker': {
-                            const { marker, beforeItemId } = payload;
-                            const insertIndex = beforeItemId ? db.data.sharedPlaylist.findIndex(item => item.id === beforeItemId) : db.data.sharedPlaylist.length;
-                            db.data.sharedPlaylist.splice(insertIndex > -1 ? insertIndex : db.data.sharedPlaylist.length, 0, marker);
-                            await db.write();
-                            broadcastState();
-                            break;
-                        }
-                        case 'updateTimeMarker': {
-                             const { markerId, updates } = payload;
-                             const index = db.data.sharedPlaylist.findIndex(item => item.id === markerId);
-                             if (index > -1) {
-                                db.data.sharedPlaylist[index] = { ...db.data.sharedPlaylist[index], ...updates };
-                                await db.write();
-                                broadcastState();
-                             }
-                             break;
-                        }
-                        case 'saveBroadcast': {
-                             const { broadcast } = payload;
-                             if (!db.data.userdata[studioUserEmail].broadcasts) {
-                                db.data.userdata[studioUserEmail].broadcasts = [];
-                             }
-                             const index = db.data.userdata[studioUserEmail].broadcasts.findIndex(b => b.id === broadcast.id);
-                             if (index > -1) {
-                                db.data.userdata[studioUserEmail].broadcasts[index] = broadcast;
-                             } else {
-                                db.data.userdata[studioUserEmail].broadcasts.push(broadcast);
-                             }
-                             await db.write();
-                             broadcastState();
-                             break;
-                        }
-                        case 'deleteBroadcast': {
-                            db.data.userdata[studioUserEmail].broadcasts = db.data.userdata[studioUserEmail].broadcasts.filter(b => b.id !== payload.broadcastId);
-                            await db.write();
-                            broadcastState();
-                            break;
-                        }
-                        case 'loadBroadcast': {
-                             const broadcast = db.data.userdata[studioUserEmail].broadcasts.find(b => b.id === payload.broadcastId);
-                             if (broadcast) {
-                                await loadBroadcastIntoPlaylist(broadcast);
-                             }
-                             break;
                         }
                     }
-                }
+                    break;
+                
+                case 'presenter-state-change':
+                    if (studioUserEmail) {
+                        const studioWs = clients.get(studioUserEmail);
+                        if (studioWs && studioWs.readyState === WebSocket.OPEN) {
+                            console.log(`[WebSocket] Relaying on-air status change from ${email} to studio.`);
+                            studioWs.send(JSON.stringify({
+                                type: 'presenter-on-air-request',
+                                payload: { ...data.payload, presenterEmail: email }
+                            }));
+                        }
+                    }
+                    break;
             }
         } catch (e) {
-            console.error('[WebSocket] Error processing message:', e);
+             console.error('[WebSocket] Error processing message:', e);
         }
     });
 
@@ -2166,11 +1859,1054 @@ wss.on('connection', async (ws, request, email) => {
             presenterEmails.delete(email);
             broadcastPresenterList();
         }
+        const pc = peerConnections.get(email);
+        if (pc) {
+            pc.close();
+            peerConnections.delete(email);
+            console.log(`[WebRTC] Cleaned up peer connection for ${email}.`);
+        }
     });
 });
 
+server.on('upgrade', (request, socket, head) => {
+    const url = new URL(request.url, `http://${request.headers.host}`);
+  
+    if (url.pathname === '/socket') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    } else {
+      console.log(`[WebSocket] Upgrade request for unknown path rejected: ${url.pathname}`);
+      socket.destroy();
+    }
+});
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server listening on http://localhost:${PORT}`);
-    startServer();
+
+app.use(cors());
+app.use(express.json());
+app.set('trust proxy', 1);
+
+app.use('/media', express.static(mediaDir, {
+    setHeaders: (res, path) => {
+        res.setHeader('Accept-Ranges', 'bytes');
+    }
+}));
+app.use('/artwork', express.static(artworkDir));
+
+const getArtworkUrlOnServer = (track) => {
+    if (!track) return null;
+    if (track.remoteArtworkUrl) {
+        // Use the proxy for remote URLs to avoid CORS issues on the client
+        return `/api/artwork-proxy?url=${encodeURIComponent(track.remoteArtworkUrl)}`;
+    }
+    if (track.hasEmbeddedArtwork) {
+        const trackId = track.originalId || track.id;
+        const artworkPath = trackId.replace(/\.[^/.]+$/, ".jpg");
+        return `/artwork/${encodeURIComponent(artworkPath)}`;
+    }
+    return null;
+};
+
+const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>${stationName || 'RadioHost.cloud Live Player'}</title>
+    <style>
+        :root { 
+            --bg-gradient: linear-gradient(45deg, #1a1a1a, #000000); 
+            --text-color: #ffffff; 
+            --subtext-color: #a0a0a0; 
+            --accent-color: #ef4444; 
+            --container-bg: rgba(0, 0, 0, 0.3);
+            --header-bg-color: #2a2a2a;
+        }
+        html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+        body { 
+            background: var(--bg-gradient); 
+            background-size: 200% 200%;
+            color: var(--text-color); 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            text-align: center; 
+            padding: 20px; 
+            box-sizing: border-box; 
+            overflow: hidden; 
+            transition: background 1s ease-in-out, color 1s ease-in-out;
+            animation: gradient-animation 15s ease infinite;
+        }
+        #bg-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+        @keyframes gradient-animation {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        #logo-container {
+            margin-bottom: 20px;
+            text-align: center;
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+            z-index: 5;
+        }
+        #station-logo {
+            max-height: 80px;
+            max-width: 80%;
+            object-fit: contain;
+            display: inline-block;
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+        }
+        .player-container { 
+            max-width: 350px; 
+            width: 100%; 
+            background: var(--container-bg); 
+            border-radius: 20px; 
+            padding: 30px; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5); 
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+            z-index: 5;
+        }
+        #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease, box-shadow 0.3s ease; box-shadow: 0 5px 20px rgba(0,0,0,0.3); }
+        #title { font-size: 1.5rem; font-weight: bold; margin: 0; min-height: 2.25rem; }
+        #artist { font-size: 1rem; color: var(--subtext-color); margin: 5px 0 20px; min-height: 1.5rem; transition: color 1s ease-in-out; }
+        .play-button { background-color: var(--accent-color); color: white; border: none; border-radius: 50%; width: 60px; height: 60px; font-size: 2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; margin: 0 auto; transition: background-color 0.2s; }
+        .play-button:hover { background-color: #d03838; }
+        .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; transition: color 1s ease-in-out; }
+        .footer a { color: var(--text-color); text-decoration: none; transition: color 1s ease-in-out; }
+        
+        /* Desktop Chat */
+        .desktop-only { display: flex; }
+        #chat-bubble { position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 15px rgba(0,0,0,0.4); transition: transform 0.2s ease; z-index: 101; }
+        #chat-bubble:hover { transform: scale(1.1); }
+        #chat-bubble svg { width: 32px; height: 32px; color: white; }
+        #chat-notification { position: absolute; top: 0; right: 0; width: 12px; height: 12px; background-color: #3b82f6; border-radius: 50%; border: 2px solid var(--accent-color); display: none; }
+        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 380px; height: 550px; background-color: #1a1a1a; border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
+        #chat-window.open { display: flex; opacity: 1; transform: scale(1); }
+        #chat-window:not(.open) { opacity: 0; transform: scale(0.9); }
+        .chat-header { padding: 10px 15px; background-color: #2a2a2a; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+        .chat-header h3 { margin: 0; font-size: 1rem; }
+        .chat-header button { background: none; border: none; color: white; font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1; }
+        #chat-messages { flex-grow: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; }
+        .chat-message { max-width: 80%; padding: 8px 12px; border-radius: 18px; line-height: 1.4; word-wrap: break-word; }
+        .chat-message p { margin: 0; }
+        .chat-message .from { font-size: 0.75rem; font-weight: bold; margin-bottom: 2px; opacity: 0.8; }
+        .chat-message.me { background-color: #007bff; align-self: flex-end; border-bottom-right-radius: 4px; }
+        .chat-message.other { background-color: #3a3a3a; align-self: flex-start; border-bottom-left-radius: 4px; }
+        .chat-footer { padding: 10px; background-color: #2a2a2a; flex-shrink: 0; }
+        #chat-footer-form { display: flex; gap: 10px; }
+        #nickname-input { width: 80px; background-color: #3a3a3a; border: 1px solid #555; border-radius: 5px; color: white; font-size: 0.8rem; padding: 5px; }
+        #message-input { flex-grow: 1; background-color: #3a3a3a; border: 1px solid #555; border-radius: 15px; color: white; padding: 8px 12px; font-size: 0.9rem; }
+        #send-btn { background: var(--accent-color); border: none; color: white; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+        #send-btn svg { width: 20px; height: 20px; }
+        
+        /* Mobile Chat */
+        .mobile-only { display: none; }
+        @media (max-width: 768px) {
+            body { justify-content: flex-start; padding-top: 5vh; }
+            .player-container { margin-bottom: 100px; }
+            .desktop-only { display: none !important; }
+            .mobile-only { display: flex; }
+            
+            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background-color: #1a1a1a; flex-direction: column; transform: translateY(calc(100% - 70px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); }
+            #chat-drawer.transitioning { transition: transform 0.3s ease-out; }
+            #chat-drawer-header { padding: 10px 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; background: var(--header-bg-color); transition: background 1s ease-in-out; border-top-left-radius: 20px; border-top-right-radius: 20px; }
+            .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 8px; }
+            #chat-drawer-header h3 { margin: 0; font-size: 0.9rem; }
+            #mobile-chat-notification { position: absolute; top: 18px; right: 20px; width: 10px; height: 10px; background-color: #3b82f6; border-radius: 50%; display: none; }
+        }
+    </style>
+</head>
+<body>
+    <canvas id="bg-canvas" class="desktop-only"></canvas>
+    <div id="logo-container"></div>
+    <div class="player-container">
+        <img id="artwork" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art">
+        <h1 id="title">RadioHost.cloud</h1>
+        <h2 id="artist">Live Stream</h2>
+        <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
+        <div class="footer">
+            Powered by <a href="https://radiohost.cloud" target="_blank">RadioHost.cloud</a>
+        </div>
+    </div>
+    <audio id="audioPlayer" preload="none" crossOrigin="anonymous"></audio>
+
+    <div id="chat-bubble" class="desktop-only">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.068.158 2.148.279 3.238.364.466.037.893.281 1.153.671L12 21l2.652-3.978c.26-.39.687-.634 1.153-.67 1.09-.086 2.17-.206 3.238-.365 1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>
+        <span id="chat-notification"></span>
+    </div>
+
+    <div id="chat-window" class="desktop-only">
+        <div class="chat-header">
+            <h3>Live Chat</h3>
+            <button id="close-chat-btn">&times;</button>
+        </div>
+        <div id="chat-messages"></div>
+        <div class="chat-footer">
+            <form id="chat-footer-form">
+                <input id="nickname-input" type="text" placeholder="Nick" required maxlength="20">
+                <input id="message-input" type="text" placeholder="Type a message..." required autocomplete="off" maxlength="280">
+                <button id="send-btn" type="submit" aria-label="Send">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <div id="chat-drawer" class="mobile-only">
+        <div id="chat-drawer-header">
+            <div class="grab-handle"></div>
+            <h3>Live Chat</h3>
+            <span id="mobile-chat-notification"></span>
+        </div>
+        <div id="chat-drawer-content">
+            <!-- Content will be moved here from desktop chat elements -->
+        </div>
+    </div>
+
+    <script>
+        const playBtn = document.getElementById('playBtn');
+        const audioPlayer = document.getElementById('audioPlayer');
+        const titleEl = document.getElementById('title');
+        const artistEl = document.getElementById('artist');
+        const artworkEl = document.getElementById('artwork');
+        const rootEl = document.documentElement;
+        const logoContainer = document.getElementById('logo-container');
+        const stationLogo = document.createElement('img');
+        stationLogo.id = 'station-logo';
+
+        const chatBubble = document.getElementById('chat-bubble');
+        const chatNotification = document.getElementById('chat-notification');
+        const chatWindow = document.getElementById('chat-window');
+        const closeChatBtn = document.getElementById('close-chat-btn');
+        let chatMessages, chatForm, nicknameInput, messageInput; // Defer initialization
+
+        let publicStreamUrl = '';
+        let stationName = ${JSON.stringify(stationName || 'Live Stream')};
+        let defaultLogoSrc = ${JSON.stringify(logoSrc || null)};
+        let ws;
+        let lastKnownTitle = '';
+
+        const getProminentColors = (img) => {
+            const canvas = document.createElement('canvas');
+            const MAX_WIDTH = 100;
+            const scale = MAX_WIDTH / img.width;
+            canvas.width = MAX_WIDTH;
+            canvas.height = img.height * scale;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            if (!ctx) return { colors: ['#1a1a1a', '#000000'], textColor: 'white' };
+            
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+            const colorCounts = {};
+            
+            for (let i = 0; i < imageData.length; i += 16) {
+                const r = imageData[i], g = imageData[i + 1], b = imageData[i + 2], a = imageData[i + 3];
+                if (a < 128) continue;
+                const key = [Math.round(r/16)*16, Math.round(g/16)*16, Math.round(b/16)*16].join(',');
+                colorCounts[key] = (colorCounts[key] || 0) + 1;
+            }
+
+            const sortedColorKeys = Object.keys(colorCounts).sort((a, b) => colorCounts[b] - colorCounts[a]);
+            const getLuminance = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
+
+            const filteredColors = sortedColorKeys.filter(key => {
+                const [r, g, b] = key.split(',').map(Number);
+                const max = Math.max(r, g, b), min = Math.min(r, g, b);
+                if ((r + g + b) / 3 < 25 || (r + g + b) / 3 > 230) return false;
+                if (max - min < 15) return false;
+                return true;
+            });
+
+            const prominentColorKeys = filteredColors.slice(0, 2);
+            if (prominentColorKeys.length < 2) return { colors: ['#1a1a1a', '#000000'], textColor: 'white' };
+
+            const color1 = prominentColorKeys[0].split(',').map(Number);
+            const color2 = prominentColorKeys[1].split(',').map(Number);
+            const avgLuminance = (getLuminance(...color1) + getLuminance(...color2)) / 2;
+            const textColor = avgLuminance > 140 ? 'black' : 'white';
+            
+            return { colors: prominentColorKeys.map(key => \`rgb(\${key})\`), textColor };
+        };
+
+        const updateDynamicBackground = (imageUrl) => {
+            const setDefaultColors = () => {
+                rootEl.style.setProperty('--bg-gradient', 'linear-gradient(45deg, #1a1a1a, #000000)');
+                rootEl.style.setProperty('--text-color', '#ffffff');
+                rootEl.style.setProperty('--subtext-color', '#a0a0a0');
+                rootEl.style.setProperty('--container-bg', 'rgba(0, 0, 0, 0.3)');
+                rootEl.style.setProperty('--header-bg-color', '#2a2a2a');
+            };
+
+            if (!imageUrl) {
+                setDefaultColors();
+                return;
+            }
+            const img = new Image();
+            img.crossOrigin = "Anonymous";
+            img.src = imageUrl;
+            img.onload = () => {
+                const { colors, textColor } = getProminentColors(img);
+                rootEl.style.setProperty('--bg-gradient', \`linear-gradient(45deg, \${colors[0]}, \${colors[1]})\`);
+                rootEl.style.setProperty('--text-color', textColor === 'white' ? '#ffffff' : '#000000');
+                rootEl.style.setProperty('--subtext-color', textColor === 'white' ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)');
+                rootEl.style.setProperty('--container-bg', textColor === 'white' ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)');
+                rootEl.style.setProperty('--header-bg-color', colors[0]);
+            };
+            img.onerror = () => {
+                console.warn('Failed to load image for dynamic background.');
+                setDefaultColors();
+            };
+        };
+
+        const fetchArtwork = async (artist, title) => {
+            if (!artist || !title) return null;
+            const cleanArtist = artist.toLowerCase().trim();
+            const cleanTitle = title.toLowerCase().trim();
+            const searchTerm = encodeURIComponent(artist + ' ' + title);
+            const itunesUrl = \`https://itunes.apple.com/search?term=\${searchTerm}&entity=song&media=music&limit=5&country=US\`;
+            try {
+                const response = await fetch(itunesUrl);
+                if (!response.ok) return null;
+                const data = await response.json();
+                if (data.resultCount > 0) {
+                    const bestMatch = data.results.find(result =>
+                        result.artistName && result.trackName &&
+                        result.artistName.toLowerCase().includes(cleanArtist) &&
+                        result.trackName.toLowerCase().includes(cleanTitle)
+                    );
+                    const result = bestMatch || data.results[0];
+                    if (result && result.artworkUrl100) {
+                        const artworkUrl = result.artworkUrl100.replace('100x100', '600x600');
+                        return \`/api/artwork-proxy?url=\${encodeURIComponent(artworkUrl)}\`;
+                    }
+                }
+                return null;
+            } catch (e) {
+                console.error('Artwork fetch error:', e);
+                return null;
+            }
+        };
+        
+        const updateLogo = (logoSrc) => {
+            if (logoSrc) {
+                stationLogo.src = logoSrc;
+                if (!logoContainer.contains(stationLogo)) {
+                    logoContainer.appendChild(stationLogo);
+                }
+            } else {
+                if (logoContainer.contains(stationLogo)) {
+                    logoContainer.removeChild(stationLogo);
+                }
+            }
+        };
+        
+        const pollMetadata = async () => {
+            try {
+                const response = await fetch('/api/stream-metadata');
+                if (!response.ok) return;
+                const data = await response.json();
+                const currentFullTitle = \`\${data.artist || ''} - \${data.title || ''}\`;
+                
+                if (currentFullTitle !== lastKnownTitle) {
+                    lastKnownTitle = currentFullTitle;
+                    
+                    titleEl.textContent = data.title || '...';
+                    artistEl.textContent = data.artist || '...';
+                    
+                    const artworkUrl = data.artworkUrl || await fetchArtwork(data.artist, data.title);
+                    artworkEl.src = artworkUrl || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+                    updateDynamicBackground(artworkUrl);
+        
+                    if ('mediaSession' in navigator) {
+                        navigator.mediaSession.metadata = new MediaMetadata({
+                            title: data.title || '...',
+                            artist: data.artist || stationName,
+                            album: stationName,
+                            artwork: artworkUrl ? [{ src: artworkUrl, sizes: '512x512' }] : []
+                        });
+                    }
+                }
+            } catch (e) {
+                console.error('Error polling metadata:', e);
+            }
+            setTimeout(pollMetadata, 5000);
+        };
+
+        playBtn.addEventListener('click', () => {
+            if (audioPlayer.paused) {
+                if (publicStreamUrl && !audioPlayer.src) audioPlayer.src = publicStreamUrl;
+                if (audioPlayer.src) audioPlayer.play().catch(e => { console.error("Playback failed:", e); artistEl.textContent = 'Playback failed. Tap to retry.'; });
+            } else {
+                audioPlayer.pause();
+            }
+        });
+        
+        audioPlayer.onplaying = () => { playBtn.innerHTML = '&#10074;&#10074;'; artworkEl.style.transform = 'scale(1.05)'; };
+        audioPlayer.onpause = () => { playBtn.innerHTML = '&#9658;'; artworkEl.style.transform = 'scale(1)'; };
+        
+        if ('mediaSession' in navigator) {
+            navigator.mediaSession.setActionHandler('play', () => playBtn.click());
+            navigator.mediaSession.setActionHandler('pause', () => playBtn.click());
+        }
+
+        const escapeHtml = (text) => {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        const addChatMessage = (msg) => {
+            const isMe = nicknameInput && msg.from === nicknameInput.value;
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'chat-message ' + (isMe ? 'me' : 'other');
+            let content = '';
+            if (!isMe) content += '<p class="from">' + escapeHtml(msg.from) + '</p>';
+            content += '<p>' + escapeHtml(msg.text) + '</p>';
+            msgDiv.innerHTML = content;
+            if(chatMessages) {
+                chatMessages.appendChild(msgDiv);
+                // For column-reverse, scroll to bottom is scroll to top of element
+                if (window.innerWidth <= 768) {
+                   chatMessages.scrollTop = 0;
+                } else {
+                   chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+            }
+        };
+        
+        const connectWs = () => {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(protocol + '//' + window.location.host + '/socket?clientType=playerPage');
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'initial-state') {
+                    const { payload } = data;
+                    publicStreamUrl = payload.publicStreamUrl;
+                    if (payload.logoSrc) { defaultLogoSrc = payload.logoSrc; updateLogo(payload.logoSrc); }
+                    stationName = payload.stationName;
+                    if (publicStreamUrl && !audioPlayer.src) audioPlayer.src = publicStreamUrl;
+                } else if (data.type === 'configUpdate') {
+                    if (data.payload.logoSrc) { defaultLogoSrc = data.payload.logoSrc; updateLogo(data.payload.logoSrc); }
+                } else if (data.type === 'chatMessage') {
+                    addChatMessage(data.payload);
+                    if (window.innerWidth <= 768) {
+                        const drawer = document.getElementById('chat-drawer');
+                        const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
+                        if (currentTransform.m42 > 0) document.getElementById('mobile-chat-notification').style.display = 'block';
+                    } else if (!chatWindow.classList.contains('open')) {
+                        chatNotification.style.display = 'block';
+                    }
+                }
+            };
+            ws.onclose = () => setTimeout(connectWs, 5000);
+        };
+        
+        if (window.innerWidth > 768) {
+            chatMessages = document.getElementById('chat-messages');
+            chatForm = document.getElementById('chat-footer-form');
+            nicknameInput = document.getElementById('nickname-input');
+            messageInput = document.getElementById('message-input');
+            chatBubble.addEventListener('click', () => { chatWindow.classList.toggle('open'); chatNotification.style.display = 'none'; if(chatWindow.classList.contains('open')) messageInput.focus(); });
+            closeChatBtn.addEventListener('click', () => { chatWindow.classList.remove('open'); });
+        } else {
+            // Mobile drawer logic
+            const drawer = document.getElementById('chat-drawer');
+            const drawerHeader = document.getElementById('chat-drawer-header');
+            const drawerContent = document.getElementById('chat-drawer-content');
+            const playerContainer = document.querySelector('.player-container');
+            
+            const desktopChatMessages = document.getElementById('chat-messages');
+            const desktopChatFooter = document.querySelector('.chat-footer');
+            if (desktopChatMessages) drawerContent.appendChild(desktopChatMessages);
+            if (desktopChatFooter) drawerContent.appendChild(desktopChatFooter);
+            const desktopChatWindow = document.getElementById('chat-window');
+            if (desktopChatWindow) desktopChatWindow.style.display = 'none';
+            
+            chatMessages = drawerContent.querySelector('#chat-messages');
+            chatForm = drawerContent.querySelector('#chat-footer-form');
+            nicknameInput = drawerContent.querySelector('#nickname-input');
+            messageInput = drawerContent.querySelector('#message-input');
+            const mobileChatNotification = document.getElementById('mobile-chat-notification');
+
+            let startY, startPos, isDragging = false;
+            let minPos = 0;
+            let maxPos = window.innerHeight - 70;
+            let isDrawerOpen = false;
+
+            const updateDrawerPositions = () => {
+                minPos = 0;
+                const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+                maxPos = viewportHeight - 70;
+            };
+            window.addEventListener('resize', updateDrawerPositions);
+            updateDrawerPositions();
+
+            const setDrawerPosition = (y, transitioning = false) => {
+                if(transitioning) drawer.classList.add('transitioning');
+                else drawer.classList.remove('transitioning');
+                drawer.style.transform = \`translateY(\${y}px)\`;
+                
+                const openRatio = 1 - (y / maxPos);
+                const clampedRatio = Math.max(0, Math.min(1, openRatio));
+                
+                const playerOpacity = 1 - clampedRatio;
+                const playerScale = 1 - (clampedRatio * 0.1);
+                const playerTranslateY = clampedRatio * -50;
+                
+                playerContainer.style.opacity = playerOpacity;
+                playerContainer.style.transform = \`translateY(\${playerTranslateY}px) scale(\${playerScale})\`;
+                logoContainer.style.opacity = playerOpacity;
+                logoContainer.style.transform = \`translateY(\${playerTranslateY}px) scale(\${playerScale})\`;
+            };
+
+            const openDrawer = () => { setDrawerPosition(minPos, true); isDrawerOpen = true; if (messageInput) messageInput.focus(); mobileChatNotification.style.display = 'none'; };
+            const closeDrawer = () => { setDrawerPosition(maxPos, true); isDrawerOpen = false; if (messageInput) messageInput.blur(); };
+            
+            // Keyboard fix
+            const visualViewport = window.visualViewport;
+            if (visualViewport) {
+                const handleViewportResize = () => {
+                    // Update layout variables first, based on the new visible height.
+                    updateDrawerPositions();
+                    drawer.style.height = \`\${visualViewport.height}px\`;
+
+                    // Now, re-apply the current state (open/closed) using the new layout values.
+                    // This ensures all related visuals (like player opacity) are also correctly updated.
+                    if (isDrawerOpen) {
+                        setDrawerPosition(minPos, false); // Resnap to open position
+                    } else {
+                        setDrawerPosition(maxPos, false); // Resnap to closed position
+                    }
+                };
+                visualViewport.addEventListener('resize', handleViewportResize);
+            }
+
+            drawerHeader.addEventListener('touchstart', e => {
+                isDragging = true;
+                startY = e.touches[0].clientY;
+                const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
+                startPos = currentTransform.m42;
+                drawer.classList.remove('transitioning');
+            });
+
+            document.body.addEventListener('touchmove', e => {
+                if (!isDragging) return;
+                const currentY = e.touches[0].clientY;
+                const deltaY = currentY - startY;
+                let newY = startPos + deltaY;
+                newY = Math.max(minPos, Math.min(maxPos, newY));
+                setDrawerPosition(newY);
+            });
+
+            document.body.addEventListener('touchend', e => {
+                if (!isDragging) return;
+                isDragging = false;
+                const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
+                const currentY = currentTransform.m42;
+                const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+                if (isDrawerOpen) {
+                    if (currentY > viewportHeight * 0.3) closeDrawer();
+                    else openDrawer();
+                } else {
+                    if (currentY < viewportHeight * 0.7) openDrawer();
+                    else closeDrawer();
+                }
+            });
+        }
+        
+        if (nicknameInput) {
+            nicknameInput.value = localStorage.getItem('chatNickname') || 'Listener' + Math.floor(Math.random() * 999);
+            nicknameInput.addEventListener('change', () => { localStorage.setItem('chatNickname', nicknameInput.value); });
+        }
+        
+        if(chatForm) {
+            chatForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                const text = messageInput.value.trim();
+                if (text && ws && ws.readyState === WebSocket.OPEN) {
+                    const message = { type: 'chatMessage', payload: { from: nicknameInput.value, text } };
+                    ws.send(JSON.stringify(message));
+                    messageInput.value = '';
+                }
+            });
+        }
+        
+        // --- Audio Reactive Background ---
+        if (window.innerWidth > 768) {
+            const canvas = document.getElementById('bg-canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            let audioContext, analyser, source;
+            const ripples = [];
+            let lastBeatTime = 0;
+            const beatThreshold = 0.25; // Adjusted sensitivity
+            const beatCooldown = 300; // ms
+            
+            function initAudioAnalysis() {
+                if (audioContext) return;
+                try {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    source = audioContext.createMediaElementSource(audioPlayer);
+                    analyser = audioContext.createAnalyser();
+                    analyser.fftSize = 128;
+                    source.connect(analyser);
+                    analyser.connect(audioContext.destination);
+                    animate();
+                } catch (e) {
+                    console.error("Could not initialize Web Audio API:", e);
+                }
+            }
+            
+            class Ripple {
+                constructor(x, y, color) {
+                    this.x = x;
+                    this.y = y;
+                    this.radius = 1;
+                    this.maxRadius = 150 + Math.random() * 100;
+                    this.life = 1;
+                    this.speed = Math.random() * 2 + 1;
+                    this.color = color;
+                }
+                update() {
+                    this.radius += this.speed;
+                    this.life -= 0.01;
+                }
+                draw() {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                    ctx.strokeStyle = \`rgba(\${this.color}, \${this.life})\`;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            function detectBeat(dataArray) {
+                const bassValue = (dataArray[1] + dataArray[2] + dataArray[3]) / 3;
+                if (bassValue / 255 > beatThreshold && Date.now() - lastBeatTime > beatCooldown) {
+                    lastBeatTime = Date.now();
+                    return true;
+                }
+                return false;
+            }
+
+            function animate() {
+                requestAnimationFrame(animate);
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                if (analyser) {
+                    const bufferLength = analyser.frequencyBinCount;
+                    const dataArray = new Uint8Array(bufferLength);
+                    analyser.getByteFrequencyData(dataArray);
+                    
+                    if (detectBeat(dataArray)) {
+                        const rippleColor = rootEl.style.getPropertyValue('--text-color') === '#ffffff' ? '255,255,255' : '0,0,0';
+                        const x = Math.random() * canvas.width;
+                        const y = Math.random() * canvas.height;
+                        if (ripples.length < 30) { // Limit number of ripples for performance
+                           ripples.push(new Ripple(x, y, rippleColor));
+                        }
+                    }
+                }
+                
+                for (let i = ripples.length - 1; i >= 0; i--) {
+                    const r = ripples[i];
+                    r.update();
+                    r.draw();
+                    if (r.life <= 0) {
+                        ripples.splice(i, 1);
+                    }
+                }
+            }
+            
+            playBtn.addEventListener('click', initAudioAnalysis, { once: true });
+            window.addEventListener('resize', () => {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+            });
+        }
+
+        connectWs();
+        pollMetadata();
+        updateLogo(defaultLogoSrc);
+    </script>
+</body>
+</html>`;
+
+app.post('/api/signup', async (req, res) => {
+    const { email, password, nickname } = req.body;
+    const isFirstUser = db.data.users.length === 0;
+    const existingUser = db.data.users.find(u => u.email === email);
+    if (existingUser) return res.status(409).json({ message: 'User already exists' });
+
+    const role = isFirstUser ? 'studio' : 'presenter';
+    const newUser = { email, password, nickname, role };
+    db.data.users.push(newUser);
+    await db.write();
+    initStudioUser(); // Re-check for a studio user
+    const { password: _, ...userToReturn } = newUser;
+    res.status(201).json(userToReturn);
+});
+
+app.post('/api/login', (req, res) => {
+    const { email, password } = req.body;
+    const user = db.data.users.find(u => u.email === email && u.password === password);
+    if (user) {
+        const { password: _, ...userToReturn } = user;
+        res.json(userToReturn);
+    } else {
+        res.status(401).json({ message: 'Invalid credentials' });
+    }
+});
+
+app.get('/api/users', (req, res) => {
+    const usersWithoutPasswords = db.data.users.map(({ password, ...user }) => user);
+    res.json(usersWithoutPasswords);
+});
+
+app.get('/api/user/:email', (req, res) => {
+    const { email } = req.params;
+    const user = db.data.users.find(u => u.email === email);
+    if (user) {
+        const { password, ...userToReturn } = user;
+        res.json(userToReturn);
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+});
+
+app.put('/api/user/:email/role', async (req, res) => {
+    const { email } = req.params;
+    const { role } = req.body;
+    if (!['studio', 'presenter'].includes(role)) {
+        return res.status(400).json({ message: 'Invalid role specified.' });
+    }
+    const user = db.data.users.find(u => u.email === email);
+    if (user) {
+        user.role = role;
+        await db.write();
+        initStudioUser(); // Re-check for a studio user in case roles changed
+        const { password, ...userToReturn } = user;
+        res.json(userToReturn);
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+});
+
+app.get('/api/userdata/:email', (req, res) => {
+    const { email } = req.params;
+    const userData = db.data.userdata[email] || {};
+    res.json(userData);
+});
+
+app.post('/api/userdata/:email', async (req, res) => {
+    const { email } = req.params;
+    if (email !== studioUserEmail) {
+        // Only allow non-studio users to save their own specific settings, not global ones.
+         const { settings, audioConfig, cartwallPages } = req.body;
+         db.data.userdata[email] = { ...(db.data.userdata[email] || {}), settings, audioConfig, cartwallPages };
+         await db.write();
+         return res.json({ success: true });
+    }
+
+    const oldConfig = db.data.userdata[email]?.settings?.playoutPolicy?.streamingConfig;
+    
+    db.data.userdata[email] = req.body;
+    await db.write();
+
+    setupAutoBackup();
+    setupAutoMode();
+    setupScheduler(); // Re-initialize scheduler on settings change
+
+    const newConfig = req.body?.settings?.playoutPolicy?.streamingConfig;
+    if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
+        console.log('[Config] Streaming config changed. Restarting playout if active.');
+        if (db.data.sharedPlayerState.isPlaying) {
+            await advanceTrack(db.data.sharedPlayerState.currentTrackIndex);
+        }
+    }
+
+    res.json({ success: true });
+});
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const relativePath = req.body.webkitRelativePath || file.originalname;
+        const finalDir = path.dirname(path.join(mediaDir, relativePath));
+        fs.mkdir(finalDir, { recursive: true }, (err) => cb(err, finalDir));
+    },
+    filename: (req, file, cb) => {
+        const relativePath = req.body.webkitRelativePath || file.originalname;
+        const filename = path.basename(relativePath);
+        cb(null, filename);
+    }
+});
+const upload = multer({ storage });
+
+app.post('/api/upload', upload.single('audioFile'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ message: 'No file uploaded.' });
+    }
+    try {
+        const relativePath = (req.body.webkitRelativePath || req.file.originalname).replace(/\\/g, '/');
+        const clientMetadata = {
+            duration: req.body.duration,
+            title: req.body.title,
+            artist: req.body.artist,
+            type: req.body.type,
+        };
+        const trackObject = await createTrackObject(req.file.path, relativePath, req.file.originalname, clientMetadata);
+        
+        if (/\.webm$/i.test(trackObject.id)) {
+            db.data.persistentMetadata[trackObject.id] = {
+                title: trackObject.title,
+                artist: trackObject.artist,
+                type: trackObject.type,
+            };
+            await db.write();
+        }
+
+        res.status(201).json(trackObject);
+        await refreshAndBroadcastLibrary();
+    } catch (error) {
+        console.error('Error processing uploaded file:', error);
+        res.status(500).json({ message: 'Error processing file.' });
+    }
+});
+
+app.post('/api/track/delete', async (req, res) => {
+    const { id } = req.body;
+    if (!id) {
+        return res.status(400).json({ message: 'Track ID is required.' });
+    }
+
+    try {
+        const fullPath = path.join(mediaDir, id);
+        if (fs.existsSync(fullPath)) {
+            await fsPromises.rm(fullPath, { recursive: true, force: true });
+
+            const artworkPath = path.join(artworkDir, id.replace(/\.[^/.]+$/, ".jpg"));
+            if (fs.existsSync(artworkPath)) {
+                await fsPromises.unlink(artworkPath);
+            }
+
+            if (db.data.mediaCache[id]) {
+                Reflect.deleteProperty(db.data.mediaCache, id);
+            }
+            if (db.data.persistentMetadata?.[id]) {
+                Reflect.deleteProperty(db.data.persistentMetadata, id);
+            }
+            await db.write();
+            
+            res.json({ success: true, message: `Deleted ${id}` });
+        } else {
+            res.status(404).json({ message: 'Track not found.' });
+        }
+    } catch (error) {
+        console.error(`Failed to delete track ${id}:`, error);
+        res.status(500).json({ message: 'Failed to delete track.' });
+    }
+});
+
+app.post('/api/folder', async (req, res) => {
+    const { path: folderPath } = req.body;
+    if (!folderPath) {
+        return res.status(400).json({ message: 'Folder path is required.' });
+    }
+    const fullPath = path.join(mediaDir, folderPath);
+    try {
+        if (!fs.existsSync(fullPath)) {
+            await fsPromises.mkdir(fullPath, { recursive: true });
+        }
+        res.status(201).json({ success: true, message: `Folder created at ${folderPath}` });
+        await refreshAndBroadcastLibrary();
+    } catch (error) {
+        console.error(`Failed to create folder ${folderPath}:`, error);
+        res.status(500).json({ message: 'Failed to create folder.' });
+    }
+});
+
+app.get('/api/stream-metadata', async (req, res) => {
+    try {
+        const { sharedPlayerState, sharedPlaylist } = db.data;
+        const { isPlaying, currentPlayingItemId } = sharedPlayerState;
+        const { stationName } = await getStationSettings();
+
+        if (!isPlaying || !currentPlayingItemId) {
+            return res.json({ 
+                artist: stationName || 'RadioHost.cloud', 
+                title: 'Silence',
+                artworkUrl: null 
+            });
+        }
+        
+        const currentTrack = sharedPlaylist.find(item => item.id === currentPlayingItemId);
+        
+        if (!currentTrack || currentTrack.markerType) {
+            return res.json({ 
+                artist: stationName || 'RadioHost.cloud', 
+                title: '...',
+                artworkUrl: null 
+            });
+        }
+        
+        const suppression = getSuppressionSettingsFromServer(currentTrack);
+        if (suppression?.enabled) {
+            const customText = suppression.customText || stationName || 'RadioHost.cloud';
+            const parts = customText.split(' - ');
+            const title = parts[0];
+            const artist = parts.length > 1 ? parts.slice(1).join(' - ') : '';
+            return res.json({ title, artist, artworkUrl: null });
+        }
+        
+        const libraryTrack = findTrackInServerTree(libraryState, currentTrack.originalId || currentTrack.id);
+        const artworkUrl = getArtworkUrlOnServer(libraryTrack);
+
+        res.json({
+            title: currentTrack.title,
+            artist: currentTrack.artist,
+            artworkUrl: artworkUrl,
+        });
+
+    } catch (error) {
+        console.error('Error serving internal stream metadata:', error.message);
+        const { stationName } = await getStationSettings();
+        res.status(500).json({ title: stationName || 'Live Stream', artist: '', artworkUrl: null });
+    }
+});
+
+
+app.get('/stream', async (req, res) => {
+    const settings = await getStationSettings();
+    if(settings?.streamingConfig?.publicPlayerEnabled){
+        res.send(getPlayerPageHTML(settings.stationName, settings.streamingConfig, settings.logoSrc));
+    } else {
+        res.status(403).send('<h1>Public player is not enabled.</h1>');
+    }
+});
+
+app.get('/api/artwork-proxy', async (req, res) => {
+    const { url } = req.query;
+    if (!url) {
+        return res.status(400).send('URL parameter is required.');
+    }
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            return res.status(response.status).send(response.statusText);
+        }
+        const contentType = response.headers.get('content-type');
+        if (contentType) {
+            res.setHeader('Content-Type', contentType);
+        }
+        const imageBuffer = await response.arrayBuffer();
+        res.send(Buffer.from(imageBuffer));
+    } catch (error) {
+        console.error('Artwork proxy error:', error);
+        res.status(500).send('Failed to fetch image.');
+    }
+});
+
+
+const performBackup = async () => {
+    const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
+    const backupFileName = `radiohost-backup-${timestamp}.json`;
+    const backupFilePath = path.join(backupDir, backupFileName);
+
+    const backupData = {
+        type: 'radiohost.cloud_backup',
+        version: '1.0.0',
+        timestamp: new Date().toISOString(),
+        data: db.data
+    };
+
+    try {
+        await fsPromises.writeFile(backupFilePath, JSON.stringify(backupData, null, 2));
+        console.log(`[Backup] Successfully created backup: ${backupFileName}`);
+    } catch (error) {
+        console.error('[Backup] Failed to create backup:', error);
+    }
+};
+
+let backupInterval = null;
+
+const setupAutoBackup = async () => {
+    if (backupInterval) {
+        clearInterval(backupInterval);
+    }
+    if (!studioUserEmail) return;
+
+    const studioData = db.data.userdata[studioUserEmail];
+    const settings = studioData?.settings;
+
+    if (settings?.isAutoBackupEnabled && settings?.autoBackupInterval > 0) {
+        const intervalHours = settings.autoBackupInterval;
+        console.log(`[Backup] Setting up automatic backup every ${intervalHours} hour(s).`);
+        backupInterval = setInterval(performBackup, intervalHours * 60 * 60 * 1000);
+    } else {
+        console.log('[Backup] Automatic interval backup is disabled.');
+    }
+};
+
+
+const distPath = path.join(__dirname, 'dist');
+if (fs.existsSync(distPath)) {
+    console.log(`[Server] Production mode: serving static files from '${distPath}'`);
+    app.use(express.static(distPath));
+
+    app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+    });
+} else {
+    console.warn(`[Server] WARNING: 'dist' folder not found. The frontend will not be served.`);
+    console.warn(`[Server] Please run 'npm run build' to create the production frontend files.`);
+    app.get('/', (req, res) => {
+        res.status(404).send('Frontend application not found. Please run "npm run build".');
+    });
+}
+
+
+(async () => {
+    initStudioUser();
+    console.log('[Startup] Performing initial media library scan...');
+    libraryState.children = await scanMediaToTree(mediaDir);
+    await db.write();
+    console.log(`[Startup] Scan complete. Found ${libraryState.children.length} items in root.`);
+
+    const studioData = studioUserEmail ? db.data.userdata[studioUserEmail] : null;
+
+    if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length === 0) {
+        console.log('[Auto-Mode] Playlist is empty on startup. Triggering initial fill.');
+        await performAutofill();
+    }
+
+    setupAutoBackup();
+    setupAutoMode();
+    setupScheduler();
+    
+    if (studioData?.settings?.isAutoModeEnabled && db.data.sharedPlaylist.length > 0 && !db.data.sharedPlayerState.isPlaying) {
+        console.log('[Auto-Mode] Starting playback on startup.');
+        const startIndex = 0;
+        db.data.sharedPlayerState.currentTrackIndex = startIndex;
+        db.data.sharedPlayerState.currentPlayingItemId = db.data.sharedPlaylist[startIndex]?.id;
+        db.data.sharedPlayerState.trackProgress = 0;
+        await db.write();
+        await startPlayoutEngine(startIndex);
+    }
+    
+    if (studioData?.settings?.isAutoBackupOnStartupEnabled) {
+        console.log('[Backup] Performing startup backup as per settings.');
+        performBackup();
+    }
+})();
+
+server.listen(PORT, () => {
+    console.log(`RadioHost.cloud server running on http://localhost:${PORT}`);
 });
