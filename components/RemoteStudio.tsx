@@ -147,12 +147,41 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
                     await connectMicrophone(selectedInputDeviceId);
                 }
                 
-                // Use a short timeout to ensure streamRef is updated after connectMicrophone
                 setTimeout(async () => {
-                    if (!streamRef.current || !ws) {
-                         console.error("Mic stream not available after connect attempt.");
-                         setErrorMessage("Could not start broadcast. Try again.");
-                         return;
+                    const micStream = streamRef.current;
+                    const cwStream = cartwallStream;
+
+                    if (!micStream) {
+                        console.error("Mic stream not available after connect attempt.");
+                        setErrorMessage("Could not start broadcast. Try again.");
+                        return;
+                    }
+
+                    let streamToSend: MediaStream;
+                    
+                    if (cwStream && cwStream.getAudioTracks().length > 0) {
+                        console.log("[WebRTC] Mixing microphone and cartwall streams.");
+                        
+                        if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+                           audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+                        }
+                        if (audioContextRef.current.state === 'suspended') {
+                            await audioContextRef.current.resume();
+                        }
+
+                        const audioCtx = audioContextRef.current;
+                        const destination = audioCtx.createMediaStreamDestination();
+
+                        const micSource = audioCtx.createMediaStreamSource(micStream);
+                        micSource.connect(destination);
+
+                        const cwSource = audioCtx.createMediaStreamSource(cwStream);
+                        cwSource.connect(destination);
+                        
+                        streamToSend = destination.stream;
+                    } else {
+                        console.log("[WebRTC] Sending microphone stream only.");
+                        streamToSend = micStream;
                     }
 
                     console.log("[WebRTC] Presenter going on-air. Initiating connection to server.");
@@ -165,9 +194,8 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
                         }
                     };
                     
-                    // Step 1: Send only microphone audio
-                    streamRef.current.getAudioTracks().forEach(track => {
-                        pc.addTrack(track, streamRef.current!);
+                    streamToSend.getAudioTracks().forEach(track => {
+                        pc.addTrack(track, streamToSend);
                     });
                     
                     const offer = await pc.createOffer();
