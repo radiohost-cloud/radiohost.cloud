@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { type Track, type CartwallItem, type CartwallPage } from '../types';
+import { type Track, type CartwallItem, type CartwallPage, type PlayoutPolicy } from '../types';
 import ConfirmationDialog from './ConfirmationDialog';
 import { getTrackSrc } from '../services/dataService';
 import { PlusIcon } from './icons/PlusIcon';
 import { CogIcon } from './icons/CogIcon';
 import { TrashIcon } from './icons/TrashIcon';
+import { Toggle } from './Toggle';
 
 const MAX_SIMULTANEOUS_PLAYERS = 8; // Pool size for audio players
 
@@ -18,9 +19,11 @@ interface CartwallProps {
     audioContext: AudioContext | null;
     destinationNode: AudioNode | null;
     onActivePlayerCountChange: (count: number) => void;
+    policy: PlayoutPolicy;
+    onUpdatePolicy: (newPolicy: PlayoutPolicy) => void;
 }
 
-const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId, onSetActivePageId, gridConfig, onGridConfigChange, audioContext, destinationNode, onActivePlayerCountChange }) => {
+const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId, onSetActivePageId, gridConfig, onGridConfigChange, audioContext, destinationNode, onActivePlayerCountChange, policy, onUpdatePolicy }) => {
     const playersRef = useRef<HTMLAudioElement[]>([]);
     const sourcesRef = useRef<(MediaElementAudioSourceNode | null)[]>([]);
     const [activePlayers, setActivePlayers] = useState<Map<number, { progress: number, duration: number }>>(new Map());
@@ -382,6 +385,34 @@ const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId,
                 Are you sure you want to clear {clearConfirm.page ? "all items from this page" : "this item"}? This cannot be undone.
             </ConfirmationDialog>
             <input type="color" ref={colorInputRef} onChange={handleColorChange} className="absolute invisible" />
+            
+            <div className="flex-shrink-0 p-3 border-t border-neutral-200 dark:border-neutral-800 space-y-3">
+                <div className="flex items-center justify-between">
+                    <div>
+                        <label htmlFor="cartwall-ducking-enabled" className="text-sm font-medium block cursor-pointer">Enable Ducking</label>
+                        <p className="text-xs text-neutral-500">Lower player volume when cart is active.</p>
+                    </div>
+                    <Toggle id="cartwall-ducking-enabled" checked={policy.cartwallDuckingEnabled} onChange={(v) => onUpdatePolicy({ ...policy, cartwallDuckingEnabled: v })} />
+                </div>
+                {policy.cartwallDuckingEnabled && (
+                    <div className="space-y-4 pt-2 pl-4 border-l-2 border-neutral-200 dark:border-neutral-700">
+                        <div>
+                            <label htmlFor="cart-ducking-level" className="flex justify-between text-xs font-medium">
+                                <span>Player Ducking Level</span>
+                                <span className="font-mono">{Math.round(policy.cartwallDuckingLevel * 100)}%</span>
+                            </label>
+                            <input id="cart-ducking-level" type="range" min="0" max="1" step="0.01" value={policy.cartwallDuckingLevel} onChange={(e) => onUpdatePolicy({ ...policy, cartwallDuckingLevel: parseFloat(e.target.value)})} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer" />
+                        </div>
+                        <div>
+                            <label htmlFor="cart-ducking-fade" className="flex justify-between text-xs font-medium">
+                                <span>Fade Duration</span>
+                                <span className="font-mono">{policy.cartwallDuckingFadeDuration.toFixed(1)}s</span>
+                            </label>
+                            <input id="cart-ducking-fade" type="range" min="0.1" max="2" step="0.1" value={policy.cartwallDuckingFadeDuration} onChange={(e) => onUpdatePolicy({ ...policy, cartwallDuckingFadeDuration: parseFloat(e.target.value)})} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer" />
+                        </div>
+                    </div>
+                )}
+            </div>
         </div>
     );
 };

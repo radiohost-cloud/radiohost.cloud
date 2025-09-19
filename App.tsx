@@ -466,7 +466,7 @@ const AppInternal: React.FC = () => {
         routingGains: Partial<Record<`${AudioSourceId}_to_${AudioBusId}`, GainNode>>;
         duckingGains: Partial<Record<`${AudioSourceId}_to_${AudioBusId}`, GainNode>>;
         busGains: Partial<Record<AudioBusId, GainNode>>;
-        busDestinations: Partial<Record<AudioBusId, MediaStreamAudioDestinationNode>>;
+        busDestinations: Partial<Record<AudioBusId | 'cartwall', MediaStreamAudioDestinationNode>>;
         analysers: Partial<Record<AudioSourceId | AudioBusId, AnalyserNode>>;
         mainBusCompressor?: DynamicsCompressorNode;
         mainBusEq?: {
@@ -888,6 +888,10 @@ const AppInternal: React.FC = () => {
                 busGains[bus.id]!.connect(busDestinations[bus.id]!);
             });
             
+            // Add a dedicated destination for the cartwall stream
+            busDestinations.cartwall = context.createMediaStreamDestination();
+            sourceGains.cartwall!.connect(busDestinations.cartwall);
+
             sourceIds.forEach(sourceId => {
                 audioBuses.forEach(bus => {
                     const routingGain = context.createGain();
@@ -1348,6 +1352,19 @@ const AppInternal: React.FC = () => {
             eq.treble.gain.linearRampToValueAtTime(equalizerEnabled ? equalizerBands.treble : 0, now + RAMP_TIME);
         }
     }, [playoutPolicy]);
+    
+    // Enforce cartwall main send for studio user to prevent accidental misconfiguration
+    useEffect(() => {
+        if (isStudio && mixerConfig.cartwall && !mixerConfig.cartwall.sends.main.enabled) {
+            setMixerConfig(prev => {
+                const newConfig = JSON.parse(JSON.stringify(prev));
+                if (newConfig.cartwall) {
+                    newConfig.cartwall.sends.main.enabled = true;
+                }
+                return newConfig;
+            });
+        }
+    }, [isStudio, mixerConfig.cartwall?.sends.main.enabled]);
 
 
 
@@ -2113,7 +2130,7 @@ const AppInternal: React.FC = () => {
                             </div>
                             <div className="flex-grow relative">
                                 <div className="absolute inset-0 overflow-y-auto">
-                                    {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(newGrid) => setPlayoutPolicy(p => ({ ...p, cartwallGrid: newGrid }))} audioContext={audioGraphRef.current.context} destinationNode={audioGraphRef.current.sourceGains.cartwall || null} onActivePlayerCountChange={handleActiveCartwallPlayerCountChange} />}
+                                    {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(newGrid) => setPlayoutPolicy(p => ({ ...p, cartwallGrid: newGrid }))} audioContext={audioGraphRef.current.context} destinationNode={audioGraphRef.current.sourceGains.cartwall || null} onActivePlayerCountChange={handleActiveCartwallPlayerCountChange} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} />}
                                     {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
                                     {isStudio && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
                                     {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} apiKey={playoutPolicy.lastFmApiKey} />}
@@ -2158,6 +2175,7 @@ const AppInternal: React.FC = () => {
                                         onlinePresenters={onlinePresenters}
                                         audioLevels={audioLevels}
                                         isSecureContext={isSecureContext}
+                                        cartwallStream={audioGraphRef.current.busDestinations?.cartwall?.stream}
                                     />
                                 </div>
                             )}

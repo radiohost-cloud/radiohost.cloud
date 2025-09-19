@@ -166,15 +166,20 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
                                     />
                                     <div className="mt-3 flex items-center justify-end gap-2">
                                         <span className="text-xs text-neutral-500 dark:text-neutral-400">Sends:</span>
-                                        {audioBuses.map(bus => (
-                                            <button
-                                                key={bus.id}
-                                                onClick={() => handleSendToggle(sourceId as AudioSourceId, bus.id)}
-                                                className={`px-2.5 py-1 text-xs font-semibold rounded-md ${config.sends[bus.id]?.enabled ? 'bg-green-600 text-white' : 'bg-neutral-300 dark:bg-neutral-700 text-black dark:text-white'}`}
-                                            >
-                                                {bus.name.split(' ')[0]}
-                                            </button>
-                                        ))}
+                                        {audioBuses.map(bus => {
+                                            const isCartwallMain = playoutMode === 'studio' && sourceId === 'cartwall' && bus.id === 'main';
+                                            return (
+                                                <button
+                                                    key={bus.id}
+                                                    onClick={() => handleSendToggle(sourceId as AudioSourceId, bus.id)}
+                                                    disabled={isCartwallMain}
+                                                    title={isCartwallMain ? 'Cartwall is always sent to Main output' : ''}
+                                                    className={`px-2.5 py-1 text-xs font-semibold rounded-md ${config.sends[bus.id]?.enabled ? 'bg-green-600 text-white' : 'bg-neutral-300 dark:bg-neutral-700 text-black dark:text-white'} ${isCartwallMain ? 'cursor-not-allowed opacity-70' : ''}`}
+                                                >
+                                                    {bus.name.split(' ')[0]}
+                                                </button>
+                                            )
+                                        })}
                                     </div>
                                 </div>
                             );
