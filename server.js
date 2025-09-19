@@ -13,7 +13,7 @@ import { WebSocketServer } from 'ws';
 import NodeID3 from 'node-id3';
 import ffmpeg from 'fluent-ffmpeg';
 import { spawn } from 'child_process';
-import wrtc from 'wrtc';
+import { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } from '@roamhq/wrtc';
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -1295,7 +1295,6 @@ const setupScheduler = () => {
 
 // --- NEW: WebRTC Handling ---
 const peerConnections = new Map();
-const { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } = wrtc;
 
 const createPeerConnection = (email) => {
     const pc = new RTCPeerConnection();
@@ -2017,8 +2016,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             #chat-drawer-header { padding: 10px 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; background: var(--header-bg-color); transition: background 1s ease-in-out; border-top-left-radius: 20px; border-top-right-radius: 20px; }
             .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 8px; }
             #chat-drawer-header h3 { margin: 0; font-size: 0.9rem; }
-            #chat-drawer-content { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; }
-            #chat-messages { flex-direction: column-reverse; }
             #mobile-chat-notification { position: absolute; top: 18px; right: 20px; width: 10px; height: 10px; background-color: #3b82f6; border-radius: 50%; display: none; }
         }
     </style>
