@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { type ChatMessage } from '../types';
 import { PaperAirplaneIcon } from './icons/PaperAirplaneIcon';
@@ -26,7 +25,7 @@ const Chat: React.FC<ChatProps> = ({ messages, onSendMessage }) => {
     };
 
     return (
-        <div className="p-4 h-full flex flex-col bg-neutral-100 dark:bg-neutral-900">
+        <div className="p-4 h-full flex flex-col bg-neutral-100/50 dark:bg-neutral-900/50 backdrop-blur-md">
             <h3 className="text-lg font-semibold text-black dark:text-white flex-shrink-0 mb-4">
                 Listener Chat
             </h3>

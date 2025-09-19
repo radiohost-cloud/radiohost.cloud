@@ -1984,10 +1984,10 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #chat-bubble:hover { transform: scale(1.1); }
         #chat-bubble svg { width: 32px; height: 32px; color: white; }
         #chat-notification { position: absolute; top: 0; right: 0; width: 12px; height: 12px; background-color: #3b82f6; border-radius: 50%; border: 2px solid var(--accent-color); display: none; }
-        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 380px; height: 550px; background: rgba(26, 26, 26, 0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
+        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 380px; height: 550px; background: rgba(30, 30, 30, 0.6); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
         #chat-window.open { display: flex; opacity: 1; transform: scale(1); }
         #chat-window:not(.open) { opacity: 0; transform: scale(0.9); }
-        .chat-header { padding: 10px 15px; background-color: #2a2a2a; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+        .chat-header { padding: 10px 15px; background-color: rgba(42, 42, 42, 0.5); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
         .chat-header h3 { margin: 0; font-size: 1rem; }
         .chat-header button { background: none; border: none; color: white; font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1; }
         #chat-messages { flex-grow: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; }
@@ -1996,7 +1996,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         .chat-message .from { font-size: 0.75rem; font-weight: bold; margin-bottom: 2px; opacity: 0.8; }
         .chat-message.me { background-color: #007bff; align-self: flex-end; border-bottom-right-radius: 4px; }
         .chat-message.other { background-color: #3a3a3a; align-self: flex-start; border-bottom-left-radius: 4px; }
-        .chat-footer { padding: 10px; background-color: #2a2a2a; flex-shrink: 0; }
+        .chat-footer { padding: 10px; background-color: rgba(42, 42, 42, 0.5); flex-shrink: 0; }
         #chat-footer-form { display: flex; gap: 10px; }
         #nickname-input { width: 80px; background-color: #3a3a3a; border: 1px solid #555; border-radius: 5px; color: white; font-size: 0.8rem; padding: 5px; }
         #message-input { flex-grow: 1; background-color: #3a3a3a; border: 1px solid #555; border-radius: 15px; color: white; padding: 8px 12px; font-size: 0.9rem; }
@@ -2011,9 +2011,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             .desktop-only { display: none !important; }
             .mobile-only { display: flex; }
             
-            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background: rgba(26, 26, 26, 0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); flex-direction: column; transform: translateY(calc(100% - 70px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.1); }
+            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background: rgba(30, 30, 30, 0.6); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); flex-direction: column; transform: translateY(calc(100% - 70px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.1); }
             #chat-drawer.transitioning { transition: transform 0.3s ease-out; }
-            #chat-drawer-header { padding: 10px 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; background: var(--header-bg-color); transition: background 1s ease-in-out; border-top-left-radius: 20px; border-top-right-radius: 20px; }
+            #chat-drawer-header { padding: 10px 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; background: var(--header-bg-color); transition: background 1s ease-in-out; border-top-left-radius: 20px; border-top-right-radius: 20px; background-color: rgba(42, 42, 42, 0.5); }
             .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 8px; }
             #chat-drawer-header h3 { margin: 0; font-size: 0.9rem; }
             #mobile-chat-notification { position: absolute; top: 18px; right: 20px; width: 10px; height: 10px; background-color: #3b82f6; border-radius: 50%; display: none; }
