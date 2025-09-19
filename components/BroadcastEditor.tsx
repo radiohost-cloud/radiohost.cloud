@@ -92,6 +92,27 @@ const DayOfWeekSelector: React.FC<{ selectedDays: Set<number>, onToggle: (day: n
     );
 };
 
+const HourSelector: React.FC<{ selectedHours: Set<number>, onToggle: (hour: number) => void }> = ({ selectedHours, onToggle }) => {
+    return (
+        <div className="grid grid-cols-6 sm:grid-cols-8 md:grid-cols-12 gap-1">
+            {Array.from({ length: 24 }).map((_, hour) => (
+                <button
+                    key={hour}
+                    type="button"
+                    onClick={() => onToggle(hour)}
+                    className={`h-8 w-full rounded text-xs font-mono transition-colors ${
+                        selectedHours.has(hour)
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-neutral-200 dark:bg-neutral-700 text-neutral-800 dark:text-neutral-200 hover:bg-neutral-300 dark:hover:bg-neutral-600'
+                    }`}
+                >
+                    {hour.toString().padStart(2, '0')}
+                </button>
+            ))}
+        </div>
+    );
+};
+
 const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSave, existingBroadcast, mediaLibrary, onVoiceTrackCreate, policy }) => {
     const [title, setTitle] = useState('');
     const [startTime, setStartTime] = useState('');
@@ -104,6 +125,7 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
     const [repeatType, setRepeatType] = useState<RepeatSettings['type']>('none');
     const [repeatInterval, setRepeatInterval] = useState(1);
     const [repeatDays, setRepeatDays] = useState<Set<number>>(new Set());
+    const [repeatHours, setRepeatHours] = useState<Set<number>>(new Set());
     const [repeatEndDate, setRepeatEndDate] = useState(''); // YYYY-MM-DD
 
     // Modes
@@ -127,6 +149,7 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                 setRepeatType(rs?.type || 'none');
                 setRepeatInterval(rs?.interval || 1);
                 setRepeatDays(new Set(rs?.days || []));
+                setRepeatHours(new Set(rs?.hours || []));
                 setRepeatEndDate(rs?.endDate ? new Date(rs.endDate).toISOString().slice(0, 10) : '');
                 setIsRepeatSettingsOpen(!!rs && rs.type !== 'none');
 
@@ -139,6 +162,7 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                 setRepeatType('none');
                 setRepeatInterval(1);
                 setRepeatDays(new Set());
+                setRepeatHours(new Set());
                 setRepeatEndDate('');
                 setIsRepeatSettingsOpen(false);
             }
@@ -164,6 +188,9 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                 type: repeatType,
                 interval: repeatInterval > 0 ? repeatInterval : 1,
             };
+            if (repeatType === 'daily' && repeatHours.size > 0) {
+                repeatSettings.hours = Array.from(repeatHours).sort((a, b) => a - b);
+            }
             if (repeatType === 'weekly') {
                 repeatSettings.days = Array.from(repeatDays);
             }
@@ -334,6 +361,11 @@ const BroadcastEditor: React.FC<BroadcastEditorProps> = ({ isOpen, onClose, onSa
                                         {repeatType === 'weekly' && <div>
                                             <label className="block text-xs font-medium mb-1">On</label>
                                             <DayOfWeekSelector selectedDays={repeatDays} onToggle={(day) => setRepeatDays(prev => { const next = new Set(prev); if (next.has(day)) next.delete(day); else next.add(day); return next; })} />
+                                        </div>}
+                                        {repeatType === 'daily' && <div className="space-y-2">
+                                            <label className="block text-xs font-medium">On hours (optional)</label>
+                                            <p className="text-xs text-neutral-500">If no hours are selected, it repeats once daily at its start time. If hours are selected, it repeats at each of those hours on scheduled days.</p>
+                                            <HourSelector selectedHours={repeatHours} onToggle={(hour) => setRepeatHours(prev => { const next = new Set(prev); if (next.has(hour)) next.delete(hour); else next.add(hour); return next; })}/>
                                         </div>}
                                         {repeatType !== 'none' && <div>
                                             <label htmlFor="repeat-end" className="block text-xs font-medium mb-1">End Date (optional)</label>

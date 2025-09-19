@@ -174,6 +174,7 @@ export interface RepeatSettings {
   type: 'none' | 'daily' | 'weekly' | 'monthly';
   interval: number;
   days?: number[]; // For weekly: 0=Sun, 1=Mon, ..., 6=Sat
+  hours?: number[]; // For daily: 0-23
   endDate?: number; // timestamp
 }
 

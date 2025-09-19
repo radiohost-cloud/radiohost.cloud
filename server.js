@@ -502,7 +502,7 @@ const findTrackAndPathInServerTree = (node, trackId, currentPath = []) => {
             return pathWithCurrentNode;
         }
         if (child.type === 'folder') {
-            const foundPath = findTrackAndPathInServerTree(child, trackId, pathWithCurrentNode);
+            const foundPath = findTrackAndPathInServerTree(child, trackId, currentPathWithNode);
             if (foundPath) return foundPath;
         }
     }
@@ -1207,7 +1207,7 @@ const loadBroadcastIntoPlaylist = async (broadcast) => {
 const getStartOfWeek = (date) => {
     const d = new Date(date);
     const day = d.getDay();
-    const diff = d.getDate() - day + (day === 0 ? -6 : 1); // Adjust when day is Sunday
+    const diff = d.getDate() - day; // Assuming week starts on Sunday (0)
     d.setHours(0, 0, 0, 0);
     return new Date(d.setDate(diff));
 };
@@ -1219,47 +1219,66 @@ const getNextOccurrence = (broadcast) => {
         return startTime > lastLoaded ? new Date(startTime) : null;
     }
 
-    const { type, interval = 1, days = [], endDate } = repeatSettings;
+    const { type, interval = 1, days = [], hours = [], endDate } = repeatSettings;
     const endDateObj = endDate ? new Date(endDate) : null;
+    const originalStartDate = new Date(startTime);
 
-    let candidate = new Date(lastLoaded > 0 ? lastLoaded : startTime);
-    if (lastLoaded > 0) {
-        candidate.setMilliseconds(candidate.getMilliseconds() + 1000); // Start search just after last loaded time
-    }
-    candidate.setHours(new Date(startTime).getHours(), new Date(startTime).getMinutes(), 0, 0);
-    
-    for (let i = 0; i < 366 * 2; i++) { // Safety break: search max 2 years ahead
-        if (endDateObj && candidate > endDateObj) return null;
+    let searchStart = new Date(lastLoaded > 0 ? lastLoaded + 1000 : startTime);
 
-        if (candidate.getTime() > lastLoaded) {
-            let isValid = false;
-            switch(type) {
-                case 'daily': {
-                    const dayDiff = Math.round((candidate.getTime() - startTime) / (1000 * 60 * 60 * 24));
-                    if (dayDiff >= 0 && dayDiff % interval === 0) isValid = true;
-                    break;
-                }
-                case 'weekly': {
-                    const startWeekDate = getStartOfWeek(startTime);
-                    const candidateWeekDate = getStartOfWeek(candidate);
-                    const weekDiff = Math.round((candidateWeekDate.getTime() - startWeekDate.getTime()) / (7 * 24 * 60 * 60 * 1000));
-                    if (days.includes(candidate.getDay()) && weekDiff >= 0 && weekDiff % interval === 0) isValid = true;
-                    break;
-                }
-                case 'monthly': {
-                    const monthDiff = (candidate.getFullYear() - new Date(startTime).getFullYear()) * 12 + (candidate.getMonth() - new Date(startTime).getMonth());
-                    if (candidate.getDate() === new Date(startTime).getDate() && monthDiff >= 0 && monthDiff % interval === 0) isValid = true;
-                    break;
-                }
-            }
+    for (let dayOffset = 0; dayOffset < 366 * 2; dayOffset++) { // Safety break
+        let candidateDay = new Date(searchStart);
+        candidateDay.setDate(candidateDay.getDate() + dayOffset);
+        candidateDay.setHours(0, 0, 0, 0);
 
-            if (isValid) return candidate;
+        if (endDateObj && candidateDay > endDateObj) {
+            return null;
         }
-        
-        candidate.setDate(candidate.getDate() + 1);
+
+        let isDayValid = false;
+        switch (type) {
+            case 'daily': {
+                const dayDiff = Math.round((candidateDay.getTime() - new Date(startTime).setHours(0, 0, 0, 0)) / (1000 * 60 * 60 * 24));
+                if (dayDiff >= 0 && dayDiff % interval === 0) isDayValid = true;
+                break;
+            }
+            case 'weekly': {
+                const startWeekDate = getStartOfWeek(startTime);
+                const candidateWeekDate = getStartOfWeek(candidateDay);
+                const weekDiff = Math.round((candidateWeekDate.getTime() - startWeekDate.getTime()) / (7 * 24 * 60 * 60 * 1000));
+                if (days.includes(candidateDay.getDay()) && weekDiff >= 0 && weekDiff % interval === 0) isDayValid = true;
+                break;
+            }
+            case 'monthly': {
+                const monthDiff = (candidateDay.getFullYear() - originalStartDate.getFullYear()) * 12 + (candidateDay.getMonth() - originalStartDate.getMonth());
+                if (candidateDay.getDate() === originalStartDate.getDate() && monthDiff >= 0 && monthDiff % interval === 0) isDayValid = true;
+                break;
+            }
+        }
+
+        if (!isDayValid) {
+            continue;
+        }
+
+        const timesOnThisDay = [];
+        if (type === 'daily' && hours.length > 0) {
+            for (const hour of hours.sort((a,b) => a-b)) {
+                timesOnThisDay.push(new Date(candidateDay).setHours(hour, originalStartDate.getMinutes()));
+            }
+        } else {
+            timesOnThisDay.push(new Date(candidateDay).setHours(originalStartDate.getHours(), originalStartDate.getMinutes()));
+        }
+
+        for (const candidateTime of timesOnThisDay) {
+            if (candidateTime >= searchStart.getTime()) {
+                if (endDateObj && candidateTime > endDateObj.getTime()) {
+                    return null;
+                }
+                return new Date(candidateTime);
+            }
+        }
     }
 
-    return null; // Nothing found within search limit
+    return null;
 };
 
 const checkScheduledBroadcasts = async () => {
