@@ -1,3 +1,5 @@
+
+
 import React, { useMemo, useState } from 'react';
 import { Toggle } from './Toggle';
 import { BroadcastIcon } from './icons/BroadcastIcon';
@@ -34,9 +36,8 @@ const PublicStream: React.FC<PublicStreamProps> = ({
     const statusInfo = useMemo(() => {
         switch (serverStreamStatus) {
             case 'inactive': return { text: 'Inactive', color: 'text-neutral-500' };
-            case 'starting': return { text: 'Starting...', color: 'text-yellow-500 animate-pulse' };
+            case 'connecting': return { text: 'Connecting...', color: 'text-yellow-500 animate-pulse' };
             case 'broadcasting': return { text: 'BROADCASTING LIVE', color: 'text-red-500 animate-pulse' };
-            case 'stopping': return { text: 'Stopping...', color: 'text-yellow-500 animate-pulse' };
             case 'error': return { text: 'Error', color: 'text-red-500' };
             default: return { text: 'Unknown', color: 'text-neutral-500' };
         }
