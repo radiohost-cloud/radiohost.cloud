@@ -25,13 +25,13 @@ Aplikacja opiera się na elastycznej architekturze, która obsługuje dwa odręb
 ### 🎼 Inteligentna Oś Czasu i Playlista
 *   **Interfejs Przeciągnij i Upuść:** Łatwo buduj i zmieniaj kolejność elementów w swojej audycji.
 *   **Auto-Fill (Ochrona przed Ciszą):** Automatycznie dodaje utwory z określonego folderu lub tagu, aby zapobiec ciszy na antenie.
-*   **Znaczniki Czasu (Twarde i Miękkie):** Planuj precyzyjne przejścia, wymuszając skok do konkretnego elementu o dokładnym czasie (Twardy) lub po zakończeniu bieżącego utworu (Miękki).
+*   **Znaczniki Czasu (Twarde i Miękkie):** Planuj precycyjne przejścia, wymuszając skok do konkretnego elementu o dokładnym czasie (Twardy) lub po zakończeniu bieżącego utworu (Miękki).
 *   **Edytor Voice Tracków:** Potężny edytor do nagrywania i miksowania zapowiedzi głosowych bezpośrednio między utworami, z regulacją czasu, płynnymi przejściami (fade) i przycinaniem audio.
 
 ### 📡 Transmisja na Żywo i Współpraca
 *   **Tryb Zdalnego Prezentera (WebRTC):** (Tryb HOST) Zaproś współprowadzących do połączenia się ze studiem z dowolnego miejsca. Dźwięk z ich mikrofonu jest przesyłany strumieniowo bezpośrednio do dedykowanego kanału w mikserze.
 *   **Publiczny Streaming:** (Tryb HOST) Nadawaj swoje główne wyjście audio bezpośrednio z przeglądarki na publiczny adres URL. System udostępnia stronę odtwarzacza dla słuchaczy, którą można udostępniać i która jest przyjazna dla urządzeń mobilnych.
-*   **Czat na Żywo ze Słuchaczami:** (Tryb HOST) Komunikuj się ze swoją publicznością w czasie rzeczywistym za pomocą widżetu czatu na publicznej stronie odtwarzacza.
+*   **Czat na Żywo ze Słuchaczami:** (Tryb HOST) Komunikuj się ze swoją publicznością w czasie rzeczywistym. Udostępniana strona odtwarzacza zawiera czat na żywo. Na urządzeniach mobilnych słuchacze mogą przesunąć palcem w górę, aby płynnie przejść od odtwarzacza do pełnoekranowego widoku czatu.
 *   **Statystyki na Żywo:** Zobacz listę aktualnie podłączonych słuchaczy do Twojego publicznego streamu.
 
 ### 🗂️ Biblioteka Mediów

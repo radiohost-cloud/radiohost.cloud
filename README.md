@@ -31,7 +31,7 @@ The application is built around a flexible architecture that supports two distin
 ### 📡 Live Streaming & Collaboration
 *   **Remote Presenter Mode (WebRTC):** (HOST Mode) Invite co-hosts to connect to the studio from anywhere. Their microphone audio is streamed directly into a dedicated mixer channel.
 *   **Public Streaming:** (HOST Mode) Broadcast your main output directly from the browser to a public URL. The system provides a shareable, mobile-friendly player page for listeners.
-*   **Live Listener Chat:** (HOST Mode) Engage with your audience in real-time through a chat widget on the public player page.
+*   **Live Listener Chat:** (HOST Mode) Engage with your audience in real-time. The shareable player page includes a live chat. On mobile, listeners can swipe up to seamlessly transition from the player to a full-screen chat experience.
 *   **Live Stats:** View a list of current listeners connected to your public stream.
 
 ### 🗂️ Media Library
