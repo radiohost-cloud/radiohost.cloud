@@ -1,4 +1,3 @@
-
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -1985,7 +1984,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #chat-bubble:hover { transform: scale(1.1); }
         #chat-bubble svg { width: 32px; height: 32px; color: white; }
         #chat-notification { position: absolute; top: 0; right: 0; width: 12px; height: 12px; background-color: #3b82f6; border-radius: 50%; border: 2px solid var(--accent-color); display: none; }
-        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 380px; height: 550px; background-color: #1a1a1a; border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
+        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 380px; height: 550px; background: rgba(26, 26, 26, 0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
         #chat-window.open { display: flex; opacity: 1; transform: scale(1); }
         #chat-window:not(.open) { opacity: 0; transform: scale(0.9); }
         .chat-header { padding: 10px 15px; background-color: #2a2a2a; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
@@ -2012,7 +2011,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             .desktop-only { display: none !important; }
             .mobile-only { display: flex; }
             
-            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background-color: #1a1a1a; flex-direction: column; transform: translateY(calc(100% - 70px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); }
+            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background: rgba(26, 26, 26, 0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); flex-direction: column; transform: translateY(calc(100% - 70px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.1); }
             #chat-drawer.transitioning { transition: transform 0.3s ease-out; }
             #chat-drawer-header { padding: 10px 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; background: var(--header-bg-color); transition: background 1s ease-in-out; border-top-left-radius: 20px; border-top-right-radius: 20px; }
             .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 8px; }
@@ -2270,12 +2269,12 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             msgDiv.innerHTML = content;
             if(chatMessages) {
                 chatMessages.appendChild(msgDiv);
-                // For column-reverse, scroll to bottom is scroll to top of element
-                if (window.innerWidth <= 768) {
-                   chatMessages.scrollTop = 0;
-                } else {
-                   chatMessages.scrollTop = chatMessages.scrollHeight;
-                }
+                // The previous logic for mobile scrolling was incorrect as flex-direction is not reversed.
+                // This ensures that for both desktop and mobile, the view scrolls to the newest message.
+                // A timeout of 0ms queues this to run after the current call stack, which includes DOM updates.
+                setTimeout(() => {
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                }, 0);
             }
         };
         
