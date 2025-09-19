@@ -1,4 +1,5 @@
 
+
 import React, { useMemo, useState } from 'react';
 import { Toggle } from './Toggle';
 import { BroadcastIcon } from './icons/BroadcastIcon';
@@ -42,7 +43,7 @@ const PublicStream: React.FC<PublicStreamProps> = ({
         }
     }, [serverStreamStatus]);
 
-    const isSettingsDisabled = serverStreamStatus === 'broadcasting' || serverStreamStatus === 'connecting';
+    const isSettingsDisabled = streamingConfig.isEnabled;
     const publicPlayerUrl = `${window.location.origin}/stream`;
 
     const handleCopyUrl = () => {
