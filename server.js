@@ -2003,35 +2003,88 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #send-btn { background: var(--accent-color); border: none; color: white; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
         #send-btn svg { width: 20px; height: 20px; }
         
-        /* Mobile Chat */
-        .mobile-only { display: none; }
+        @keyframes bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+        /* Mobile-specific styles */
         @media (max-width: 768px) {
-            body { justify-content: flex-start; padding-top: 5vh; }
-            .player-container { margin-bottom: 100px; }
             .desktop-only { display: none !important; }
-            .mobile-only { display: flex; }
+            .mobile-only { display: block; }
             
-            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background: rgba(30, 30, 30, 0.6); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); flex-direction: column; transform: translateY(calc(100% - 70px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.1); }
-            #chat-drawer.transitioning { transition: transform 0.3s ease-out; }
-            #chat-drawer-header { padding: 10px 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; background: var(--header-bg-color); transition: background 1s ease-in-out; border-top-left-radius: 20px; border-top-right-radius: 20px; background-color: rgba(42, 42, 42, 0.5); }
-            .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 8px; }
-            #chat-drawer-header h3 { margin: 0; font-size: 0.9rem; }
-            #mobile-chat-notification { position: absolute; top: 18px; right: 20px; width: 10px; height: 10px; background-color: #3b82f6; border-radius: 50%; display: none; }
+            #swipe-container { position: fixed; inset: 0; overflow: hidden; }
+            #player-page, #chat-page {
+                position: absolute;
+                inset: 0;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                transition: transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+            }
+            #player-page { transform: translateY(0); }
+            #chat-page { transform: translateY(100%); justify-content: flex-end; }
+            #chat-container {
+                width: 100%;
+                height: 100%;
+                max-height: 100%;
+                background: var(--container-bg);
+                border-radius: 20px 20px 0 0;
+                box-shadow: 0 -10px 30px rgba(0,0,0,0.5);
+                backdrop-filter: blur(20px);
+                -webkit-backdrop-filter: blur(20px);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                display: flex;
+                flex-direction: column;
+            }
+            #slide-up-hint, #slide-down-hint {
+                position: absolute;
+                left: 50%;
+                transform: translateX(-50%);
+                color: var(--subtext-color);
+                font-size: 0.8rem;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 4px;
+                opacity: 0.7;
+                z-index: 10;
+                animation: bounce 2.5s infinite;
+                text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+            }
+            #slide-up-hint { bottom: 20px; }
+            #slide-down-hint { top: 20px; color: var(--text-color); }
         }
     </style>
 </head>
 <body>
     <canvas id="bg-canvas" class="desktop-only"></canvas>
-    <div id="logo-container"></div>
-    <div class="player-container">
-        <img id="artwork" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art">
-        <h1 id="title">RadioHost.cloud</h1>
-        <h2 id="artist">Live Stream</h2>
-        <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
-        <div class="footer">
-            Powered by <a href="https://radiohost.cloud" target="_blank">RadioHost.cloud</a>
+
+    <div id="swipe-container">
+        <div id="player-page">
+            <div id="logo-container"></div>
+            <div class="player-container">
+                <img id="artwork" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art">
+                <h1 id="title">RadioHost.cloud</h1>
+                <h2 id="artist">Live Stream</h2>
+                <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
+                <div class="footer">
+                    Powered by <a href="https://radiohost.cloud" target="_blank">RadioHost.cloud</a>
+                </div>
+            </div>
+            <div id="slide-up-hint" class="mobile-only">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 1px 1px rgba(0,0,0,0.7));"><path d="M12 4L12 20M12 4L18 10M12 4L6 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                <span>slide up for chat</span>
+            </div>
+        </div>
+        <div id="chat-page" class="mobile-only">
+             <div id="slide-down-hint">
+                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 1px 1px rgba(0,0,0,0.7));"><path d="M12 20L12 4M12 20L18 14M12 20L6 14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                <span>slide down for music</span>
+            </div>
+            <div id="chat-container">
+                 <!-- JS will move chat elements here on mobile -->
+            </div>
         </div>
     </div>
+    
     <audio id="audioPlayer" preload="none" crossOrigin="anonymous"></audio>
 
     <div id="chat-bubble" class="desktop-only">
@@ -2053,17 +2106,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
                 </button>
             </form>
-        </div>
-    </div>
-
-    <div id="chat-drawer" class="mobile-only">
-        <div id="chat-drawer-header">
-            <div class="grab-handle"></div>
-            <h3>Live Chat</h3>
-            <span id="mobile-chat-notification"></span>
-        </div>
-        <div id="chat-drawer-content">
-            <!-- Content will be moved here from desktop chat elements -->
         </div>
     </div>
 
@@ -2269,9 +2311,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             msgDiv.innerHTML = content;
             if(chatMessages) {
                 chatMessages.appendChild(msgDiv);
-                // The previous logic for mobile scrolling was incorrect as flex-direction is not reversed.
-                // This ensures that for both desktop and mobile, the view scrolls to the newest message.
-                // A timeout of 0ms queues this to run after the current call stack, which includes DOM updates.
                 setTimeout(() => {
                     chatMessages.scrollTop = chatMessages.scrollHeight;
                 }, 0);
@@ -2294,12 +2333,8 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     if (data.payload.logoSrc) { defaultLogoSrc = data.payload.logoSrc; updateLogo(data.payload.logoSrc); }
                 } else if (data.type === 'chatMessage') {
                     addChatMessage(data.payload);
-                    if (window.innerWidth <= 768) {
-                        const drawer = document.getElementById('chat-drawer');
-                        const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
-                        if (currentTransform.m42 > 0) document.getElementById('mobile-chat-notification').style.display = 'block';
-                    } else if (!chatWindow.classList.contains('open')) {
-                        chatNotification.style.display = 'block';
+                    if (window.innerWidth > 768 && !chatWindow.classList.contains('open')) {
+                         chatNotification.style.display = 'block';
                     }
                 }
             };
@@ -2314,108 +2349,78 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             chatBubble.addEventListener('click', () => { chatWindow.classList.toggle('open'); chatNotification.style.display = 'none'; if(chatWindow.classList.contains('open')) messageInput.focus(); });
             closeChatBtn.addEventListener('click', () => { chatWindow.classList.remove('open'); });
         } else {
-            // Mobile drawer logic
-            const drawer = document.getElementById('chat-drawer');
-            const drawerHeader = document.getElementById('chat-drawer-header');
-            const drawerContent = document.getElementById('chat-drawer-content');
-            const playerContainer = document.querySelector('.player-container');
-            
-            const desktopChatMessages = document.getElementById('chat-messages');
+            // Mobile Swipe Logic
+            const swipeContainer = document.getElementById('swipe-container');
+            const playerPage = document.getElementById('player-page');
+            const chatPage = document.getElementById('chat-page');
+            const chatContainer = document.getElementById('chat-container');
+
+            // Move desktop chat elements to the mobile container
+            const desktopChatHeader = document.querySelector('.chat-header');
+            chatMessages = document.getElementById('chat-messages');
             const desktopChatFooter = document.querySelector('.chat-footer');
-            if (desktopChatMessages) drawerContent.appendChild(desktopChatMessages);
-            if (desktopChatFooter) drawerContent.appendChild(desktopChatFooter);
-            const desktopChatWindow = document.getElementById('chat-window');
-            if (desktopChatWindow) desktopChatWindow.style.display = 'none';
+            if (desktopChatHeader) chatContainer.appendChild(desktopChatHeader);
+            if (chatMessages) chatContainer.appendChild(chatMessages);
+            if (desktopChatFooter) chatContainer.appendChild(desktopChatFooter);
+
+            chatForm = document.getElementById('chat-footer-form');
+            nicknameInput = document.getElementById('nickname-input');
+            messageInput = document.getElementById('message-input');
             
-            chatMessages = drawerContent.querySelector('#chat-messages');
-            chatForm = drawerContent.querySelector('#chat-footer-form');
-            nicknameInput = drawerContent.querySelector('#nickname-input');
-            messageInput = drawerContent.querySelector('#message-input');
-            const mobileChatNotification = document.getElementById('mobile-chat-notification');
+            let touchStartY = 0;
+            let currentY = 0;
+            let isDragging = false;
+            let isChatVisible = false;
 
-            let startY, startPos, isDragging = false;
-            let minPos = 0;
-            let maxPos = window.innerHeight - 70;
-            let isDrawerOpen = false;
-
-            const updateDrawerPositions = () => {
-                minPos = 0;
-                const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-                maxPos = viewportHeight - 70;
-            };
-            window.addEventListener('resize', updateDrawerPositions);
-            updateDrawerPositions();
-
-            const setDrawerPosition = (y, transitioning = false) => {
-                if(transitioning) drawer.classList.add('transitioning');
-                else drawer.classList.remove('transitioning');
-                drawer.style.transform = \`translateY(\${y}px)\`;
-                
-                const openRatio = 1 - (y / maxPos);
-                const clampedRatio = Math.max(0, Math.min(1, openRatio));
-                
-                const playerOpacity = 1 - clampedRatio;
-                const playerScale = 1 - (clampedRatio * 0.1);
-                const playerTranslateY = clampedRatio * -50;
-                
-                playerContainer.style.opacity = playerOpacity;
-                playerContainer.style.transform = \`translateY(\${playerTranslateY}px) scale(\${playerScale})\`;
-                logoContainer.style.opacity = playerOpacity;
-                logoContainer.style.transform = \`translateY(\${playerTranslateY}px) scale(\${playerScale})\`;
-            };
-
-            const openDrawer = () => { setDrawerPosition(minPos, true); isDrawerOpen = true; if (messageInput) messageInput.focus(); mobileChatNotification.style.display = 'none'; };
-            const closeDrawer = () => { setDrawerPosition(maxPos, true); isDrawerOpen = false; if (messageInput) messageInput.blur(); };
-            
-            // Keyboard fix
-            const visualViewport = window.visualViewport;
-            if (visualViewport) {
-                const handleViewportResize = () => {
-                    // Update layout variables first, based on the new visible height.
-                    updateDrawerPositions();
-                    drawer.style.height = \`\${visualViewport.height}px\`;
-
-                    // Now, re-apply the current state (open/closed) using the new layout values.
-                    // This ensures all related visuals (like player opacity) are also correctly updated.
-                    if (isDrawerOpen) {
-                        setDrawerPosition(minPos, false); // Resnap to open position
-                    } else {
-                        setDrawerPosition(maxPos, false); // Resnap to closed position
-                    }
-                };
-                visualViewport.addEventListener('resize', handleViewportResize);
-            }
-
-            drawerHeader.addEventListener('touchstart', e => {
+            swipeContainer.addEventListener('touchstart', e => {
+                touchStartY = e.touches[0].clientY;
                 isDragging = true;
-                startY = e.touches[0].clientY;
-                const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
-                startPos = currentTransform.m42;
-                drawer.classList.remove('transitioning');
+                playerPage.style.transition = 'none';
+                chatPage.style.transition = 'none';
             });
 
-            document.body.addEventListener('touchmove', e => {
+            swipeContainer.addEventListener('touchmove', e => {
                 if (!isDragging) return;
-                const currentY = e.touches[0].clientY;
-                const deltaY = currentY - startY;
-                let newY = startPos + deltaY;
-                newY = Math.max(minPos, Math.min(maxPos, newY));
-                setDrawerPosition(newY);
+                const touchCurrentY = e.touches[0].clientY;
+                const deltaY = touchCurrentY - touchStartY;
+                
+                let dragOffset;
+                if (isChatVisible) { // Dragging down from chat view
+                    dragOffset = Math.max(0, deltaY);
+                    playerPage.style.transform = \`translateY(calc(-100% + \${dragOffset}px))\`;
+                    chatPage.style.transform = \`translateY(\${dragOffset}px)\`;
+                } else { // Dragging up from player view
+                    dragOffset = Math.min(0, deltaY);
+                    playerPage.style.transform = \`translateY(\${dragOffset}px)\`;
+                    chatPage.style.transform = \`translateY(calc(100% + \${dragOffset}px))\`;
+                }
+                currentY = dragOffset;
             });
 
-            document.body.addEventListener('touchend', e => {
+            swipeContainer.addEventListener('touchend', e => {
                 if (!isDragging) return;
                 isDragging = false;
-                const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
-                const currentY = currentTransform.m42;
-                const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-                if (isDrawerOpen) {
-                    if (currentY > viewportHeight * 0.3) closeDrawer();
-                    else openDrawer();
-                } else {
-                    if (currentY < viewportHeight * 0.7) openDrawer();
-                    else closeDrawer();
+                playerPage.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1)';
+                chatPage.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1)';
+                
+                const threshold = window.innerHeight / 4;
+
+                if (!isChatVisible && currentY < -threshold) {
+                    isChatVisible = true;
+                } else if (isChatVisible && currentY > threshold) {
+                    isChatVisible = false;
                 }
+                
+                if(isChatVisible) {
+                    playerPage.style.transform = 'translateY(-100%)';
+                    chatPage.style.transform = 'translateY(0)';
+                    messageInput.focus();
+                } else {
+                    playerPage.style.transform = 'translateY(0)';
+                    chatPage.style.transform = 'translateY(100%)';
+                    messageInput.blur();
+                }
+                currentY = 0;
             });
         }
         
