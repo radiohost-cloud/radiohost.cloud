@@ -1,4 +1,3 @@
-
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -9,7 +8,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import http from 'http';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
 import NodeID3 from 'node-id3';
 import ffmpeg from 'fluent-ffmpeg';
 import { spawn } from 'child_process';
@@ -491,6 +490,7 @@ let playheadAnchorTime = 0;
 let icecastStreamCommand = null;
 let currentFeederCommand = null;
 let currentFeederTrackId = null;
+let presenterFeederCommand = null;
 let serverStreamStatus = 'inactive';
 let serverStreamError = null;
 let isEngineStarting = false;
@@ -524,7 +524,7 @@ const getSuppressionSettingsFromServer = (track) => {
     return null;
 };
 
-const updateIcecastMetadata = async (track) => {
+const updateIcecastMetadata = async (metadata) => {
     if (!studioUserEmail) return;
     const studioData = db.data.userdata[studioUserEmail];
     const streamConfig = studioData?.settings?.playoutPolicy?.streamingConfig;
@@ -548,15 +548,17 @@ const updateIcecastMetadata = async (track) => {
         const mountpoint = url.pathname;
         
         let metadataString;
-        if (!track) {
-            metadataString = stationName || 'RadioHost.cloud';
-        } else {
-            const suppression = getSuppressionSettingsFromServer(track);
+        if (typeof metadata === 'string') {
+            metadataString = metadata;
+        } else if (metadata) { // is a track object
+            const suppression = getSuppressionSettingsFromServer(metadata);
             if (suppression?.enabled) {
                 metadataString = suppression.customText || metadataHeader || stationName || 'RadioHost.cloud';
             } else {
-                metadataString = track.artist ? `${track.artist} - ${track.title}` : track.title;
+                metadataString = metadata.artist ? `${metadata.artist} - ${metadata.title}` : metadata.title;
             }
+        } else { // metadata is null
+            metadataString = stationName || 'RadioHost.cloud';
         }
         
         const encodedSong = encodeURIComponent(metadataString);
@@ -579,6 +581,7 @@ const updateIcecastMetadata = async (track) => {
         console.error('[Metadata] Error sending metadata update to Icecast:', error);
     }
 };
+
 
 const killProcess = (process) => {
     if (process && !process.killed) {
@@ -608,6 +611,9 @@ const stopStreamingEngine = async (broadcast = true) => {
     killProcess(currentFeederCommand);
     currentFeederCommand = null;
     currentFeederTrackId = null;
+
+    killProcess(presenterFeederCommand);
+    presenterFeederCommand = null;
 
     killProcess(icecastStreamCommand);
     icecastStreamCommand = null;
@@ -669,7 +675,9 @@ const startStreamingEngine = () => {
             resolve();
             return;
         }
-
+        
+        serverStreamStatus = 'starting';
+        broadcastStreamStatus();
         console.log('[FFMPEG] Starting persistent Icecast streaming process...');
         
         const { bitrate, username, password, serverAddress, stationName, stationGenre, stationUrl, stationDescription } = streamConfig;
@@ -774,12 +782,6 @@ const startPlayoutForTrack = async (trackIndex) => {
 
     if (!streamConfig || !streamConfig.isEnabled) {
         console.log(`[Playout] Streaming is disabled. Simulating playback for track: "${track.title}"`);
-        // Simulating playback end for non-streaming mode
-        setTimeout(() => {
-            if (currentFeederTrackId === track.id && db.data.sharedPlayerState.isPlaying) {
-                advanceTrack();
-            }
-        }, track.duration * 1000);
         return;
     }
     
@@ -1394,35 +1396,30 @@ wss.on('connection', async (ws, req) => {
                         let pc = peerConnections.get(email);
 
                         if (payload.sdp && payload.sdp.type === 'offer') {
-                            if (pc) {
-                                console.warn(`[WebRTC] Existing peer connection found for ${email}. Closing it before creating a new one.`);
-                                pc.close();
-                            }
+                            if (pc) pc.close();
+                            
                             pc = new RTCPeerConnection();
                             peerConnections.set(email, pc);
-                            console.log(`[WebRTC] Created new peer connection for ${email}`);
 
+                            pc.ontrack = (event) => {
+                                console.log(`[WebRTC] Received audio track from ${email}`);
+                                // We don't need to do anything with the track directly here.
+                                // The on-air logic will handle feeding it to FFmpeg.
+                            };
+                            
                             pc.onicecandidate = (event) => {
-                                if (event.candidate) {
-                                    console.log(`[WebRTC] Sending ICE candidate to ${email}`);
-                                    if (ws.readyState === WebSocket.OPEN) {
-                                        ws.send(JSON.stringify({
-                                            type: 'webrtc-signal',
-                                            sender: 'server',
-                                            payload: { candidate: event.candidate }
-                                        }));
-                                    }
+                                if (event.candidate && ws.readyState === WebSocket.OPEN) {
+                                    ws.send(JSON.stringify({
+                                        type: 'webrtc-signal',
+                                        sender: 'server',
+                                        payload: { candidate: event.candidate }
+                                    }));
                                 }
                             };
 
-                            pc.ontrack = (event) => {
-                                console.log(`[WebRTC] Received audio track from ${email}! Stream ID: ${event.streams[0].id}`);
-                                // Step 1: Just log that we received it.
-                            };
-                            
                             pc.onconnectionstatechange = () => {
-                                console.log(`[WebRTC] Connection state for ${email} changed to: ${pc.connectionState}`);
-                                if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+                                console.log(`[WebRTC] Connection state for ${email}: ${pc.connectionState}`);
+                                if (['disconnected', 'closed', 'failed'].includes(pc.connectionState)) {
                                     pc.close();
                                     peerConnections.delete(email);
                                 }
@@ -1432,7 +1429,6 @@ wss.on('connection', async (ws, req) => {
                             const answer = await pc.createAnswer();
                             await pc.setLocalDescription(answer);
 
-                            console.log(`[WebRTC] Sending answer to ${email}`);
                             if (ws.readyState === WebSocket.OPEN) {
                                 ws.send(JSON.stringify({
                                     type: 'webrtc-signal',
@@ -1443,24 +1439,8 @@ wss.on('connection', async (ws, req) => {
 
                         } else if (payload.candidate) {
                             if (pc && pc.remoteDescription) {
-                                try {
-                                    await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
-                                } catch (e) {
-                                    console.error(`[WebRTC] Error adding ICE candidate for ${email}:`, e);
-                                }
-                            } else {
-                                console.warn(`[WebRTC] Received ICE candidate for ${email} but no peer connection or remote description is set. Ignoring.`);
+                                await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
                             }
-                        }
-                    } else {
-                        // Relay to another client
-                        const targetClient = clients.get(data.target);
-                        if (targetClient && targetClient.readyState === ws.OPEN) {
-                            targetClient.send(JSON.stringify({
-                                type: 'webrtc-signal',
-                                payload: data.payload,
-                                sender: email
-                            }));
                         }
                     }
                     break;
