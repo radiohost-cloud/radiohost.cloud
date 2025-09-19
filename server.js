@@ -1297,41 +1297,6 @@ const setupScheduler = () => {
 // --- NEW: WebRTC Handling ---
 const peerConnections = new Map();
 
-const createPeerConnection = (email) => {
-    const pc = new RTCPeerConnection();
-    
-    pc.onicecandidate = (event) => {
-        if (event.candidate) {
-            const clientWs = clients.get(email);
-            if (clientWs && clientWs.readyState === WebSocket.OPEN) {
-                clientWs.send(JSON.stringify({
-                    type: 'webrtc-signal',
-                    target: email,
-                    sender: 'server',
-                    payload: { candidate: event.candidate }
-                }));
-            }
-        }
-    };
-
-    pc.ontrack = (event) => {
-        console.log(`[WebRTC] Received audio track from ${email}.`);
-        // TODO: This is where we will pipe the audio track into the main FFmpeg mixer
-    };
-
-    pc.onconnectionstatechange = () => {
-        console.log(`[WebRTC] Connection state for ${email} changed to: ${pc.connectionState}`);
-        if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
-            pc.close();
-            peerConnections.delete(email);
-        }
-    };
-    
-    peerConnections.set(email, pc);
-    return pc;
-};
-
-
 wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const email = url.searchParams.get('email');
@@ -1423,31 +1388,73 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'webrtc-signal': {
-                    const { target, payload } = data;
-                    if (target === 'server') {
+                    if (data.target === 'server') {
+                        console.log(`[WebRTC] Received signal for server from ${email}`);
+                        const payload = data.payload;
                         let pc = peerConnections.get(email);
-                        if (!pc) {
-                            pc = createPeerConnection(email);
-                        }
 
-                        if (payload.sdp) {
+                        if (payload.sdp && payload.sdp.type === 'offer') {
+                            if (pc) {
+                                console.warn(`[WebRTC] Existing peer connection found for ${email}. Closing it before creating a new one.`);
+                                pc.close();
+                            }
+                            pc = new RTCPeerConnection();
+                            peerConnections.set(email, pc);
+                            console.log(`[WebRTC] Created new peer connection for ${email}`);
+
+                            pc.onicecandidate = (event) => {
+                                if (event.candidate) {
+                                    console.log(`[WebRTC] Sending ICE candidate to ${email}`);
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: 'webrtc-signal',
+                                            sender: 'server',
+                                            payload: { candidate: event.candidate }
+                                        }));
+                                    }
+                                }
+                            };
+
+                            pc.ontrack = (event) => {
+                                console.log(`[WebRTC] Received audio track from ${email}! Stream ID: ${event.streams[0].id}`);
+                                // Step 1: Just log that we received it.
+                            };
+                            
+                            pc.onconnectionstatechange = () => {
+                                console.log(`[WebRTC] Connection state for ${email} changed to: ${pc.connectionState}`);
+                                if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+                                    pc.close();
+                                    peerConnections.delete(email);
+                                }
+                            };
+
                             await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-                            if (payload.sdp.type === 'offer') {
-                                const answer = await pc.createAnswer();
-                                await pc.setLocalDescription(answer);
+                            const answer = await pc.createAnswer();
+                            await pc.setLocalDescription(answer);
+
+                            console.log(`[WebRTC] Sending answer to ${email}`);
+                            if (ws.readyState === WebSocket.OPEN) {
                                 ws.send(JSON.stringify({
                                     type: 'webrtc-signal',
-                                    target: email,
                                     sender: 'server',
                                     payload: { sdp: answer }
                                 }));
                             }
+
                         } else if (payload.candidate) {
-                            await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+                            if (pc && pc.remoteDescription) {
+                                try {
+                                    await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+                                } catch (e) {
+                                    console.error(`[WebRTC] Error adding ICE candidate for ${email}:`, e);
+                                }
+                            } else {
+                                console.warn(`[WebRTC] Received ICE candidate for ${email} but no peer connection or remote description is set. Ignoring.`);
+                            }
                         }
                     } else {
-                        // Relay to another client (presenter-to-studio, etc.)
-                        const targetClient = clients.get(target);
+                        // Relay to another client
+                        const targetClient = clients.get(data.target);
                         if (targetClient && targetClient.readyState === ws.OPEN) {
                             targetClient.send(JSON.stringify({
                                 type: 'webrtc-signal',
@@ -1863,7 +1870,7 @@ wss.on('connection', async (ws, req) => {
         if (pc) {
             pc.close();
             peerConnections.delete(email);
-            console.log(`[WebRTC] Cleaned up peer connection for ${email}.`);
+            console.log(`[WebRTC] Cleaned up peer connection for disconnected user ${email}`);
         }
     });
 });
