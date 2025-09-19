@@ -13,6 +13,7 @@ import { WebSocketServer } from 'ws';
 import NodeID3 from 'node-id3';
 import ffmpeg from 'fluent-ffmpeg';
 import { spawn } from 'child_process';
+import wrtc from 'wrtc';
 
 // --- Basic Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -1292,6 +1293,44 @@ const setupScheduler = () => {
     schedulerInterval = setInterval(checkScheduledBroadcasts, SCHEDULER_CHECK_RATE);
 };
 
+// --- NEW: WebRTC Handling ---
+const peerConnections = new Map();
+const { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } = wrtc;
+
+const createPeerConnection = (email) => {
+    const pc = new RTCPeerConnection();
+    
+    pc.onicecandidate = (event) => {
+        if (event.candidate) {
+            const clientWs = clients.get(email);
+            if (clientWs && clientWs.readyState === WebSocket.OPEN) {
+                clientWs.send(JSON.stringify({
+                    type: 'webrtc-signal',
+                    target: email,
+                    sender: 'server',
+                    payload: { candidate: event.candidate }
+                }));
+            }
+        }
+    };
+
+    pc.ontrack = (event) => {
+        console.log(`[WebRTC] Received audio track from ${email}.`);
+        // TODO: This is where we will pipe the audio track into the main FFmpeg mixer
+    };
+
+    pc.onconnectionstatechange = () => {
+        console.log(`[WebRTC] Connection state for ${email} changed to: ${pc.connectionState}`);
+        if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+            pc.close();
+            peerConnections.delete(email);
+        }
+    };
+    
+    peerConnections.set(email, pc);
+    return pc;
+};
+
 
 wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -1383,6 +1422,43 @@ wss.on('connection', async (ws, req) => {
                     ws.send(JSON.stringify({ type: 'pong' }));
                     break;
                 
+                case 'webrtc-signal': {
+                    const { target, payload } = data;
+                    if (target === 'server') {
+                        let pc = peerConnections.get(email);
+                        if (!pc) {
+                            pc = createPeerConnection(email);
+                        }
+
+                        if (payload.sdp) {
+                            await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+                            if (payload.sdp.type === 'offer') {
+                                const answer = await pc.createAnswer();
+                                await pc.setLocalDescription(answer);
+                                ws.send(JSON.stringify({
+                                    type: 'webrtc-signal',
+                                    target: email,
+                                    sender: 'server',
+                                    payload: { sdp: answer }
+                                }));
+                            }
+                        } else if (payload.candidate) {
+                            await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+                        }
+                    } else {
+                        // Relay to another client (presenter-to-studio, etc.)
+                        const targetClient = clients.get(target);
+                        if (targetClient && targetClient.readyState === ws.OPEN) {
+                            targetClient.send(JSON.stringify({
+                                type: 'webrtc-signal',
+                                payload: data.payload,
+                                sender: email
+                            }));
+                        }
+                    }
+                    break;
+                }
+
                 case 'studio-command':
                     if (studioUserEmail && studioUserEmail === email) {
                         const { command, payload } = data.payload;
@@ -1742,17 +1818,6 @@ wss.on('connection', async (ws, req) => {
                         });
                     }
                     break;
-
-                case 'webrtc-signal':
-                    const targetClient = clients.get(data.target);
-                    if (targetClient && targetClient.readyState === ws.OPEN) {
-                        targetClient.send(JSON.stringify({
-                            type: 'webrtc-signal',
-                            payload: data.payload,
-                            sender: email
-                        }));
-                    }
-                    break;
                 
                 case 'voiceTrackAdd':
                     if (user && user.role === 'presenter' && studioUserEmail) {
@@ -1793,6 +1858,12 @@ wss.on('connection', async (ws, req) => {
         if (presenterEmails.has(email)) {
             presenterEmails.delete(email);
             broadcastPresenterList();
+        }
+        const pc = peerConnections.get(email);
+        if (pc) {
+            pc.close();
+            peerConnections.delete(email);
+            console.log(`[WebRTC] Cleaned up peer connection for ${email}.`);
         }
     });
 });
