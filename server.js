@@ -503,7 +503,7 @@ const findTrackAndPathInServerTree = (node, trackId, currentPath = []) => {
             return pathWithCurrentNode;
         }
         if (child.type === 'folder') {
-            const foundPath = findTrackAndPathInServerTree(child, trackId, pathWithCurrentNode);
+            const foundPath = findTrackAndPathInServerTree(child, trackId, currentPathWithNode);
             if (foundPath) return foundPath;
         }
     }
@@ -771,7 +771,7 @@ const startPlayoutForTrack = async (trackIndex) => {
     
     if (!track || track.markerType) {
         console.warn(`[Playout] Attempted to play invalid item at index ${trackIndex}. Skipping.`);
-        advanceTrack(trackIndex + 1);
+        advanceTrack();
         return;
     }
     
@@ -823,16 +823,14 @@ const startPlayoutForTrack = async (trackIndex) => {
         feeder.on('exit', (code, signal) => {
             if (signal !== 'SIGTERM' && currentFeederTrackId === track.id) {
                 console.log(`[FFMPEG] Feeder for '${track.title}' finished.`);
-                currentFeederCommand = null;
-                currentFeederTrackId = null;
-                if(db.data.sharedPlayerState.isPlaying) {
-                   advanceTrack();
-                }
+            }
+            if (currentFeederTrackId === track.id) {
+                 currentFeederCommand = null;
+                 currentFeederTrackId = null;
             }
         });
         feeder.stdout.on('error', (err) => {
              console.error(`[FFMPEG] Feeder stdout pipe error for '${track.title}':`, err);
-             if(db.data.sharedPlayerState.isPlaying) advanceTrack();
         });
     } catch (e) {
         console.error('[FFMPEG] Failed to initialize feeder command:', e);
@@ -964,27 +962,48 @@ const advanceTrack = async (jumpToIndex = -1) => {
 };
 
 const playoutTick = async () => {
-    if (!db.data.sharedPlayerState.isPlaying) return;
+    if (!db.data.sharedPlayerState.isPlaying) {
+        if (playoutInterval) {
+            clearInterval(playoutInterval);
+            playoutInterval = null;
+        }
+        return;
+    }
+
     const { sharedPlayerState, sharedPlaylist } = db.data;
-    const progress = (Date.now() - playheadAnchorTime) / 1000;
-    sharedPlayerState.trackProgress = progress;
-    for (let i = sharedPlayerState.currentTrackIndex + 1; i < sharedPlaylist.length; i++) {
+    const { currentTrackIndex } = sharedPlayerState;
+    
+    // Check for hard markers first
+    for (let i = currentTrackIndex + 1; i < sharedPlaylist.length; i++) {
         const item = sharedPlaylist[i];
         if (item.markerType === 'hard') {
             if (item.time <= Date.now()) {
                 console.log(`[Playout] Hard marker triggered at ${new Date(item.time).toLocaleTimeString()}. Jumping.`);
-                advanceTrack(i + 1);
+                await advanceTrack(i + 1);
                 return;
             }
-            break;
+            break; // Stop at the first future hard marker
         }
     }
-    const currentTrack = sharedPlaylist[sharedPlayerState.currentTrackIndex];
-    if (currentTrack && !currentTrack.markerType && progress > currentTrack.duration + 5) { // 5 second grace period
-        console.warn(`[Playout] Watchdog: Track has overrun its duration by 5s. Forcing advance.`);
-        advanceTrack();
-        return;
+    
+    // Then, update progress and check for natural track end
+    const progress = (Date.now() - playheadAnchorTime) / 1000;
+    sharedPlayerState.trackProgress = progress;
+    const currentTrack = sharedPlaylist[currentTrackIndex];
+
+    if (currentTrack && !currentTrack.markerType && progress >= currentTrack.duration) {
+        if (sharedPlayerState.stopAfterTrackId === currentTrack.id) {
+            console.log(`[Playout] Stopping after track: "${currentTrack.title}" as requested.`);
+            sharedPlayerState.stopAfterTrackId = null;
+            await pausePlayout();
+        } else {
+            console.log(`[Playout] Track "${currentTrack.title}" finished naturally. Advancing.`);
+            await advanceTrack();
+        }
+        return; // Stop further processing for this tick
     }
+    
+    // Broadcast state on every tick
     broadcastState();
 };
 
