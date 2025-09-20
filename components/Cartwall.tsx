@@ -1,10 +1,11 @@
-import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { type Track, type CartwallItem, type CartwallPage, type PlayoutPolicy } from '../types';
 import ConfirmationDialog from './ConfirmationDialog';
 import { getTrackSrc } from '../services/dataService';
 import { PlusIcon } from './icons/PlusIcon';
 import { CogIcon } from './icons/CogIcon';
 import { TrashIcon } from './icons/TrashIcon';
+import { Toggle } from './Toggle';
 
 const MAX_SIMULTANEOUS_PLAYERS = 8; // Pool size for audio players
 
@@ -20,14 +21,9 @@ interface CartwallProps {
     onActivePlayerCountChange: (count: number) => void;
     policy: PlayoutPolicy;
     onUpdatePolicy: (newPolicy: PlayoutPolicy) => void;
-    ws: WebSocket | null;
 }
 
-export interface CartwallRef {
-    playItem: (pageId: string, itemIndex: number) => void;
-}
-
-const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages, activePageId, onSetActivePageId, gridConfig, onGridConfigChange, audioContext, destinationNode, onActivePlayerCountChange, policy, onUpdatePolicy, ws }, ref) => {
+const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId, onSetActivePageId, gridConfig, onGridConfigChange, audioContext, destinationNode, onActivePlayerCountChange, policy, onUpdatePolicy }) => {
     const playersRef = useRef<HTMLAudioElement[]>([]);
     const sourcesRef = useRef<(MediaElementAudioSourceNode | null)[]>([]);
     const [activePlayers, setActivePlayers] = useState<Map<number, { progress: number, duration: number }>>(new Map());
@@ -121,17 +117,17 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
-    const playLocal = useCallback(async (pageId: string, itemIndex: number) => {
-        const page = pages.find(p => p.id === pageId);
-        if (!page || !page.items[itemIndex]) return;
-
-        const track = page.items[itemIndex];
-        const activePlayerIndex = Array.from(activePlayers.keys()).find(key => playersRef.current[key]?.dataset.cartIndex === String(itemIndex));
+    const handlePlay = useCallback(async (index: number) => {
+        if (!activePage || !activePage.items[index]) return;
+        const track = activePage.items[index];
+        
+        const activePlayerIndex = Array.from(activePlayers.keys()).find(key => playersRef.current[key]?.dataset.cartIndex === String(index));
 
         if (activePlayerIndex !== undefined) {
             const player = playersRef.current[activePlayerIndex];
             player.pause();
             player.currentTime = 0;
+            // Immediately update state for better UI responsiveness
             setActivePlayers(prev => {
                 const newActive = new Map(prev);
                 newActive.delete(activePlayerIndex);
@@ -151,7 +147,7 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
         if (src) {
             if (player.src && player.src.startsWith('blob:')) URL.revokeObjectURL(player.src);
             player.src = src;
-            player.dataset.cartIndex = String(itemIndex);
+            player.dataset.cartIndex = String(index);
             try {
                 if (audioContext?.state === 'suspended') await audioContext.resume();
                 await player.play();
@@ -160,28 +156,10 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
                 console.error("Cartwall playback failed:", e);
             }
         }
-    }, [pages, activePlayers, audioContext]);
-    
-    useImperativeHandle(ref, () => ({
-        playItem: (pageId: string, itemIndex: number) => {
-            playLocal(pageId, itemIndex);
-        }
-    }));
-    
-    const handlePlay = useCallback(async (index: number) => {
-        if (policy.playoutMode === 'presenter') {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'cart-play', payload: { pageId: activePageId, itemIndex: index } }));
-            }
-        } else {
-            playLocal(activePageId, index);
-        }
-    }, [policy.playoutMode, ws, activePageId, playLocal]);
+    }, [activePage, activePlayers, audioContext]);
     
     const handleDrop = useCallback((e: React.DragEvent, index: number) => {
         e.preventDefault();
-        if (policy.playoutMode === 'presenter') return;
-
         const trackJson = e.dataTransfer.getData('application/json');
         if (trackJson) {
             try {
@@ -201,7 +179,7 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
                 console.error("Cartwall drop failed:", err);
             }
         }
-    }, [pages, activePageId, onUpdatePages, policy.playoutMode]);
+    }, [pages, activePageId, onUpdatePages]);
 
     const handleClearItem = (index: number) => {
         const newPages = pages.map(p => {
@@ -271,7 +249,7 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
     };
 
     const handleContextMenu = (e: React.MouseEvent, index: number) => {
-        if (!activePage?.items[index] || policy.playoutMode === 'presenter') return;
+        if (!activePage?.items[index]) return;
         e.preventDefault();
         setContextMenu({ x: e.clientX, y: e.clientY, index });
     };
@@ -289,7 +267,7 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
                     {pages.map(page => (
                         <div key={page.id} className="relative group">
                             <button
-                                onDoubleClick={() => policy.playoutMode !== 'presenter' && setEditingPage({ id: page.id, name: page.name })}
+                                onDoubleClick={() => setEditingPage({ id: page.id, name: page.name })}
                                 onClick={() => onSetActivePageId(page.id)}
                                 className={`px-3 py-2 text-sm font-semibold whitespace-nowrap ${activePageId === page.id ? 'bg-neutral-200 dark:bg-neutral-800 text-black dark:text-white' : 'text-neutral-500 hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`}
                             >
@@ -306,7 +284,7 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
                                     page.name
                                 )}
                             </button>
-                             {pages.length > 1 && policy.playoutMode !== 'presenter' && (
+                             {pages.length > 1 && (
                                 <button
                                     onClick={() => handleDeletePage(page.id)}
                                     className="absolute top-0 right-0 p-0.5 bg-neutral-400/50 dark:bg-neutral-600/50 rounded-full text-white opacity-0 group-hover:opacity-100"
@@ -317,9 +295,9 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
                             )}
                         </div>
                     ))}
-                    {policy.playoutMode !== 'presenter' && <button onClick={handleAddPage} className="p-2 text-neutral-500 hover:text-black dark:hover:text-white"><PlusIcon className="w-5 h-5"/></button>}
+                    <button onClick={handleAddPage} className="p-2 text-neutral-500 hover:text-black dark:hover:text-white"><PlusIcon className="w-5 h-5"/></button>
                 </div>
-                {policy.playoutMode !== 'presenter' && <div className="flex-shrink-0 relative" ref={settingsRef}>
+                <div className="flex-shrink-0 relative" ref={settingsRef}>
                     <button onClick={() => setIsSettingsOpen(p => !p)} className="p-2 h-full text-neutral-500 hover:text-black dark:hover:text-white hover:bg-neutral-200 dark:hover:bg-neutral-800"><CogIcon className="w-5 h-5"/></button>
                      {isSettingsOpen && (
                         <div className="absolute right-0 top-full mt-1 w-56 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-md shadow-lg z-20 p-4 space-y-4">
@@ -337,7 +315,7 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
                             </div>
                         </div>
                     )}
-                </div>}
+                </div>
             </div>
 
             {/* Grid */}
@@ -349,16 +327,14 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
                         const activePlayer = activePlayerEntry ? activePlayerEntry[1] : undefined;
                         const progress = activePlayer ? (activePlayer.progress / activePlayer.duration) * 100 : 0;
                         const hoverColor = 'hover:bg-neutral-300 dark:hover:bg-neutral-700';
-                        const isStudio = policy.playoutMode === 'studio';
-                        const canDrop = isStudio;
 
                         return (
                             <div
                                 key={index}
-                                onDrop={canDrop ? (e) => handleDrop(e, index) : undefined}
-                                onDragOver={canDrop ? (e) => e.preventDefault() : undefined}
+                                onDrop={(e) => handleDrop(e, index)}
+                                onDragOver={(e) => e.preventDefault()}
                                 onContextMenu={(e) => handleContextMenu(e, index)}
-                                className={`relative flex flex-col justify-center items-center p-2 rounded-md transition-colors text-center ${item ? 'text-white cursor-pointer' : `text-neutral-400 ${isStudio ? hoverColor : ''}`} ${isPlaying ? 'animate-pulse-cart' : ''}`}
+                                className={`relative flex flex-col justify-center items-center p-2 rounded-md transition-colors text-center cursor-pointer ${item ? 'text-white' : `text-neutral-400 ${hoverColor}`} ${isPlaying ? 'animate-pulse-cart' : ''}`}
                                 style={{ backgroundColor: item?.color || (item ? '#3f3f46' : undefined) }} // zinc-700 fallback
                                 onClick={() => item && handlePlay(index)}
                             >
@@ -371,7 +347,7 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
                                         {item.artist && <p className="text-xs opacity-80 [text-shadow:_1px_1px_2px_rgb(0_0_0_/_0.5)]">{item.artist}</p>}
                                     </>
                                 ) : (
-                                    isStudio && <PlusIcon className="w-6 h-6"/>
+                                    <PlusIcon className="w-6 h-6"/>
                                 )}
                             </div>
                         );
@@ -409,8 +385,36 @@ const Cartwall = forwardRef<CartwallRef, CartwallProps>(({ pages, onUpdatePages,
                 Are you sure you want to clear {clearConfirm.page ? "all items from this page" : "this item"}? This cannot be undone.
             </ConfirmationDialog>
             <input type="color" ref={colorInputRef} onChange={handleColorChange} className="absolute invisible" />
+            
+            <div className="flex-shrink-0 p-3 border-t border-neutral-200 dark:border-neutral-800 space-y-3">
+                <div className="flex items-center justify-between">
+                    <div>
+                        <label htmlFor="cartwall-ducking-enabled" className="text-sm font-medium block cursor-pointer">Enable Ducking</label>
+                        <p className="text-xs text-neutral-500">Lower player volume when cart is active.</p>
+                    </div>
+                    <Toggle id="cartwall-ducking-enabled" checked={policy.cartwallDuckingEnabled} onChange={(v) => onUpdatePolicy({ ...policy, cartwallDuckingEnabled: v })} />
+                </div>
+                {policy.cartwallDuckingEnabled && (
+                    <div className="space-y-4 pt-2 pl-4 border-l-2 border-neutral-200 dark:border-neutral-700">
+                        <div>
+                            <label htmlFor="cart-ducking-level" className="flex justify-between text-xs font-medium">
+                                <span>Player Ducking Level</span>
+                                <span className="font-mono">{Math.round(policy.cartwallDuckingLevel * 100)}%</span>
+                            </label>
+                            <input id="cart-ducking-level" type="range" min="0" max="1" step="0.01" value={policy.cartwallDuckingLevel} onChange={(e) => onUpdatePolicy({ ...policy, cartwallDuckingLevel: parseFloat(e.target.value)})} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer" />
+                        </div>
+                        <div>
+                            <label htmlFor="cart-ducking-fade" className="flex justify-between text-xs font-medium">
+                                <span>Fade Duration</span>
+                                <span className="font-mono">{policy.cartwallDuckingFadeDuration.toFixed(1)}s</span>
+                            </label>
+                            <input id="cart-ducking-fade" type="range" min="0.1" max="2" step="0.1" value={policy.cartwallDuckingFadeDuration} onChange={(e) => onUpdatePolicy({ ...policy, cartwallDuckingFadeDuration: parseFloat(e.target.value)})} className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer" />
+                        </div>
+                    </div>
+                )}
+            </div>
         </div>
     );
-});
+};
 
 export default React.memo(Cartwall);

@@ -1,6 +1,5 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-// FIX: Changed import from 'App' to './App' to correctly resolve the module.
 import App from './App';
 import './index.css';
 

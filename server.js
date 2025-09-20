@@ -1,3 +1,4 @@
+
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -1461,19 +1462,6 @@ wss.on('connection', async (ws, req) => {
                     }
                     break;
                 }
-
-                case 'cart-play':
-                    if (user.role === 'presenter' && studioUserEmail) {
-                        const studioWs = clients.get(studioUserEmail);
-                        if (studioWs && studioWs.readyState === WebSocket.OPEN) {
-                            console.log(`[WebSocket] Relaying cart-play from ${email} to studio.`);
-                            studioWs.send(JSON.stringify({
-                                type: 'remote-cart-play',
-                                payload: data.payload
-                            }));
-                        }
-                    }
-                    break;
 
                 case 'studio-command':
                     if (studioUserEmail && studioUserEmail === email) {
