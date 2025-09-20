@@ -14,7 +14,6 @@ interface RemoteStudioProps {
     onlinePresenters: User[];
     audioLevels: Partial<Record<AudioSourceId, number>>;
     isSecureContext: boolean;
-    cartwallStream?: MediaStream;
 }
 
 export interface RemoteStudioRef {
@@ -25,7 +24,7 @@ export interface RemoteStudioRef {
 type MicStatus = 'disconnected' | 'connecting' | 'ready' | 'error';
 
 const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref) => {
-    const { mixerConfig, onMixerChange, onStreamAvailable, ws, currentUser, isStudio, incomingSignal, onlinePresenters, audioLevels, isSecureContext, cartwallStream } = props;
+    const { mixerConfig, onMixerChange, onStreamAvailable, ws, currentUser, isStudio, incomingSignal, onlinePresenters, audioLevels, isSecureContext } = props;
     const [micStatus, setMicStatus] = useState<MicStatus>('disconnected');
     const isLive = mixerConfig.mic.sends.main.enabled;
     const [volume, setVolume] = useState(0);
@@ -182,15 +181,8 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
             if (micStatus !== 'ready') await connectMicrophone(selectedInputDeviceId);
             if (!isStudio && ws && streamRef.current) {
                 const micStream = streamRef.current;
-                const combinedStream = new MediaStream();
-    
-                micStream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
-                if (cartwallStream) {
-                    cartwallStream.getAudioTracks().forEach(track => combinedStream.addTrack(track.clone()));
-                }
-    
                 const pc = createPeerConnection('studio');
-                combinedStream.getTracks().forEach(track => pc.addTrack(track, combinedStream));
+                micStream.getTracks().forEach(track => pc.addTrack(track, micStream));
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
                 sendSignal('studio', { sdp: offer });
