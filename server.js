@@ -1,3 +1,4 @@
+
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -438,10 +439,12 @@ const getPlaylistWithSkipStatus = () => {
 }
 
 const broadcastState = () => {
+    const studioData = studioUserEmail ? db.data.userdata[studioUserEmail] : null;
     const statePayload = {
         playlist: getPlaylistWithSkipStatus(),
         playerState: db.data.sharedPlayerState,
-        broadcasts: (studioUserEmail && db.data.userdata[studioUserEmail]?.broadcasts) || [],
+        broadcasts: studioData?.broadcasts || [],
+        cartwallPages: studioData?.cartwallPages || [],
     };
     const message = JSON.stringify({ type: 'state-update', payload: statePayload });
     clients.forEach((ws, email) => {
@@ -2607,31 +2610,48 @@ app.get('/api/userdata/:email', (req, res) => {
 
 app.post('/api/userdata/:email', async (req, res) => {
     const { email } = req.params;
-    if (email !== studioUserEmail) {
-        // Only allow non-studio users to save their own specific settings, not global ones.
-         const { settings, audioConfig, cartwallPages } = req.body;
-         db.data.userdata[email] = { ...(db.data.userdata[email] || {}), settings, audioConfig, cartwallPages };
-         await db.write();
-         return res.json({ success: true });
+    const user = db.data.users.find(u => u.email === email);
+
+    if (!user) {
+        return res.status(404).json({ message: 'User not found' });
     }
 
-    const oldConfig = db.data.userdata[email]?.settings?.playoutPolicy?.streamingConfig;
-    
-    db.data.userdata[email] = req.body;
-    await db.write();
-
-    setupAutoBackup();
-    setupAutoMode();
-    setupScheduler(); // Re-initialize scheduler on settings change
-
-    const newConfig = req.body?.settings?.playoutPolicy?.streamingConfig;
-    if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
-        console.log('[Config] Streaming config changed. Restarting playout if active.');
-        if (db.data.sharedPlayerState.isPlaying) {
-            await advanceTrack(db.data.sharedPlayerState.currentTrackIndex);
+    if (user.role === 'presenter') {
+        // Presenters only save their personal settings (UI layout, audio config).
+        // Shared data like cartwall and broadcasts are ignored to prevent overwrites.
+        const { settings, audioConfig } = req.body;
+        db.data.userdata[email] = { 
+            ...(db.data.userdata[email] || {}), 
+            settings, 
+            audioConfig 
+        };
+        console.log(`[Persistence] Saving presenter-specific settings for ${email}.`);
+    } else { // 'studio' user
+        const oldConfig = db.data.userdata[email]?.settings?.playoutPolicy?.streamingConfig;
+        const oldCartwall = db.data.userdata[email]?.cartwallPages;
+        
+        db.data.userdata[email] = req.body;
+        
+        // Broadcast cartwall changes if they occurred
+        if (JSON.stringify(oldCartwall) !== JSON.stringify(req.body.cartwallPages)) {
+            broadcastState(); // this will now include cartwallPages
         }
+        
+        setupAutoBackup();
+        setupAutoMode();
+        setupScheduler();
+
+        const newConfig = req.body?.settings?.playoutPolicy?.streamingConfig;
+        if (JSON.stringify(oldConfig) !== JSON.stringify(newConfig)) {
+            console.log('[Config] Streaming config changed. Restarting playout if active.');
+            if (db.data.sharedPlayerState.isPlaying) {
+                await advanceTrack(db.data.sharedPlayerState.currentTrackIndex);
+            }
+        }
+        console.log(`[Persistence] Saving full studio settings for ${email}.`);
     }
 
+    await db.write();
     res.json({ success: true });
 });
 

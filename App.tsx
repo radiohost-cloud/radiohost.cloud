@@ -1,5 +1,4 @@
 
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -740,13 +739,11 @@ const AppInternal: React.FC = () => {
     };
     
     useDebouncedEffect(() => {
-        if (playoutPolicy.playoutMode === 'presenter') return;
-
-        // In HOST mode, only user-specific settings are saved from the client.
-        // Playlist and Library are managed by the server.
+        // Presenter mode now also saves settings to the server.
+        // The server will filter what to save based on the user's role.
         const dataToSave = {
-            cartwallPages,
-            broadcasts,
+            cartwallPages, // Presenters will send this, but server will ignore it.
+            broadcasts,    // Presenters will send this, but server will ignore it.
             settings: {
                 playoutPolicy, 
                 logoSrc, 
@@ -770,7 +767,7 @@ const AppInternal: React.FC = () => {
 
         if (currentUser?.email) {
             dataService.putUserData(currentUser.email, dataToSave);
-            console.log(`[Persistence] User settings saved for ${currentUser.email}.`);
+            console.log(`[Persistence] User settings sent to server for ${currentUser.email}.`);
         }
     }, [
         cartwallPages, broadcasts, playoutPolicy, logoSrc,
@@ -1863,12 +1860,15 @@ const AppInternal: React.FC = () => {
             if (data.type === 'pong') return;
 
             if (data.type === 'state-update') {
-                const { playlist: serverPlaylist, playerState, broadcasts: serverBroadcasts } = data.payload;
+                const { playlist: serverPlaylist, playerState, broadcasts: serverBroadcasts, cartwallPages: serverCartwallPages } = data.payload;
                 if (serverPlaylist && JSON.stringify(serverPlaylist) !== JSON.stringify(playlistRef.current)) {
                     setPlaylist(serverPlaylist);
                 }
                 if (serverBroadcasts && JSON.stringify(serverBroadcasts) !== JSON.stringify(broadcastsRef.current)) {
                     setBroadcasts(serverBroadcasts);
+                }
+                if (serverCartwallPages && JSON.stringify(serverCartwallPages) !== JSON.stringify(cartwallPagesRef.current)) {
+                    setCartwallPages(serverCartwallPages);
                 }
                 if (playerState) {
                     if (playerState.currentTrackIndex !== undefined) setCurrentTrackIndex(playerState.currentTrackIndex);
