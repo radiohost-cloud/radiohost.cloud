@@ -600,7 +600,28 @@ const AppInternal: React.FC = () => {
             
             const initialSettings = initialUserData?.settings || {};
 
-            let playoutPolicyToSet = { ...defaultPlayoutPolicy, ...initialSettings.playoutPolicy };
+            const savedPlayoutPolicy = initialSettings.playoutPolicy || {};
+            let playoutPolicyToSet = {
+                ...defaultPlayoutPolicy,
+                ...savedPlayoutPolicy,
+                compressor: {
+                    ...defaultPlayoutPolicy.compressor,
+                    ...(savedPlayoutPolicy.compressor || {}),
+                },
+                equalizerBands: {
+                    ...defaultPlayoutPolicy.equalizerBands,
+                    ...(savedPlayoutPolicy.equalizerBands || {}),
+                },
+                cartwallGrid: {
+                    ...defaultPlayoutPolicy.cartwallGrid,
+                    ...(savedPlayoutPolicy.cartwallGrid || {}),
+                },
+                streamingConfig: {
+                    ...defaultPlayoutPolicy.streamingConfig,
+                    ...(savedPlayoutPolicy.streamingConfig || {}),
+                },
+            };
+
             if (savedPlayoutMode) {
                 playoutPolicyToSet.playoutMode = savedPlayoutMode;
             }
