@@ -1955,7 +1955,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         }
         #chat-page { 
             transform: translateY(100%);
-            padding-top: calc(10px + env(safe-area-inset-top));
+            padding-top: calc(50px + env(safe-area-inset-top));
             padding-bottom: calc(10px + env(safe-area-inset-bottom));
             padding-left: 20px;
             padding-right: 20px;
@@ -2008,8 +2008,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #send-btn svg { width: 20px; height: 20px; }
         
         /* Slide hints */
-        .slide-hint { position: absolute; bottom: 20px; font-size: 0.8rem; color: var(--subtext-color); opacity: 0.7; left: 0; right: 0; text-align: center; }
-        #chat-page .slide-hint { top: 20px; bottom: auto; }
+        .slide-hint { position: absolute; font-size: 0.8rem; color: var(--subtext-color); opacity: 0.7; left: 0; right: 0; text-align: center; }
+        #player-page .slide-hint { bottom: 20px; }
+        #chat-page .slide-hint { top: calc(15px + env(safe-area-inset-top)); bottom: auto; }
 
         /* Desktop Chat Fallback */
         @media (min-width: 769px) {
@@ -2040,6 +2041,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
     </div>
 
     <div id="chat-page" class="page">
+        <div class="slide-hint">
+            slide down for music &#9660;
+        </div>
         <div class="content-container chat-container">
             <div class="chat-header">Chat</div>
             <div id="chat-messages"></div>
@@ -2052,9 +2056,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     </button>
                 </form>
             </div>
-        </div>
-        <div class="slide-hint">
-            slide down for music &#9660;
         </div>
     </div>
 
