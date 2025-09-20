@@ -642,6 +642,8 @@ const rebuildMainMixer = () => {
 
     sourceStreams.forEach((stream, index) => {
         const pipeIndex = 3 + index;
+        // FIX: Explicitly define the format for each pipe input to prevent probing errors.
+        mixerInputsArgs.push('-f', 's16le', '-ar', '44100', '-ac', '2');
         mixerInputsArgs.push('-i', `pipe:${pipeIndex}`);
         filterInputs.push(`[${index + 1}:a]`);
         stdioConfig.push('pipe');
