@@ -132,11 +132,9 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         };
     }, []);
     
-    const sendSignal = useCallback((target: string, payload: any) => {
-        if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'webrtc-signal', target, payload }));
-        }
-    }, [ws]);
+    const sendSignal = (target: string, payload: any) => {
+        ws?.send(JSON.stringify({ type: 'webrtc-signal', target, payload }));
+    };
 
     const createPeerConnection = useCallback((remoteUserEmail: string): RTCPeerConnection => {
         const pc = new RTCPeerConnection();
@@ -174,42 +172,8 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
 
         peerConnectionsRef.current.set(remoteUserEmail, pc);
         return pc;
-    }, [isStudio, onStreamAvailable, onMixerChange, sendSignal]);
+    }, [isStudio, onStreamAvailable, onMixerChange, ws]);
     
-    useEffect(() => {
-        if (!isStudio || !cartwallStream || !ws) {
-            return;
-        }
-    
-        const peerId = 'studio_cartwall';
-        if (peerConnectionsRef.current.has(peerId)) {
-            return;
-        }
-    
-        console.log('[WebRTC] Studio cartwall stream available. Creating peer connection to server.');
-        
-        const pc = createPeerConnection(peerId);
-    
-        cartwallStream.getAudioTracks().forEach(track => {
-            pc.addTrack(track, cartwallStream);
-        });
-    
-        pc.createOffer()
-            .then(offer => pc.setLocalDescription(offer))
-            .then(() => {
-                if (pc.localDescription) {
-                    sendSignal(peerId, { sdp: pc.localDescription });
-                }
-            })
-            .catch(e => console.error('[WebRTC] Error creating offer for cartwall stream:', e));
-    
-        return () => {
-            console.log('[WebRTC] Cleaning up studio cartwall peer connection.');
-            pc.close();
-            peerConnectionsRef.current.delete(peerId);
-        };
-    }, [isStudio, cartwallStream, ws, createPeerConnection, sendSignal]);
-
     const handleMicToggle = async () => {
         if (micStatus === 'connecting' || !isSecureContext) return;
         const willBeLive = !isLive;
@@ -271,7 +235,7 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         } else if (payload.candidate) {
             pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
         }
-    }, [incomingSignal, ws, createPeerConnection, sendSignal]);
+    }, [incomingSignal, ws, createPeerConnection]);
 
 
     const handleDeviceSelectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -300,25 +264,12 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
     
     const handleRemoteOnAirToggle = (email: string) => {
         const sourceId: AudioSourceId = `remote_${email}`;
-        const isCurrentlyOnAir = mixerConfig[sourceId]?.sends.main.enabled || false;
-        const newOnAirStatus = !isCurrentlyOnAir;
-
-        if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-                type: 'studio-command',
-                payload: {
-                    command: 'setPresenterOnAir',
-                    payload: { presenterEmail: email, onAir: newOnAirStatus }
-                }
-            }));
-        }
-
         onMixerChange((prevConfig) => {
             const presenterConfig = prevConfig[sourceId];
             if (!presenterConfig) return prevConfig;
 
             const newConfig = JSON.parse(JSON.stringify(prevConfig));
-            newConfig[sourceId].sends.main.enabled = newOnAirStatus;
+            newConfig[sourceId].sends.main.enabled = !presenterConfig.sends.main.enabled;
             return newConfig;
         });
     };
