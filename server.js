@@ -659,6 +659,10 @@ const rebuildMainMixer = () => {
 
     mainMixerCommand = spawn('ffmpeg', mixerArgs, { stdio: stdioConfig });
     
+    mainMixerCommand.on('error', (err) => {
+        console.error('[FFMPEG Mixer] Process spawn error:', err);
+        stopStreamingEngine();
+    });
     mainMixerCommand.stderr.on('data', (data) => console.error(`[FFMPEG Mixer Stderr] ${data.toString()}`));
     mainMixerCommand.stdout.pipe(icecastStreamCommand.stdin, { end: false });
 
@@ -671,10 +675,16 @@ const rebuildMainMixer = () => {
     sourceStreams.forEach((sourceStream, index) => {
         const mixerInputPipe = mainMixerCommand.stdio[3 + index];
         if (mixerInputPipe) {
-            sourceStream.pipe(mixerInputPipe);
+            sourceStream.unpipe(); // Ensure no old pipes are attached
+            sourceStream.pipe(mixerInputPipe, { end: false });
             sourceStream.on('error', (err) => {
-                if (err.code !== 'EPIPE') {
-                    console.error(`[Mixer] Error on source stream ${index}:`, err);
+                if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
+                     console.error(`[Mixer] Error on source stream (feeder stdout) for input ${index}:`, err);
+                }
+            });
+            mixerInputPipe.on('error', (err) => {
+                if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
+                    console.error(`[Mixer] Error on mixer input pipe ${index}:`, err);
                 }
             });
         } else {
@@ -782,6 +792,13 @@ const startStreamingEngine = () => {
         ];
 
         icecastStreamCommand = spawn('ffmpeg', args);
+        icecastStreamCommand.on('error', (err) => {
+            console.error('[FFMPEG Main] Process spawn error:', err);
+            serverStreamStatus = 'error';
+            serverStreamError = 'Failed to start FFmpeg master process.';
+            broadcastStreamStatus();
+            icecastStreamCommand = null;
+        });
 
         const permanentExitHandler = async (code, signal) => {
             const wasPlaying = db.data.sharedPlayerState.isPlaying;
@@ -909,6 +926,17 @@ const startPlayoutForTrack = async (trackIndex) => {
         const feeder = spawn('ffmpeg', feederArgs);
         audioSourceFeeders.set('playlist', feeder);
         
+        feeder.on('error', (err) => {
+            console.error(`[FFMPEG Feeder] Process spawn error for track '${track.title}':`, err);
+            if(db.data.sharedPlayerState.isPlaying) {
+               advanceTrack();
+            }
+        });
+        feeder.stdout.on('error', (err) => {
+            if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
+                console.error(`[FFMPEG Feeder] stdout error for track '${track.title}':`, err);
+            }
+        });
         feeder.stderr.on('data', (data) => console.error(`[FFMPEG Feeder Stderr for ${track.title}] ${data.toString()}`));
         feeder.on('exit', (code, signal) => {
             audioSourceFeeders.delete('playlist');
@@ -1422,11 +1450,16 @@ const createPeerConnection = (email) => {
         ];
         const feeder = spawn('ffmpeg', args);
         
+        feeder.on('error', (err) => {
+            console.error(`[FFMPEG Feeder] Process spawn error for remote source '${sourceEmail}':`, err);
+        });
+
         if (sourceEmail === 'studio_cartwall') {
             studioCartwallFeeder = feeder;
             rebuildMainMixer();
         } else {
              audioSourceFeeders.set(sourceEmail, feeder);
+             rebuildMainMixer();
         }
 
         sink.ondata = ({ samples }) => {
