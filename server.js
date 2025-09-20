@@ -617,10 +617,14 @@ const rebuildMainMixer = () => {
         return;
     }
 
-    const stdioConfig = ['ignore', 'pipe', 'pipe']; // 0: stdin, 1: stdout, 2: stderr
+    const stdioConfig = ['ignore', 'pipe', 'pipe'];
     const mixerInputsArgs = [];
     const filterInputs = [];
     const sourceStreams = [];
+
+    // Add a silent, non-terminating source to keep the mixer alive
+    mixerInputsArgs.push('-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo');
+    filterInputs.push('[0:a]');
 
     const playlistFeederData = audioSourceFeeders.get('playlist');
     if (currentLiveSource === 'playlist' && playlistFeederData && !playlistFeederData.process.killed) {
@@ -636,19 +640,15 @@ const rebuildMainMixer = () => {
         sourceStreams.push(studioCartwallFeeder.stream);
     }
 
-    if (sourceStreams.length === 0) {
-        console.log('[Mixer] No active sources. Mixer will not be started.');
-        return;
-    }
-
     sourceStreams.forEach((stream, index) => {
         const pipeIndex = 3 + index;
         mixerInputsArgs.push('-i', `pipe:${pipeIndex}`);
-        filterInputs.push(`[${index}:a]`);
-        stdioConfig.push('pipe'); // Request a pipe for this file descriptor
+        filterInputs.push(`[${index + 1}:a]`);
+        stdioConfig.push('pipe');
     });
     
-    const filterComplexString = `${filterInputs.join('')}amix=inputs=${sourceStreams.length}:duration=first`;
+    const totalInputs = 1 + sourceStreams.length;
+    const filterComplexString = `${filterInputs.join('')}amix=inputs=${totalInputs}:duration=first`;
     
     const mixerArgs = [
         ...mixerInputsArgs,
@@ -662,8 +662,11 @@ const rebuildMainMixer = () => {
     
     mainMixerCommand.on('error', (err) => {
         console.error('[FFMPEG Mixer] Process spawn error:', err);
-        stopStreamingEngine();
+        if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
+            stopStreamingEngine();
+        }
     });
+
     mainMixerCommand.stderr.on('data', (data) => console.error(`[FFMPEG Mixer Stderr] ${data.toString()}`));
     mainMixerCommand.stdout.pipe(icecastStreamCommand.stdin, { end: false });
     mainMixerCommand.stdout.on('error', (err) => {
@@ -688,6 +691,10 @@ const rebuildMainMixer = () => {
                 if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
                     console.error(`[Mixer] Error on mixer input pipe ${index}:`, err);
                 }
+            });
+
+            sourceStream.on('error', (err) => {
+                 console.error(`[Mixer] Error on source stream for pipe ${index}:`, err);
             });
         } else {
             console.error(`[Mixer] Error: Mixer input pipe at index ${3 + index} is not available.`);
@@ -835,7 +842,7 @@ const startStreamingEngine = () => {
             icecastStreamCommand.removeListener('exit', onExitEarly);
             icecastStreamCommand.on('exit', permanentExitHandler);
             icecastStreamCommand.stdin.on('error', (err) => {
-                if (err.code !== 'EPIPE') {
+                if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
                      console.error('[FFMPEG] Main stream stdin error:', err);
                 }
             });
@@ -929,13 +936,18 @@ const startPlayoutForTrack = async (trackIndex) => {
         
         const passthrough = new PassThrough();
         feeder.stdout.pipe(passthrough);
+
         feeder.stdout.on('error', (err) => {
             if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
                 console.error(`[FFMPEG Feeder] stdout error for track '${track.title}':`, err);
             }
         });
-        audioSourceFeeders.set('playlist', { process: feeder, stream: passthrough });
+        
+        passthrough.on('error', (err) => {
+            console.error(`[PassThrough] stream error for track '${track.title}':`, err);
+        });
 
+        audioSourceFeeders.set('playlist', { process: feeder, stream: passthrough });
         
         feeder.on('error', (err) => {
             console.error(`[FFMPEG Feeder] Process spawn error for track '${track.title}':`, err);
@@ -945,6 +957,7 @@ const startPlayoutForTrack = async (trackIndex) => {
         });
 
         feeder.stderr.on('data', (data) => console.error(`[FFMPEG Feeder Stderr for ${track.title}] ${data.toString()}`));
+        
         feeder.on('exit', (code, signal) => {
             audioSourceFeeders.delete('playlist');
             if (signal !== 'SIGTERM' && currentFeederTrackId === track.id) {
