@@ -1923,7 +1923,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             --subtext-color: #a0a0a0; 
             --accent-color: #ef4444; 
             --container-bg: rgba(0, 0, 0, 0.3);
-            --header-bg-color: #2a2a2a;
         }
         html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
         body { 
@@ -1934,33 +1933,33 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             flex-direction: column; 
             align-items: center; 
             justify-content: center; 
-            text-align: center; 
             padding: 20px; 
             box-sizing: border-box; 
             overflow: hidden; 
             transition: background 1s ease-in-out, color 1s ease-in-out;
             animation: gradient-animation 15s ease infinite;
         }
-        #bg-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+        #bg-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; }
         @keyframes gradient-animation {
             0% { background-position: 0% 50%; }
             50% { background-position: 100% 50%; }
             100% { background-position: 0% 50%; }
         }
-        #logo-container {
-            margin-bottom: 20px;
-            text-align: center;
-            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
-            z-index: 5;
+        
+        /* Page containers */
+        .page {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            padding: 20px; box-sizing: border-box;
+            transition: transform 0.4s cubic-bezier(0.25, 1, 0.5, 1);
         }
-        #station-logo {
-            max-height: 80px;
-            max-width: 80%;
-            object-fit: contain;
-            display: inline-block;
-            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
-        }
-        .player-container { 
+        #chat-page { transform: translateY(100%); }
+        body.is-chat-active #player-page { transform: translateY(-100%); }
+        body.is-chat-active #chat-page { transform: translateY(0); }
+
+        /* Shared container style */
+        .content-container { 
             max-width: 350px; 
             width: 100%; 
             background: var(--container-bg); 
@@ -1970,9 +1969,11 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
             border: 1px solid rgba(255, 255, 255, 0.1);
-            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
-            z-index: 5;
         }
+
+        /* Player page specific */
+        #logo-container { margin-bottom: 20px; text-align: center; }
+        #station-logo { max-height: 80px; max-width: 80%; object-fit: contain; display: inline-block; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
         #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease, box-shadow 0.3s ease; box-shadow: 0 5px 20px rgba(0,0,0,0.3); }
         #title { font-size: 1.5rem; font-weight: bold; margin: 0; min-height: 2.25rem; }
         #artist { font-size: 1rem; color: var(--subtext-color); margin: 5px 0 20px; min-height: 1.5rem; transition: color 1s ease-in-out; }
@@ -1981,96 +1982,76 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; transition: color 1s ease-in-out; }
         .footer a { color: var(--text-color); text-decoration: none; transition: color 1s ease-in-out; }
         
-        /* Desktop Chat */
-        .desktop-only { display: flex; }
-        #chat-bubble { position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; background-color: var(--accent-color); border-radius: 50%; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 15px rgba(0,0,0,0.4); transition: transform 0.2s ease; z-index: 101; }
-        #chat-bubble:hover { transform: scale(1.1); }
-        #chat-bubble svg { width: 32px; height: 32px; color: white; }
-        #chat-notification { position: absolute; top: 0; right: 0; width: 12px; height: 12px; background-color: #3b82f6; border-radius: 50%; border: 2px solid var(--accent-color); display: none; }
-        #chat-window { position: fixed; bottom: 90px; right: 20px; width: 380px; height: 550px; background: rgba(30, 30, 30, 0.6); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 15px; box-shadow: 0 5px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; overflow: hidden; transition: opacity 0.3s ease, transform 0.3s ease; transform-origin: bottom right; z-index: 100; }
-        #chat-window.open { display: flex; opacity: 1; transform: scale(1); }
-        #chat-window:not(.open) { opacity: 0; transform: scale(0.9); }
-        .chat-header { padding: 10px 15px; background-color: rgba(42, 42, 42, 0.5); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
-        .chat-header h3 { margin: 0; font-size: 1rem; }
-        .chat-header button { background: none; border: none; color: white; font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1; }
-        #chat-messages { flex-grow: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; }
-        .chat-message { max-width: 80%; padding: 8px 12px; border-radius: 18px; line-height: 1.4; word-wrap: break-word; }
-        .chat-message p { margin: 0; }
-        .chat-message .from { font-size: 0.75rem; font-weight: bold; margin-bottom: 2px; opacity: 0.8; }
-        .chat-message.me { background-color: #007bff; align-self: flex-end; border-bottom-right-radius: 4px; }
-        .chat-message.other { background-color: #3a3a3a; align-self: flex-start; border-bottom-left-radius: 4px; }
-        .chat-footer { padding: 10px; background-color: rgba(42, 42, 42, 0.5); flex-shrink: 0; }
-        #chat-footer-form { display: flex; gap: 10px; }
-        #nickname-input { width: 80px; background-color: #3a3a3a; border: 1px solid #555; border-radius: 5px; color: white; font-size: 0.8rem; padding: 5px; }
-        #message-input { flex-grow: 1; background-color: #3a3a3a; border: 1px solid #555; border-radius: 15px; color: white; padding: 8px 12px; font-size: 0.9rem; }
-        #send-btn { background: var(--accent-color); border: none; color: white; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+        /* Chat page specific */
+        .chat-container { display: flex; flex-direction: column; height: 85vh; max-height: 600px; padding: 0; }
+        .chat-header { padding: 15px; text-align: center; flex-shrink: 0; font-size: 1.2rem; font-weight: bold; }
+        #chat-messages { flex-grow: 1; overflow-y: auto; padding: 0 20px; display: flex; flex-direction: column; gap: 12px; }
+        .message { max-width: 80%; padding: 10px 15px; border-radius: 18px; line-height: 1.4; word-wrap: break-word; }
+        .message p { margin: 0; }
+        .message .from { font-size: 0.75rem; font-weight: bold; margin-bottom: 2px; opacity: 0.8; }
+        .message.self { background-color: #3B82F6; color: white; align-self: flex-end; border-bottom-right-radius: 4px; }
+        .message.other { background-color: #e5e5e5; color: black; align-self: flex-start; border-bottom-left-radius: 4px; }
+        .chat-input-area { flex-shrink: 0; padding: 15px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
+        #chat-form { display: flex; gap: 10px; align-items: center; }
+        #nickname-input { background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2); color: white; border-radius: 8px; padding: 8px; font-size: 0.9rem; width: 100px; }
+        #message-input { flex-grow: 1; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2); border-radius: 18px; color: white; padding: 8px 15px; font-size: 1rem; }
+        #send-btn { background: var(--accent-color); border: none; color: white; border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
         #send-btn svg { width: 20px; height: 20px; }
         
-        /* Mobile Chat */
-        .mobile-only { display: none; }
-        @media (max-width: 768px) {
-            body { justify-content: flex-start; padding-top: 5vh; }
-            .player-container { margin-bottom: 100px; }
-            .desktop-only { display: none !important; }
-            .mobile-only { display: flex; }
-            
-            #chat-drawer { position: fixed; bottom: 0; left: 0; right: 0; height: 100%; background: rgba(30, 30, 30, 0.6); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); flex-direction: column; transform: translateY(calc(100% - 70px)); touch-action: none; z-index: 100; border-top-left-radius: 20px; border-top-right-radius: 20px; box-shadow: 0 -5px 20px rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.1); }
-            #chat-drawer.transitioning { transition: transform 0.3s ease-out; }
-            #chat-drawer-header { padding: 10px 15px; text-align: center; flex-shrink: 0; cursor: grab; position: relative; border-bottom: 1px solid #333; background: var(--header-bg-color); transition: background 1s ease-in-out; border-top-left-radius: 20px; border-top-right-radius: 20px; background-color: rgba(42, 42, 42, 0.5); }
-            .grab-handle { width: 40px; height: 5px; background-color: #555; border-radius: 2.5px; margin: 0 auto 8px; }
-            #chat-drawer-header h3 { margin: 0; font-size: 0.9rem; }
-            #mobile-chat-notification { position: absolute; top: 18px; right: 20px; width: 10px; height: 10px; background-color: #3b82f6; border-radius: 50%; display: none; }
+        /* Slide hints */
+        .slide-hint { position: absolute; bottom: 20px; font-size: 0.8rem; color: var(--subtext-color); opacity: 0.7; }
+        
+        /* Desktop Chat Fallback */
+        @media (min-width: 769px) {
+            #player-page, #chat-page { transition: none !important; transform: none !important; position: static !important; }
+            #chat-page { display: none !important; }
+            .slide-hint { display: none !important; }
+            /* Show desktop chat bubble if needed, logic is omitted for this change */
         }
     </style>
 </head>
 <body>
-    <canvas id="bg-canvas" class="desktop-only"></canvas>
-    <div id="logo-container"></div>
-    <div class="player-container">
-        <img id="artwork" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art">
-        <h1 id="title">RadioHost.cloud</h1>
-        <h2 id="artist">Live Stream</h2>
-        <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
-        <div class="footer">
-            Powered by <a href="https://radiohost.cloud" target="_blank">RadioHost.cloud</a>
+    <canvas id="bg-canvas"></canvas>
+
+    <div id="player-page" class="page">
+        <div id="logo-container"></div>
+        <div class="content-container">
+            <img id="artwork" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art">
+            <h1 id="title">RadioHost.cloud</h1>
+            <h2 id="artist">Live Stream</h2>
+            <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
+            <div class="footer">
+                Powered by <a href="https://radiohost.cloud" target="_blank">RadioHost.cloud</a>
+            </div>
+        </div>
+        <div class="slide-hint">
+            slide up for more fun &#9650;
         </div>
     </div>
+
+    <div id="chat-page" class="page">
+        <div class="content-container chat-container">
+            <div class="chat-header">Chat z Zosią</div>
+            <div id="chat-messages"></div>
+            <div class="chat-input-area">
+                <form id="chat-form">
+                    <input id="nickname-input" type="text" placeholder="Nick" required maxlength="20">
+                    <input id="message-input" type="text" placeholder="Napisz wiadomość..." required autocomplete="off" maxlength="280">
+                    <button id="send-btn" type="submit" aria-label="Send">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                    </button>
+                </form>
+            </div>
+        </div>
+        <div class="slide-hint">
+            slide down for music &#9660;
+        </div>
+    </div>
+
     <audio id="audioPlayer" preload="none" crossOrigin="anonymous"></audio>
 
-    <div id="chat-bubble" class="desktop-only">
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.068.158 2.148.279 3.238.364.466.037.893.281 1.153.671L12 21l2.652-3.978c.26-.39.687-.634 1.153-.67 1.09-.086 2.17-.206 3.238-.365 1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>
-        <span id="chat-notification"></span>
-    </div>
-
-    <div id="chat-window" class="desktop-only">
-        <div class="chat-header">
-            <h3>Live Chat</h3>
-            <button id="close-chat-btn">&times;</button>
-        </div>
-        <div id="chat-messages"></div>
-        <div class="chat-footer">
-            <form id="chat-footer-form">
-                <input id="nickname-input" type="text" placeholder="Nick" required maxlength="20">
-                <input id="message-input" type="text" placeholder="Type a message..." required autocomplete="off" maxlength="280">
-                <button id="send-btn" type="submit" aria-label="Send">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
-                </button>
-            </form>
-        </div>
-    </div>
-
-    <div id="chat-drawer" class="mobile-only">
-        <div id="chat-drawer-header">
-            <div class="grab-handle"></div>
-            <h3>Live Chat</h3>
-            <span id="mobile-chat-notification"></span>
-        </div>
-        <div id="chat-drawer-content">
-            <!-- Content will be moved here from desktop chat elements -->
-        </div>
-    </div>
-
     <script>
+        const body = document.body;
         const playBtn = document.getElementById('playBtn');
         const audioPlayer = document.getElementById('audioPlayer');
         const titleEl = document.getElementById('title');
@@ -2080,18 +2061,18 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         const logoContainer = document.getElementById('logo-container');
         const stationLogo = document.createElement('img');
         stationLogo.id = 'station-logo';
-
-        const chatBubble = document.getElementById('chat-bubble');
-        const chatNotification = document.getElementById('chat-notification');
-        const chatWindow = document.getElementById('chat-window');
-        const closeChatBtn = document.getElementById('close-chat-btn');
-        let chatMessages, chatForm, nicknameInput, messageInput; // Defer initialization
-
+        const chatMessages = document.getElementById('chat-messages');
+        const chatForm = document.getElementById('chat-form');
+        const nicknameInput = document.getElementById('nickname-input');
+        const messageInput = document.getElementById('message-input');
+        
         let publicStreamUrl = '';
         let stationName = ${JSON.stringify(stationName || 'Live Stream')};
         let defaultLogoSrc = ${JSON.stringify(logoSrc || null)};
         let ws;
         let lastKnownTitle = '';
+        let touchStartY = 0;
+        let touchEndY = 0;
 
         const getProminentColors = (img) => {
             const canvas = document.createElement('canvas');
@@ -2141,7 +2122,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 rootEl.style.setProperty('--text-color', '#ffffff');
                 rootEl.style.setProperty('--subtext-color', '#a0a0a0');
                 rootEl.style.setProperty('--container-bg', 'rgba(0, 0, 0, 0.3)');
-                rootEl.style.setProperty('--header-bg-color', '#2a2a2a');
             };
 
             if (!imageUrl) {
@@ -2157,7 +2137,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 rootEl.style.setProperty('--text-color', textColor === 'white' ? '#ffffff' : '#000000');
                 rootEl.style.setProperty('--subtext-color', textColor === 'white' ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)');
                 rootEl.style.setProperty('--container-bg', textColor === 'white' ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)');
-                rootEl.style.setProperty('--header-bg-color', colors[0]);
             };
             img.onerror = () => {
                 console.warn('Failed to load image for dynamic background.');
@@ -2265,16 +2244,13 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         const addChatMessage = (msg) => {
             const isMe = nicknameInput && msg.from === nicknameInput.value;
             const msgDiv = document.createElement('div');
-            msgDiv.className = 'chat-message ' + (isMe ? 'me' : 'other');
+            msgDiv.className = 'message ' + (isMe ? 'self' : 'other');
             let content = '';
             if (!isMe) content += '<p class="from">' + escapeHtml(msg.from) + '</p>';
             content += '<p>' + escapeHtml(msg.text) + '</p>';
             msgDiv.innerHTML = content;
             if(chatMessages) {
                 chatMessages.appendChild(msgDiv);
-                // The previous logic for mobile scrolling was incorrect as flex-direction is not reversed.
-                // This ensures that for both desktop and mobile, the view scrolls to the newest message.
-                // A timeout of 0ms queues this to run after the current call stack, which includes DOM updates.
                 setTimeout(() => {
                     chatMessages.scrollTop = chatMessages.scrollHeight;
                 }, 0);
@@ -2297,130 +2273,10 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     if (data.payload.logoSrc) { defaultLogoSrc = data.payload.logoSrc; updateLogo(data.payload.logoSrc); }
                 } else if (data.type === 'chatMessage') {
                     addChatMessage(data.payload);
-                    if (window.innerWidth <= 768) {
-                        const drawer = document.getElementById('chat-drawer');
-                        const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
-                        if (currentTransform.m42 > 0) document.getElementById('mobile-chat-notification').style.display = 'block';
-                    } else if (!chatWindow.classList.contains('open')) {
-                        chatNotification.style.display = 'block';
-                    }
                 }
             };
             ws.onclose = () => setTimeout(connectWs, 5000);
         };
-        
-        if (window.innerWidth > 768) {
-            chatMessages = document.getElementById('chat-messages');
-            chatForm = document.getElementById('chat-footer-form');
-            nicknameInput = document.getElementById('nickname-input');
-            messageInput = document.getElementById('message-input');
-            chatBubble.addEventListener('click', () => { chatWindow.classList.toggle('open'); chatNotification.style.display = 'none'; if(chatWindow.classList.contains('open')) messageInput.focus(); });
-            closeChatBtn.addEventListener('click', () => { chatWindow.classList.remove('open'); });
-        } else {
-            // Mobile drawer logic
-            const drawer = document.getElementById('chat-drawer');
-            const drawerHeader = document.getElementById('chat-drawer-header');
-            const drawerContent = document.getElementById('chat-drawer-content');
-            const playerContainer = document.querySelector('.player-container');
-            
-            const desktopChatMessages = document.getElementById('chat-messages');
-            const desktopChatFooter = document.querySelector('.chat-footer');
-            if (desktopChatMessages) drawerContent.appendChild(desktopChatMessages);
-            if (desktopChatFooter) drawerContent.appendChild(desktopChatFooter);
-            const desktopChatWindow = document.getElementById('chat-window');
-            if (desktopChatWindow) desktopChatWindow.style.display = 'none';
-            
-            chatMessages = drawerContent.querySelector('#chat-messages');
-            chatForm = drawerContent.querySelector('#chat-footer-form');
-            nicknameInput = drawerContent.querySelector('#nickname-input');
-            messageInput = drawerContent.querySelector('#message-input');
-            const mobileChatNotification = document.getElementById('mobile-chat-notification');
-
-            let startY, startPos, isDragging = false;
-            let minPos = 0;
-            let maxPos = window.innerHeight - 70;
-            let isDrawerOpen = false;
-
-            const updateDrawerPositions = () => {
-                minPos = 0;
-                const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-                maxPos = viewportHeight - 70;
-            };
-            window.addEventListener('resize', updateDrawerPositions);
-            updateDrawerPositions();
-
-            const setDrawerPosition = (y, transitioning = false) => {
-                if(transitioning) drawer.classList.add('transitioning');
-                else drawer.classList.remove('transitioning');
-                drawer.style.transform = \`translateY(\${y}px)\`;
-                
-                const openRatio = 1 - (y / maxPos);
-                const clampedRatio = Math.max(0, Math.min(1, openRatio));
-                
-                const playerOpacity = 1 - clampedRatio;
-                const playerScale = 1 - (clampedRatio * 0.1);
-                const playerTranslateY = clampedRatio * -50;
-                
-                playerContainer.style.opacity = playerOpacity;
-                playerContainer.style.transform = \`translateY(\${playerTranslateY}px) scale(\${playerScale})\`;
-                logoContainer.style.opacity = playerOpacity;
-                logoContainer.style.transform = \`translateY(\${playerTranslateY}px) scale(\${playerScale})\`;
-            };
-
-            const openDrawer = () => { setDrawerPosition(minPos, true); isDrawerOpen = true; if (messageInput) messageInput.focus(); mobileChatNotification.style.display = 'none'; };
-            const closeDrawer = () => { setDrawerPosition(maxPos, true); isDrawerOpen = false; if (messageInput) messageInput.blur(); };
-            
-            // Keyboard fix
-            const visualViewport = window.visualViewport;
-            if (visualViewport) {
-                const handleViewportResize = () => {
-                    // Update layout variables first, based on the new visible height.
-                    updateDrawerPositions();
-                    drawer.style.height = \`\${visualViewport.height}px\`;
-
-                    // Now, re-apply the current state (open/closed) using the new layout values.
-                    // This ensures all related visuals (like player opacity) are also correctly updated.
-                    if (isDrawerOpen) {
-                        setDrawerPosition(minPos, false); // Resnap to open position
-                    } else {
-                        setDrawerPosition(maxPos, false); // Resnap to closed position
-                    }
-                };
-                visualViewport.addEventListener('resize', handleViewportResize);
-            }
-
-            drawerHeader.addEventListener('touchstart', e => {
-                isDragging = true;
-                startY = e.touches[0].clientY;
-                const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
-                startPos = currentTransform.m42;
-                drawer.classList.remove('transitioning');
-            });
-
-            document.body.addEventListener('touchmove', e => {
-                if (!isDragging) return;
-                const currentY = e.touches[0].clientY;
-                const deltaY = currentY - startY;
-                let newY = startPos + deltaY;
-                newY = Math.max(minPos, Math.min(maxPos, newY));
-                setDrawerPosition(newY);
-            });
-
-            document.body.addEventListener('touchend', e => {
-                if (!isDragging) return;
-                isDragging = false;
-                const currentTransform = new DOMMatrix(getComputedStyle(drawer).transform);
-                const currentY = currentTransform.m42;
-                const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-                if (isDrawerOpen) {
-                    if (currentY > viewportHeight * 0.3) closeDrawer();
-                    else openDrawer();
-                } else {
-                    if (currentY < viewportHeight * 0.7) openDrawer();
-                    else closeDrawer();
-                }
-            });
-        }
         
         if (nicknameInput) {
             nicknameInput.value = localStorage.getItem('chatNickname') || 'Listener' + Math.floor(Math.random() * 999);
@@ -2439,7 +2295,30 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             });
         }
         
-        // --- Audio Reactive Background ---
+        // Mobile Swipe Logic
+        document.addEventListener('touchstart', e => {
+            touchStartY = e.touches[0].clientY;
+        }, { passive: true });
+
+        document.addEventListener('touchend', e => {
+            touchEndY = e.changedTouches[0].clientY;
+            handleSwipe();
+        }, { passive: true });
+
+        const handleSwipe = () => {
+            const deltaY = touchStartY - touchEndY;
+            const swipeThreshold = 50; // Minimum pixels to trigger a swipe
+
+            if (window.innerWidth > 768) return;
+
+            if (deltaY > swipeThreshold) { // Swipe Up
+                body.classList.add('is-chat-active');
+            } else if (deltaY < -swipeThreshold) { // Swipe Down
+                body.classList.remove('is-chat-active');
+            }
+        };
+        
+        // --- Audio Reactive Background for Desktop ---
         if (window.innerWidth > 768) {
             const canvas = document.getElementById('bg-canvas');
             const ctx = canvas.getContext('2d');
@@ -2449,8 +2328,8 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             let audioContext, analyser, source;
             const ripples = [];
             let lastBeatTime = 0;
-            const beatThreshold = 0.25; // Adjusted sensitivity
-            const beatCooldown = 300; // ms
+            const beatThreshold = 0.25;
+            const beatCooldown = 300;
             
             function initAudioAnalysis() {
                 if (audioContext) return;
@@ -2468,26 +2347,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             }
             
             class Ripple {
-                constructor(x, y, color) {
-                    this.x = x;
-                    this.y = y;
-                    this.radius = 1;
-                    this.maxRadius = 150 + Math.random() * 100;
-                    this.life = 1;
-                    this.speed = Math.random() * 2 + 1;
-                    this.color = color;
-                }
-                update() {
-                    this.radius += this.speed;
-                    this.life -= 0.01;
-                }
-                draw() {
-                    ctx.beginPath();
-                    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
-                    ctx.strokeStyle = \`rgba(\${this.color}, \${this.life})\`;
-                    ctx.lineWidth = 2;
-                    ctx.stroke();
-                }
+                constructor(x, y, color) { this.x = x; this.y = y; this.radius = 1; this.maxRadius = 150 + Math.random() * 100; this.life = 1; this.speed = Math.random() * 2 + 1; this.color = color; }
+                update() { this.radius += this.speed; this.life -= 0.01; }
+                draw() { ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.strokeStyle = \`rgba(\${this.color}, \${this.life})\`; ctx.lineWidth = 2; ctx.stroke(); }
             }
 
             function detectBeat(dataArray) {
@@ -2502,37 +2364,23 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             function animate() {
                 requestAnimationFrame(animate);
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
-                
                 if (analyser) {
-                    const bufferLength = analyser.frequencyBinCount;
-                    const dataArray = new Uint8Array(bufferLength);
+                    const dataArray = new Uint8Array(analyser.frequencyBinCount);
                     analyser.getByteFrequencyData(dataArray);
-                    
                     if (detectBeat(dataArray)) {
                         const rippleColor = rootEl.style.getPropertyValue('--text-color') === '#ffffff' ? '255,255,255' : '0,0,0';
-                        const x = Math.random() * canvas.width;
-                        const y = Math.random() * canvas.height;
-                        if (ripples.length < 30) { // Limit number of ripples for performance
-                           ripples.push(new Ripple(x, y, rippleColor));
-                        }
+                        if (ripples.length < 30) ripples.push(new Ripple(Math.random() * canvas.width, Math.random() * canvas.height, rippleColor));
                     }
                 }
-                
                 for (let i = ripples.length - 1; i >= 0; i--) {
                     const r = ripples[i];
-                    r.update();
-                    r.draw();
-                    if (r.life <= 0) {
-                        ripples.splice(i, 1);
-                    }
+                    r.update(); r.draw();
+                    if (r.life <= 0) ripples.splice(i, 1);
                 }
             }
             
             playBtn.addEventListener('click', initAudioAnalysis, { once: true });
-            window.addEventListener('resize', () => {
-                canvas.width = window.innerWidth;
-                canvas.height = window.innerHeight;
-            });
+            window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; });
         }
 
         connectWs();
