@@ -1,4 +1,3 @@
-
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -497,6 +496,12 @@ let serverStreamStatus = 'inactive';
 let serverStreamError = null;
 let isEngineStarting = false;
 
+// --- NEW Audio Mixing State ---
+const audioSourceFeeders = new Map(); // key: 'playlist' or presenter email, value: ffmpeg process
+let currentLiveSource = 'playlist'; // 'playlist' or presenter email
+let studioCartwallFeeder = null;
+let mainMixerCommand = null;
+
 // --- Metadata Update Logic ---
 const findTrackAndPathInServerTree = (node, trackId, currentPath = []) => {
     const pathWithCurrentNode = [...currentPath, node];
@@ -611,6 +616,15 @@ const stopStreamingEngine = async (broadcast = true) => {
     currentFeederCommand = null;
     currentFeederTrackId = null;
 
+    killProcess(studioCartwallFeeder);
+    studioCartwallFeeder = null;
+
+    audioSourceFeeders.forEach(killProcess);
+    audioSourceFeeders.clear();
+
+    killProcess(mainMixerCommand);
+    mainMixerCommand = null;
+    
     killProcess(icecastStreamCommand);
     icecastStreamCommand = null;
     
@@ -640,7 +654,9 @@ const pausePlayout = async (broadcast = true) => {
     db.data.sharedPlayerState.trackProgress = 0;
 
     await db.write();
-    await updateIcecastMetadata(null);
+    if(currentLiveSource === 'playlist') {
+        await updateIcecastMetadata(null);
+    }
 
     if (broadcast) {
         broadcastState();
@@ -808,31 +824,49 @@ const startPlayoutForTrack = async (trackIndex) => {
     }
     
     killProcess(currentFeederCommand);
+    killProcess(mainMixerCommand);
     
     currentFeederTrackId = track.id;
 
     console.log(`[Playout] Starting feeder for track: "${track.title}"`);
     try {
-        const args = ['-i', trackPath, '-f', 's16le', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', '-loglevel', 'error', '-'];
-        const feeder = spawn('ffmpeg', args);
-        currentFeederCommand = feeder;
-
-        feeder.stdout.pipe(icecastStreamCommand.stdin, { end: false });
+        const feederArgs = ['-i', trackPath, '-f', 's16le', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', '-loglevel', 'error', '-'];
+        const feeder = spawn('ffmpeg', feederArgs);
+        audioSourceFeeders.set('playlist', feeder);
         
+        let mixerInputs = ['-i', 'pipe:0']; // Playlist feeder
+        let filterInputs = '[0:a]';
+        
+        if (studioCartwallFeeder && !studioCartwallFeeder.killed) {
+            mixerInputs.push('-i', 'pipe:3'); // Cartwall feeder (stdin fd=3)
+            filterInputs += '[1:a]';
+        }
+
+        const mixerArgs = [
+            ...mixerInputs,
+            '-filter_complex', `${filterInputs}amix=inputs=${mixerInputs.length / 2}:duration=first`,
+            '-f', 's16le', '-ar', '44100', '-ac', '2', '-'
+        ];
+
+        mainMixerCommand = spawn('ffmpeg', mixerArgs);
+        
+        feeder.stdout.pipe(mainMixerCommand.stdin);
+        if (studioCartwallFeeder && !studioCartwallFeeder.killed) {
+            studioCartwallFeeder.stdout.pipe(mainMixerCommand.stdio[3]);
+        }
+        mainMixerCommand.stdout.pipe(icecastStreamCommand.stdin, { end: false });
+
+        mainMixerCommand.stderr.on('data', (data) => console.error(`[FFMPEG Mixer Stderr] ${data.toString()}`));
         feeder.stderr.on('data', (data) => console.error(`[FFMPEG Feeder Stderr for ${track.title}] ${data.toString()}`));
+
         feeder.on('exit', (code, signal) => {
             if (signal !== 'SIGTERM' && currentFeederTrackId === track.id) {
                 console.log(`[FFMPEG] Feeder for '${track.title}' finished.`);
-                currentFeederCommand = null;
-                currentFeederTrackId = null;
+                audioSourceFeeders.delete('playlist');
                 if(db.data.sharedPlayerState.isPlaying) {
                    advanceTrack();
                 }
             }
-        });
-        feeder.stdout.on('error', (err) => {
-             console.error(`[FFMPEG] Feeder stdout pipe error for '${track.title}':`, err);
-             if(db.data.sharedPlayerState.isPlaying) advanceTrack();
         });
     } catch (e) {
         console.error('[FFMPEG] Failed to initialize feeder command:', e);
@@ -855,6 +889,7 @@ const startPlayoutEngine = async (startIndex) => {
     db.data.sharedPlayerState.currentPlayingItemId = sharedPlaylist[startIndex]?.id;
     db.data.sharedPlayerState.trackProgress = 0;
     playheadAnchorTime = Date.now();
+    currentLiveSource = 'playlist';
     
     try {
         await startStreamingEngine();
@@ -1317,8 +1352,53 @@ const createPeerConnection = (email) => {
     };
 
     pc.ontrack = (event) => {
-        console.log(`[WebRTC] Received audio track from ${email}.`);
-        // TODO: This is where we will pipe the audio track into the main FFmpeg mixer
+        const sourceEmail = email.startsWith('studio_cartwall') ? 'studio_cartwall' : email;
+        console.log(`[WebRTC] Received audio track from ${sourceEmail}. Setting up decoder.`);
+        
+        if (audioSourceFeeders.has(sourceEmail)) {
+            killProcess(audioSourceFeeders.get(sourceEmail));
+        }
+        
+        const sink = new wrtc.RTCAudioSink(event.track);
+
+        const args = [
+            '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', '-',
+            '-af', 'volume=2.0',
+            '-f', 's16le', '-ar', '44100', '-ac', '2', '-loglevel', 'error', '-'
+        ];
+        const feeder = spawn('ffmpeg', args);
+        
+        if (sourceEmail === 'studio_cartwall') {
+            studioCartwallFeeder = feeder;
+            // If playlist is already playing, restart it to include the new cartwall audio
+            if (db.data.sharedPlayerState.isPlaying && currentLiveSource === 'playlist') {
+                console.log('[Mixer] Studio cartwall connected, restarting playlist feeder to mix audio.');
+                startPlayoutForTrack(db.data.sharedPlayerState.currentTrackIndex);
+            }
+        } else {
+             audioSourceFeeders.set(sourceEmail, feeder);
+        }
+
+        sink.ondata = ({ samples }) => {
+            if (feeder && !feeder.killed) {
+                feeder.stdin.write(Buffer.from(samples.buffer));
+            }
+        };
+
+        feeder.stdin.on('error', (err) => {
+            if (err.code !== 'EPIPE') console.error(`[FFMPEG] Feeder stdin error for ${sourceEmail}:`, err);
+        });
+
+        feeder.on('exit', (code, signal) => {
+            console.log(`[FFMPEG] Feeder for ${sourceEmail} exited with code ${code}, signal ${signal}.`);
+            if (sourceEmail === 'studio_cartwall') studioCartwallFeeder = null;
+            else audioSourceFeeders.delete(sourceEmail);
+        });
+
+        sink.onstop = () => {
+            console.log(`[WebRTC] Audio sink for ${sourceEmail} stopped.`);
+            killProcess(feeder);
+        };
     };
 
     pc.onconnectionstatechange = () => {
@@ -1428,7 +1508,7 @@ wss.on('connection', async (ws, req) => {
                 
                 case 'webrtc-signal': {
                     const { target, payload } = data;
-                    if (target === 'server') {
+                    if (target === 'server' || target === 'studio' || target === 'studio_cartwall') {
                         let pc = peerConnections.get(email);
                         if (!pc) {
                             pc = createPeerConnection(email);
@@ -1471,6 +1551,34 @@ wss.on('connection', async (ws, req) => {
                         const { sharedPlaylist, sharedPlayerState } = db.data;
                 
                         switch (command) {
+                            case 'setPresenterOnAir': {
+                                const { presenterEmail, onAir } = payload;
+                                if (onAir) {
+                                    if (currentLiveSource !== 'playlist') {
+                                        const oldPresenterFeeder = audioSourceFeeders.get(currentLiveSource);
+                                        if (oldPresenterFeeder) oldPresenterFeeder.stdout.unpipe(icecastStreamCommand.stdin);
+                                    }
+                                    const newPresenterFeeder = audioSourceFeeders.get(presenterEmail);
+                                    if (newPresenterFeeder) {
+                                        if (db.data.sharedPlayerState.isPlaying) {
+                                            await pausePlayout(false);
+                                        }
+                                        newPresenterFeeder.stdout.pipe(icecastStreamCommand.stdin, { end: false });
+                                        currentLiveSource = presenterEmail;
+                                        console.log(`[Playout] Presenter ${presenterEmail} is now LIVE.`);
+                                        await updateIcecastMetadata({ title: "LIVE: " + (db.data.users.find(u => u.email === presenterEmail)?.nickname || "Presenter") });
+                                    }
+                                } else {
+                                    if (currentLiveSource === presenterEmail) {
+                                        const presenterFeeder = audioSourceFeeders.get(presenterEmail);
+                                        if (presenterFeeder) presenterFeeder.stdout.unpipe(icecastStreamCommand.stdin);
+                                        currentLiveSource = 'playlist';
+                                        console.log(`[Playout] Presenter ${presenterEmail} is now OFF AIR.`);
+                                        await startPlayoutEngine(sharedPlayerState.currentTrackIndex);
+                                    }
+                                }
+                                break;
+                            }
                             case 'renameItemInLibrary': {
                                 const { itemId, newName } = payload;
                                 if (!itemId || !newName) break;
@@ -1859,6 +1967,17 @@ wss.on('connection', async (ws, req) => {
     ws.on('close', () => {
         console.log(`[WebSocket] Client disconnected: ${email}`);
         clients.delete(email);
+        
+        const feeder = audioSourceFeeders.get(email);
+        if (feeder) {
+            killProcess(feeder);
+            audioSourceFeeders.delete(email);
+        }
+        if (email === studioUserEmail) {
+            killProcess(studioCartwallFeeder);
+            studioCartwallFeeder = null;
+        }
+
         if (presenterEmails.has(email)) {
             presenterEmails.delete(email);
             broadcastPresenterList();

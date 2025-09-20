@@ -174,6 +174,22 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         return pc;
     }, [isStudio, onStreamAvailable, onMixerChange, ws]);
     
+    // Effect to send studio cartwall stream to server
+    useEffect(() => {
+        if (isStudio && cartwallStream && ws) {
+            const pc = createPeerConnection('studio_cartwall');
+            cartwallStream.getTracks().forEach(track => pc.addTrack(track, cartwallStream));
+            pc.createOffer()
+                .then(offer => pc.setLocalDescription(offer))
+                .then(() => sendSignal('studio_cartwall', { sdp: pc.localDescription }));
+            
+            return () => {
+                pc.close();
+                peerConnectionsRef.current.delete('studio_cartwall');
+            };
+        }
+    }, [isStudio, cartwallStream, ws, createPeerConnection]);
+
     const handleMicToggle = async () => {
         if (micStatus === 'connecting' || !isSecureContext) return;
         const willBeLive = !isLive;
@@ -264,12 +280,25 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
     
     const handleRemoteOnAirToggle = (email: string) => {
         const sourceId: AudioSourceId = `remote_${email}`;
+        const isCurrentlyOnAir = mixerConfig[sourceId]?.sends.main.enabled || false;
+        const newOnAirStatus = !isCurrentlyOnAir;
+
+        if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'studio-command',
+                payload: {
+                    command: 'setPresenterOnAir',
+                    payload: { presenterEmail: email, onAir: newOnAirStatus }
+                }
+            }));
+        }
+
         onMixerChange((prevConfig) => {
             const presenterConfig = prevConfig[sourceId];
             if (!presenterConfig) return prevConfig;
 
             const newConfig = JSON.parse(JSON.stringify(prevConfig));
-            newConfig[sourceId].sends.main.enabled = !presenterConfig.sends.main.enabled;
+            newConfig[sourceId].sends.main.enabled = newOnAirStatus;
             return newConfig;
         });
     };
