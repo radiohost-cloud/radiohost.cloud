@@ -490,7 +490,6 @@ const PLAYBACK_TICK_RATE = 250; // ms
 let playheadAnchorTime = 0;
 
 let icecastStreamCommand = null;
-let currentFeederCommand = null;
 let currentFeederTrackId = null;
 let serverStreamStatus = 'inactive';
 let serverStreamError = null;
@@ -608,12 +607,88 @@ const broadcastStreamStatus = () => {
     }
 };
 
+const rebuildMainMixer = () => {
+    killProcess(mainMixerCommand);
+    mainMixerCommand = null;
+
+    if (!icecastStreamCommand || icecastStreamCommand.killed) {
+        console.warn('[Mixer] Cannot rebuild mixer, main stream is not running.');
+        return;
+    }
+
+    const stdioConfig = ['ignore', 'pipe', 'pipe']; // stdin (mixer doesn't use it), stdout, stderr
+    const mixerInputsArgs = [];
+    const filterInputs = [];
+    const sourceStreams = [];
+
+    const playlistFeeder = audioSourceFeeders.get('playlist');
+    if (currentLiveSource === 'playlist' && playlistFeeder && !playlistFeeder.killed) {
+        sourceStreams.push(playlistFeeder.stdout);
+    }
+
+    const presenterFeeder = audioSourceFeeders.get(currentLiveSource);
+    if (currentLiveSource !== 'playlist' && presenterFeeder && !presenterFeeder.killed) {
+        sourceStreams.push(presenterFeeder.stdout);
+    }
+    
+    if (studioCartwallFeeder && !studioCartwallFeeder.killed) {
+        sourceStreams.push(studioCartwallFeeder.stdout);
+    }
+
+    if (sourceStreams.length === 0) {
+        console.log('[Mixer] No active sources. Mixer will not be started.');
+        return;
+    }
+
+    sourceStreams.forEach((stream, index) => {
+        const pipeIndex = 3 + index;
+        mixerInputsArgs.push('-i', `pipe:${pipeIndex}`);
+        filterInputs.push(`[${index}:a]`);
+        stdioConfig.push('pipe');
+    });
+    
+    const filterComplexString = `${filterInputs.join('')}amix=inputs=${sourceStreams.length}:duration=first`;
+    
+    const mixerArgs = [
+        ...mixerInputsArgs,
+        '-filter_complex', filterComplexString,
+        '-f', 's16le', '-ar', '44100', '-ac', '2', '-loglevel', 'error', '-'
+    ];
+
+    console.log('[Mixer] Spawning main mixer with args:', mixerArgs.join(' '));
+
+    mainMixerCommand = spawn('ffmpeg', mixerArgs, { stdio: stdioConfig });
+    
+    mainMixerCommand.stderr.on('data', (data) => console.error(`[FFMPEG Mixer Stderr] ${data.toString()}`));
+    mainMixerCommand.stdout.pipe(icecastStreamCommand.stdin, { end: false });
+
+    mainMixerCommand.on('exit', (code, signal) => {
+        if (signal !== 'SIGTERM') {
+            console.error(`[FFMPEG Mixer] Mixer process exited unexpectedly. Code: ${code}, Signal: ${signal}`);
+        }
+    });
+
+    sourceStreams.forEach((sourceStream, index) => {
+        const mixerInputPipe = mainMixerCommand.stdio[3 + index];
+        if (mixerInputPipe) {
+            sourceStream.pipe(mixerInputPipe);
+            sourceStream.on('error', (err) => {
+                if (err.code !== 'EPIPE') {
+                    console.error(`[Mixer] Error on source stream ${index}:`, err);
+                }
+            });
+        } else {
+            console.error(`[Mixer] Error: Mixer input pipe at index ${3 + index} is not available.`);
+        }
+    });
+};
+
 const stopStreamingEngine = async (broadcast = true) => {
     if (playoutInterval) clearInterval(playoutInterval);
     playoutInterval = null;
 
-    killProcess(currentFeederCommand);
-    currentFeederCommand = null;
+    killProcess(audioSourceFeeders.get('playlist'));
+    audioSourceFeeders.delete('playlist');
     currentFeederTrackId = null;
 
     killProcess(studioCartwallFeeder);
@@ -646,9 +721,11 @@ const pausePlayout = async (broadcast = true) => {
     if (playoutInterval) clearInterval(playoutInterval);
     playoutInterval = null;
 
-    killProcess(currentFeederCommand);
-    currentFeederCommand = null;
+    killProcess(audioSourceFeeders.get('playlist'));
+    audioSourceFeeders.delete('playlist');
     currentFeederTrackId = null;
+
+    rebuildMainMixer();
 
     db.data.sharedPlayerState.isPlaying = false;
     db.data.sharedPlayerState.trackProgress = 0;
@@ -721,8 +798,8 @@ const startStreamingEngine = () => {
                     console.log('[Playout] Attempting to restart playout engine due to main stream error.');
                     if (playoutInterval) clearInterval(playoutInterval);
                     playoutInterval = null;
-                    killProcess(currentFeederCommand);
-                    currentFeederCommand = null;
+                    killProcess(audioSourceFeeders.get('playlist'));
+                    audioSourceFeeders.delete('playlist');
                     await startPlayoutEngine(db.data.sharedPlayerState.currentTrackIndex);
                 }
             } else {
@@ -792,7 +869,6 @@ const startPlayoutForTrack = async (trackIndex) => {
 
     if (!streamConfig || !streamConfig.isEnabled) {
         console.log(`[Playout] Streaming is disabled. Simulating playback for track: "${track.title}"`);
-        // Simulating playback end for non-streaming mode
         setTimeout(() => {
             if (currentFeederTrackId === track.id && db.data.sharedPlayerState.isPlaying) {
                 advanceTrack();
@@ -811,7 +887,7 @@ const startPlayoutForTrack = async (trackIndex) => {
             console.log('[Playout] Engine restarted successfully. Retrying feeder for the current track.');
         } catch (err) {
             console.error('[Playout] Critical error: Could not restart streaming engine. Advancing track to allow further recovery.', err);
-            advanceTrack(); // Fallback to old behavior on critical failure
+            advanceTrack();
             return;
         }
     }
@@ -823,8 +899,7 @@ const startPlayoutForTrack = async (trackIndex) => {
         return;
     }
     
-    killProcess(currentFeederCommand);
-    killProcess(mainMixerCommand);
+    killProcess(audioSourceFeeders.get('playlist'));
     
     currentFeederTrackId = track.id;
 
@@ -834,40 +909,19 @@ const startPlayoutForTrack = async (trackIndex) => {
         const feeder = spawn('ffmpeg', feederArgs);
         audioSourceFeeders.set('playlist', feeder);
         
-        let mixerInputs = ['-i', 'pipe:0']; // Playlist feeder
-        let filterInputs = '[0:a]';
-        
-        if (studioCartwallFeeder && !studioCartwallFeeder.killed) {
-            mixerInputs.push('-i', 'pipe:3'); // Cartwall feeder (stdin fd=3)
-            filterInputs += '[1:a]';
-        }
-
-        const mixerArgs = [
-            ...mixerInputs,
-            '-filter_complex', `${filterInputs}amix=inputs=${mixerInputs.length / 2}:duration=first`,
-            '-f', 's16le', '-ar', '44100', '-ac', '2', '-'
-        ];
-
-        mainMixerCommand = spawn('ffmpeg', mixerArgs);
-        
-        feeder.stdout.pipe(mainMixerCommand.stdin);
-        if (studioCartwallFeeder && !studioCartwallFeeder.killed) {
-            studioCartwallFeeder.stdout.pipe(mainMixerCommand.stdio[3]);
-        }
-        mainMixerCommand.stdout.pipe(icecastStreamCommand.stdin, { end: false });
-
-        mainMixerCommand.stderr.on('data', (data) => console.error(`[FFMPEG Mixer Stderr] ${data.toString()}`));
         feeder.stderr.on('data', (data) => console.error(`[FFMPEG Feeder Stderr for ${track.title}] ${data.toString()}`));
-
         feeder.on('exit', (code, signal) => {
+            audioSourceFeeders.delete('playlist');
             if (signal !== 'SIGTERM' && currentFeederTrackId === track.id) {
                 console.log(`[FFMPEG] Feeder for '${track.title}' finished.`);
-                audioSourceFeeders.delete('playlist');
                 if(db.data.sharedPlayerState.isPlaying) {
                    advanceTrack();
                 }
             }
         });
+        
+        rebuildMainMixer();
+
     } catch (e) {
         console.error('[FFMPEG] Failed to initialize feeder command:', e);
         if(db.data.sharedPlayerState.isPlaying) advanceTrack();
@@ -910,8 +964,8 @@ const startPlayoutEngine = async (startIndex) => {
 };
 
 const advanceTrack = async (jumpToIndex = -1) => {
-    killProcess(currentFeederCommand);
-    currentFeederCommand = null;
+    killProcess(audioSourceFeeders.get('playlist'));
+    audioSourceFeeders.delete('playlist');
     currentFeederTrackId = null;
 
     const { sharedPlayerState, sharedPlaylist } = db.data;
@@ -1370,11 +1424,7 @@ const createPeerConnection = (email) => {
         
         if (sourceEmail === 'studio_cartwall') {
             studioCartwallFeeder = feeder;
-            // If playlist is already playing, restart it to include the new cartwall audio
-            if (db.data.sharedPlayerState.isPlaying && currentLiveSource === 'playlist') {
-                console.log('[Mixer] Studio cartwall connected, restarting playlist feeder to mix audio.');
-                startPlayoutForTrack(db.data.sharedPlayerState.currentTrackIndex);
-            }
+            rebuildMainMixer();
         } else {
              audioSourceFeeders.set(sourceEmail, feeder);
         }
@@ -1391,8 +1441,12 @@ const createPeerConnection = (email) => {
 
         feeder.on('exit', (code, signal) => {
             console.log(`[FFMPEG] Feeder for ${sourceEmail} exited with code ${code}, signal ${signal}.`);
-            if (sourceEmail === 'studio_cartwall') studioCartwallFeeder = null;
-            else audioSourceFeeders.delete(sourceEmail);
+            if (sourceEmail === 'studio_cartwall') {
+                studioCartwallFeeder = null;
+                rebuildMainMixer();
+            } else {
+                audioSourceFeeders.delete(sourceEmail);
+            }
         });
 
         sink.onstop = () => {
@@ -1554,29 +1608,21 @@ wss.on('connection', async (ws, req) => {
                             case 'setPresenterOnAir': {
                                 const { presenterEmail, onAir } = payload;
                                 if (onAir) {
-                                    if (currentLiveSource !== 'playlist') {
-                                        const oldPresenterFeeder = audioSourceFeeders.get(currentLiveSource);
-                                        if (oldPresenterFeeder) oldPresenterFeeder.stdout.unpipe(icecastStreamCommand.stdin);
+                                    currentLiveSource = presenterEmail;
+                                    if (db.data.sharedPlayerState.isPlaying) {
+                                        await pausePlayout(false); // Pauses playlist, which will also rebuild mixer
+                                    } else {
+                                        rebuildMainMixer(); // Rebuild mixer with presenter as source
                                     }
-                                    const newPresenterFeeder = audioSourceFeeders.get(presenterEmail);
-                                    if (newPresenterFeeder) {
-                                        if (db.data.sharedPlayerState.isPlaying) {
-                                            await pausePlayout(false);
-                                        }
-                                        newPresenterFeeder.stdout.pipe(icecastStreamCommand.stdin, { end: false });
-                                        currentLiveSource = presenterEmail;
-                                        console.log(`[Playout] Presenter ${presenterEmail} is now LIVE.`);
-                                        await updateIcecastMetadata({ title: "LIVE: " + (db.data.users.find(u => u.email === presenterEmail)?.nickname || "Presenter") });
-                                    }
+                                    await updateIcecastMetadata({ title: "LIVE: " + (db.data.users.find(u => u.email === presenterEmail)?.nickname || "Presenter") });
                                 } else {
                                     if (currentLiveSource === presenterEmail) {
-                                        const presenterFeeder = audioSourceFeeders.get(presenterEmail);
-                                        if (presenterFeeder) presenterFeeder.stdout.unpipe(icecastStreamCommand.stdin);
                                         currentLiveSource = 'playlist';
-                                        console.log(`[Playout] Presenter ${presenterEmail} is now OFF AIR.`);
+                                        // Resume playlist playout
                                         await startPlayoutEngine(sharedPlayerState.currentTrackIndex);
                                     }
                                 }
+                                broadcastState();
                                 break;
                             }
                             case 'renameItemInLibrary': {
