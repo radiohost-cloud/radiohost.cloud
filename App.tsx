@@ -1,4 +1,5 @@
 
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -1826,7 +1827,7 @@ const AppInternal: React.FC = () => {
             artist: playoutPolicy.playoutMode === 'studio' ? 'Studio' : userNickname,
         };
 
-        const vtFile = new File([blob], `${voiceTrackWithArtist.title}.webm`, { type: 'audio/webm' });
+        const vtFile = new File([blob], `${voiceTrack.title}.webm`, { type: 'audio/webm' });
         return dataService.addTrack(voiceTrackWithArtist, vtFile, undefined, relativePath);
     }, [playoutPolicy.playoutMode]);
 
@@ -2038,6 +2039,7 @@ const AppInternal: React.FC = () => {
                 trackProgress={trackProgress}
                 isPlaying={isPlaying}
                 isSecureContext={isSecureContext}
+                cartwallPages={cartwallPages}
             />
         );
     }

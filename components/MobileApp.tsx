@@ -1,16 +1,19 @@
 
+
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { type User, type Track, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, type VtMixDetails, ChatMessage } from '../types';
+import { type User, type Track, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, type VtMixDetails, ChatMessage, CartwallPage, CartwallItem } from '../types';
 import RemoteStudio from './RemoteStudio';
 import MobileVoiceTrackRecorder from './MobileVoiceTrackRecorder';
 import { MusicNoteIcon } from './icons/MusicNoteIcon';
 import { MicrophoneIcon } from './icons/MicrophoneIcon';
 import { LogoutIcon } from './icons/LogoutIcon';
 import { LogoIcon } from './icons/LogoIcon';
-import { getArtworkUrl } from '../services/dataService';
+import { getArtworkUrl, getTrackSrc } from '../services/dataService';
 import VolumeMeter from './VolumeMeter';
 import MobileChat from './MobileChat';
 import { ChatIcon } from './icons/ChatIcon';
+import MobileCartwall from './MobileCartwall';
+import { GridIcon } from './icons/GridIcon';
 
 interface MobileAppProps {
     currentUser: User | null;
@@ -33,6 +36,7 @@ interface MobileAppProps {
     trackProgress: number;
     isPlaying: boolean;
     isSecureContext: boolean;
+    cartwallPages: CartwallPage[];
 }
 
 const MobilePlayer: React.FC<{ 
@@ -136,13 +140,14 @@ const BottomNavItem: React.FC<{
 const MobileApp: React.FC<MobileAppProps> = ({
     currentUser, onLogout, displayTrack, nextTrack, mixerConfig, onMixerChange, onStreamAvailable,
     ws, isStudio, incomingSignal, onlinePresenters, audioLevels, onInsertVoiceTrack, chatMessages,
-    onSendChatMessage, logoSrc, wsStatus, trackProgress, isPlaying, isSecureContext
+    onSendChatMessage, logoSrc, wsStatus, trackProgress, isPlaying, isSecureContext, cartwallPages
 }) => {
-    const [activeTab, setActiveTab] = useState<'player' | 'mic'>('player');
+    const [activeTab, setActiveTab] = useState<'player' | 'mic' | 'cartwall'>('player');
     const [isVtRecorderOpen, setIsVtRecorderOpen] = useState(false);
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [hasUnreadChat, setHasUnreadChat] = useState(false);
     const prevMessagesCount = useRef(chatMessages.length);
+    const [mobileCartwallStream, setMobileCartwallStream] = useState<MediaStream | null>(null);
 
     useEffect(() => {
         if (chatMessages.length > prevMessagesCount.current && !isChatOpen) {
@@ -200,6 +205,13 @@ const MobileApp: React.FC<MobileAppProps> = ({
                         mixerConfig={mixerConfig} onMixerChange={onMixerChange} onStreamAvailable={onStreamAvailable}
                         ws={ws} currentUser={currentUser} isStudio={isStudio} incomingSignal={incomingSignal}
                         onlinePresenters={onlinePresenters} audioLevels={audioLevels} isSecureContext={isSecureContext}
+                        cartwallStream={mobileCartwallStream}
+                    />
+                </div>
+                 <div className={`${activeTab === 'cartwall' ? 'block' : 'hidden'} h-full`}>
+                    <MobileCartwall
+                        pages={cartwallPages}
+                        onStreamReady={setMobileCartwallStream}
                     />
                 </div>
             </main>
@@ -217,6 +229,12 @@ const MobileApp: React.FC<MobileAppProps> = ({
                         icon={<MicrophoneIcon className="w-6 h-6"/>}
                         isActive={activeTab === 'mic'}
                         onClick={() => setActiveTab('mic')}
+                    />
+                     <BottomNavItem 
+                        label="Cartwall"
+                        icon={<GridIcon className="w-6 h-6"/>}
+                        isActive={activeTab === 'cartwall'}
+                        onClick={() => setActiveTab('cartwall')}
                     />
                      <BottomNavItem 
                         label="Chat"
