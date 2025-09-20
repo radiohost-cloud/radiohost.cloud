@@ -1987,7 +1987,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #artwork { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 15px; background-color: #333; object-fit: cover; margin-bottom: 20px; transition: transform 0.3s ease, box-shadow 0.3s ease; box-shadow: 0 5px 20px rgba(0,0,0,0.3); }
         #title { font-size: 1.5rem; font-weight: bold; margin: 0; min-height: 2.25rem; }
         #artist { font-size: 1rem; color: var(--subtext-color); margin: 5px 0 20px; min-height: 1.5rem; transition: color 1s ease-in-out; }
-        .play-button { background-color: var(--accent-color); color: white; border: none; border-radius: 50%; width: 60px; height: 60px; font-size: 2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; margin: 0 auto; transition: background-color 0.2s; }
+        .play-button { background-color: var(--accent-color); color: white; border: none; border-radius: 50%; width: 60px; height: 60px; cursor: pointer; display: flex; align-items: center; justify-content: center; margin: 0 auto; transition: background-color 0.2s; }
         .play-button:hover { background-color: #d03838; }
         .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; transition: color 1s ease-in-out; }
         .footer a { color: var(--text-color); text-decoration: none; transition: color 1s ease-in-out; }
@@ -2018,6 +2018,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 
         /* Desktop Chat Fallback */
         @media (min-width: 769px) {
+            @keyframes slide-in-up { from { transform: translateY(30px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+            @keyframes slide-in-up-br { from { transform: translateY(30px) scale(0.95); opacity: 0; } to { transform: translateY(0) scale(1); opacity: 1; } }
+
             .page { position: static !important; transform: none !important; }
             .slide-hint { display: none !important; }
 
@@ -2028,7 +2031,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 right: 2rem;
                 width: 4rem;
                 height: 4rem;
-                background-color: #2563EB;
+                background-color: #DC2626; /* red-600 */
                 color: white;
                 border-radius: 9999px;
                 box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.1);
@@ -2036,6 +2039,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 justify-content: center;
                 cursor: pointer;
                 transition: transform 0.2s;
+                z-index: 40;
             }
             #desktop-chat-bubble:hover { transform: scale(1.1); }
             #desktop-chat-bubble svg { width: 2rem; height: 2rem; }
@@ -2045,9 +2049,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 right: 0;
                 width: 1rem;
                 height: 1rem;
-                background-color: #EF4444;
+                background-color: #EF4444; /* red-500 */
                 border-radius: 9999px;
-                border: 2px solid #2563EB;
+                border: 2px solid #DC2626; /* red-600 */
                 display: none;
             }
             
@@ -2065,15 +2069,18 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             body.is-desktop-chat-active #chat-page {
                 opacity: 1;
                 pointer-events: auto;
+                align-items: flex-end;
+                justify-content: flex-end;
+                padding-right: 2rem;
+                padding-bottom: calc(2rem + 4rem + 0.5rem);
             }
             
             #chat-page .content-container {
                 max-width: 400px;
                 height: 80vh;
                 max-height: 700px;
-                animation: slide-in-up 0.3s ease-out;
+                animation: slide-in-up-br 0.3s ease-out;
             }
-             @keyframes slide-in-up { from { transform: translateY(30px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
         }
     </style>
 </head>
@@ -2086,7 +2093,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             <img id="artwork" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art">
             <h1 id="title">RadioHost.cloud</h1>
             <h2 id="artist">Live Stream</h2>
-            <button id="playBtn" class="play-button" aria-label="Play/Pause">&#9658;</button>
+            <button id="playBtn" class="play-button" aria-label="Play/Pause"></button>
             <div class="footer">
                 Powered by <a href="https://radiohost.cloud" target="_blank">RadioHost.cloud</a>
             </div>
@@ -2152,6 +2159,10 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         let lastKnownTitle = '';
         let touchStartY = 0;
         let touchEndY = 0;
+
+        const playIconSVG = \`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="30" height="30"><path d="M8 5v14l11-7z" /></svg>\`;
+        const pauseIconSVG = \`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="30" height="30"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>\`;
+        playBtn.innerHTML = playIconSVG;
 
         const getProminentColors = (img) => {
             const canvas = document.createElement('canvas');
@@ -2306,8 +2317,8 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             }
         });
         
-        audioPlayer.onplaying = () => { playBtn.innerHTML = '&#10074;&#10074;'; artworkEl.style.transform = 'scale(1.05)'; };
-        audioPlayer.onpause = () => { playBtn.innerHTML = '&#9658;'; artworkEl.style.transform = 'scale(1)'; };
+        audioPlayer.onplaying = () => { playBtn.innerHTML = pauseIconSVG; artworkEl.style.transform = 'scale(1.05)'; };
+        audioPlayer.onpause = () => { playBtn.innerHTML = playIconSVG; artworkEl.style.transform = 'scale(1)'; };
         
         if ('mediaSession' in navigator) {
             navigator.mediaSession.setActionHandler('play', () => playBtn.click());
