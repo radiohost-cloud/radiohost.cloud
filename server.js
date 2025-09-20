@@ -1,4 +1,3 @@
-
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -1956,9 +1955,10 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         }
         #chat-page { 
             transform: translateY(100%);
-            padding: 10px;
             padding-top: calc(10px + env(safe-area-inset-top));
             padding-bottom: calc(10px + env(safe-area-inset-bottom));
+            padding-left: 20px;
+            padding-right: 20px;
         }
         body.is-chat-active #player-page { transform: translateY(-100%); }
         body.is-chat-active #chat-page { transform: translateY(0); }
@@ -1976,6 +1976,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             border: 1px solid rgba(255, 255, 255, 0.1);
         }
         #chat-page .content-container {
+            max-width: none;
             height: 100%;
         }
 
@@ -2007,8 +2008,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #send-btn svg { width: 20px; height: 20px; }
         
         /* Slide hints */
-        .slide-hint { position: absolute; bottom: 20px; font-size: 0.8rem; color: var(--subtext-color); opacity: 0.7; }
-        
+        .slide-hint { position: absolute; bottom: 20px; font-size: 0.8rem; color: var(--subtext-color); opacity: 0.7; left: 0; right: 0; text-align: center; }
+        #chat-page .slide-hint { top: 20px; bottom: auto; }
+
         /* Desktop Chat Fallback */
         @media (min-width: 769px) {
             #player-page, #chat-page { transition: none !important; transform: none !important; position: static !important; }
