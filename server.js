@@ -1357,6 +1357,7 @@ wss.on('connection', async (ws, req) => {
                         timestamp: Date.now()
                     };
 
+                    // Send to studio
                     if (studioUserEmail) {
                         const studioWs = clients.get(studioUserEmail);
                         if (studioWs && studioWs.readyState === WebSocket.OPEN) {
@@ -1364,6 +1365,7 @@ wss.on('connection', async (ws, req) => {
                         }
                     }
 
+                    // Broadcast to all connected player pages (including the sender)
                     browserPlayerClients.forEach(clientWs => {
                         if (clientWs.readyState === WebSocket.OPEN) {
                             clientWs.send(JSON.stringify({ type: 'chatMessage', payload: listenerMessage }));
@@ -1989,7 +1991,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #artist { font-size: 1rem; color: var(--subtext-color); margin: 5px 0 20px; min-height: 1.5rem; transition: color 1s ease-in-out; }
         .play-button { background-color: var(--accent-color); color: white; border: none; border-radius: 50%; width: 60px; height: 60px; cursor: pointer; display: flex; align-items: center; justify-content: center; margin: 0 auto; transition: background-color 0.2s; }
         .play-button:hover { background-color: #d03838; }
-        .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; transition: color 1s ease-in-out; }
+        .footer { font-size: 0.75rem; color: var(--subtext-color); margin-top: 20px; transition: color 1s ease-in-out; text-align: center; }
         .footer a { color: var(--text-color); text-decoration: none; transition: color 1s ease-in-out; }
         
         /* Chat page specific */

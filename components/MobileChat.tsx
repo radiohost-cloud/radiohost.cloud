@@ -93,7 +93,7 @@ const MobileChat: React.FC<MobileChatProps> = ({ isOpen, onClose, messages, onSe
                         disabled={currentUser?.role === 'studio'}
                     />
                 </div>
-                <button onClick={onClose} className="p-2 rounded-full text-neutral-400 hover:bg-neutral-800">
+                <button onClick={onClose} className="p-2 rounded-full text-neutral-400 hover:bg-neutral-800 hidden">
                     <CloseIcon className="w-6 h-6" />
                 </button>
             </header>
