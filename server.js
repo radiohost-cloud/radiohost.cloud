@@ -1954,7 +1954,12 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             padding: 20px; box-sizing: border-box;
             transition: transform 0.4s cubic-bezier(0.25, 1, 0.5, 1);
         }
-        #chat-page { transform: translateY(100%); }
+        #chat-page { 
+            transform: translateY(100%);
+            padding: 10px;
+            padding-top: calc(10px + env(safe-area-inset-top));
+            padding-bottom: calc(10px + env(safe-area-inset-bottom));
+        }
         body.is-chat-active #player-page { transform: translateY(-100%); }
         body.is-chat-active #chat-page { transform: translateY(0); }
 
@@ -1970,6 +1975,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             -webkit-backdrop-filter: blur(20px);
             border: 1px solid rgba(255, 255, 255, 0.1);
         }
+        #chat-page .content-container {
+            height: 100%;
+        }
 
         /* Player page specific */
         #logo-container { margin-bottom: 20px; text-align: center; }
@@ -1983,7 +1991,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         .footer a { color: var(--text-color); text-decoration: none; transition: color 1s ease-in-out; }
         
         /* Chat page specific */
-        .chat-container { display: flex; flex-direction: column; height: 85vh; max-height: 600px; padding: 0; }
+        .chat-container { display: flex; flex-direction: column; height: 100%; padding: 0; }
         .chat-header { padding: 15px; text-align: center; flex-shrink: 0; font-size: 1.2rem; font-weight: bold; }
         #chat-messages { flex-grow: 1; overflow-y: auto; padding: 0 20px; display: flex; flex-direction: column; gap: 12px; }
         .message { max-width: 80%; padding: 10px 15px; border-radius: 18px; line-height: 1.4; word-wrap: break-word; }
@@ -1992,9 +2000,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         .message.self { background-color: #3B82F6; color: white; align-self: flex-end; border-bottom-right-radius: 4px; }
         .message.other { background-color: #e5e5e5; color: black; align-self: flex-start; border-bottom-left-radius: 4px; }
         .chat-input-area { flex-shrink: 0; padding: 15px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
-        #chat-form { display: flex; gap: 10px; align-items: center; }
-        #nickname-input { background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2); color: white; border-radius: 8px; padding: 8px; font-size: 0.9rem; width: 100px; }
-        #message-input { flex-grow: 1; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2); border-radius: 18px; color: white; padding: 8px 15px; font-size: 1rem; }
+        #chat-form { display: flex; gap: 10px; align-items: center; width: 100%; }
+        #nickname-input { background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2); color: white; border-radius: 8px; padding: 8px; font-size: 0.9rem; width: 80px; flex-shrink: 0; }
+        #message-input { flex-grow: 1; min-width: 0; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2); border-radius: 18px; color: white; padding: 8px 15px; font-size: 1rem; }
         #send-btn { background: var(--accent-color); border: none; color: white; border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
         #send-btn svg { width: 20px; height: 20px; }
         
@@ -2031,7 +2039,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
 
     <div id="chat-page" class="page">
         <div class="content-container chat-container">
-            <div class="chat-header">Chat z Zosią</div>
+            <div class="chat-header">Chat</div>
             <div id="chat-messages"></div>
             <div class="chat-input-area">
                 <form id="chat-form">
