@@ -510,7 +510,7 @@ const findTrackAndPathInServerTree = (node, trackId, currentPath = []) => {
             return pathWithCurrentNode;
         }
         if (child.type === 'folder') {
-            const foundPath = findTrackAndPathInServerTree(child, trackId, pathWithCurrentNode);
+            const foundPath = findTrackAndPathInServerTree(child, trackId, currentPathWithNode);
             if (foundPath) return foundPath;
         }
     }
@@ -650,7 +650,7 @@ const rebuildMainMixer = () => {
     });
     
     const totalInputs = 1 + sourceStreams.length;
-    const filterComplexString = `${filterInputs.join('')}amix=inputs=${totalInputs}:duration=first`;
+    const filterComplexString = `${filterInputs.join('')}amix=inputs=${totalInputs}:duration=longest`;
     
     const mixerArgs = [
         ...mixerInputsArgs,
@@ -1438,16 +1438,16 @@ const setupScheduler = () => {
 // --- NEW: WebRTC Handling ---
 const peerConnections = new Map();
 
-const createPeerConnection = (email) => {
+const createPeerConnection = (peerIdentifier) => {
     const pc = new RTCPeerConnection();
     
     pc.onicecandidate = (event) => {
         if (event.candidate) {
-            const clientWs = clients.get(email);
+            const clientWs = clients.get(peerIdentifier);
             if (clientWs && clientWs.readyState === WebSocket.OPEN) {
                 clientWs.send(JSON.stringify({
                     type: 'webrtc-signal',
-                    target: email,
+                    target: peerIdentifier,
                     sender: 'server',
                     payload: { candidate: event.candidate }
                 }));
@@ -1456,10 +1456,10 @@ const createPeerConnection = (email) => {
     };
 
     pc.ontrack = (event) => {
-        const sourceEmail = email.startsWith('studio_cartwall') ? 'studio_cartwall' : email;
-        console.log(`[WebRTC] Received audio track from ${sourceEmail}. Setting up decoder.`);
+        console.log(`[WebRTC] Received audio track from ${peerIdentifier}. Setting up decoder.`);
         
-        const existingFeeder = (sourceEmail === 'studio_cartwall') ? studioCartwallFeeder : audioSourceFeeders.get(sourceEmail);
+        const isCartwall = peerIdentifier === 'studio_cartwall';
+        const existingFeeder = isCartwall ? studioCartwallFeeder : audioSourceFeeders.get(peerIdentifier);
         if (existingFeeder) {
             killProcess(existingFeeder.process);
         }
@@ -1476,17 +1476,17 @@ const createPeerConnection = (email) => {
 
         feeder.stdout.pipe(passthrough);
         feeder.stdout.on('error', (err) => {
-            if (err.code !== 'EPIPE') { console.error(`[Feeder stdout] Error for remote source '${sourceEmail}':`, err); }
+            if (err.code !== 'EPIPE') { console.error(`[Feeder stdout] Error for remote source '${peerIdentifier}':`, err); }
         });
         
         feeder.on('error', (err) => {
-            console.error(`[FFMPEG Feeder] Process spawn error for remote source '${sourceEmail}':`, err);
+            console.error(`[FFMPEG Feeder] Process spawn error for remote source '${peerIdentifier}':`, err);
         });
 
-        if (sourceEmail === 'studio_cartwall') {
+        if (isCartwall) {
             studioCartwallFeeder = { process: feeder, stream: passthrough };
         } else {
-             audioSourceFeeders.set(sourceEmail, { process: feeder, stream: passthrough });
+             audioSourceFeeders.set(peerIdentifier, { process: feeder, stream: passthrough });
         }
         rebuildMainMixer();
 
@@ -1497,34 +1497,34 @@ const createPeerConnection = (email) => {
         };
 
         feeder.stdin.on('error', (err) => {
-            if (err.code !== 'EPIPE') console.error(`[FFMPEG] Feeder stdin error for ${sourceEmail}:`, err);
+            if (err.code !== 'EPIPE') console.error(`[FFMPEG] Feeder stdin error for ${peerIdentifier}:`, err);
         });
 
         feeder.on('exit', (code, signal) => {
-            console.log(`[FFMPEG] Feeder for ${sourceEmail} exited with code ${code}, signal ${signal}.`);
-            if (sourceEmail === 'studio_cartwall') {
+            console.log(`[FFMPEG] Feeder for ${peerIdentifier} exited with code ${code}, signal ${signal}.`);
+            if (isCartwall) {
                 if (studioCartwallFeeder?.process === feeder) studioCartwallFeeder = null;
             } else {
-                if (audioSourceFeeders.get(sourceEmail)?.process === feeder) audioSourceFeeders.delete(sourceEmail);
+                if (audioSourceFeeders.get(peerIdentifier)?.process === feeder) audioSourceFeeders.delete(peerIdentifier);
             }
             rebuildMainMixer();
         });
 
         sink.onstop = () => {
-            console.log(`[WebRTC] Audio sink for ${sourceEmail} stopped.`);
+            console.log(`[WebRTC] Audio sink for ${peerIdentifier} stopped.`);
             killProcess(feeder);
         };
     };
 
     pc.onconnectionstatechange = () => {
-        console.log(`[WebRTC] Connection state for ${email} changed to: ${pc.connectionState}`);
+        console.log(`[WebRTC] Connection state for ${peerIdentifier} changed to: ${pc.connectionState}`);
         if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
             pc.close();
-            peerConnections.delete(email);
+            peerConnections.delete(peerIdentifier);
         }
     };
     
-    peerConnections.set(email, pc);
+    peerConnections.set(peerIdentifier, pc);
     return pc;
 };
 
@@ -1623,10 +1623,22 @@ wss.on('connection', async (ws, req) => {
                 
                 case 'webrtc-signal': {
                     const { target, payload } = data;
-                    if (target === 'server' || target === 'studio' || target === 'studio_cartwall') {
-                        let pc = peerConnections.get(email);
+                    const targetClient = clients.get(target);
+
+                    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+                        // This is a signal to be relayed to another client (e.g., server to presenter)
+                        targetClient.send(JSON.stringify({
+                            type: 'webrtc-signal',
+                            payload: payload,
+                            sender: email
+                        }));
+                    } else {
+                        // This is a signal for the server itself (e.g., presenter to server)
+                        const peerIdentifier = (target === 'studio_cartwall') ? 'studio_cartwall' : email;
+                        
+                        let pc = peerConnections.get(peerIdentifier);
                         if (!pc) {
-                            pc = createPeerConnection(email);
+                            pc = createPeerConnection(peerIdentifier);
                         }
 
                         if (payload.sdp) {
@@ -1636,23 +1648,13 @@ wss.on('connection', async (ws, req) => {
                                 await pc.setLocalDescription(answer);
                                 ws.send(JSON.stringify({
                                     type: 'webrtc-signal',
-                                    target: email,
                                     sender: 'server',
+                                    target: email,
                                     payload: { sdp: answer }
                                 }));
                             }
                         } else if (payload.candidate) {
                             await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
-                        }
-                    } else {
-                        // Relay to another client (presenter-to-studio, etc.)
-                        const targetClient = clients.get(target);
-                        if (targetClient && targetClient.readyState === ws.OPEN) {
-                            targetClient.send(JSON.stringify({
-                                type: 'webrtc-signal',
-                                payload: data.payload,
-                                sender: email
-                            }));
                         }
                     }
                     break;

@@ -132,9 +132,11 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         };
     }, []);
     
-    const sendSignal = (target: string, payload: any) => {
-        ws?.send(JSON.stringify({ type: 'webrtc-signal', target, payload }));
-    };
+    const sendSignal = useCallback((target: string, payload: any) => {
+        if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'webrtc-signal', target, payload }));
+        }
+    }, [ws]);
 
     const createPeerConnection = useCallback((remoteUserEmail: string): RTCPeerConnection => {
         const pc = new RTCPeerConnection();
@@ -172,23 +174,41 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
 
         peerConnectionsRef.current.set(remoteUserEmail, pc);
         return pc;
-    }, [isStudio, onStreamAvailable, onMixerChange, ws]);
+    }, [isStudio, onStreamAvailable, onMixerChange, sendSignal]);
     
-    // Effect to send studio cartwall stream to server
     useEffect(() => {
-        if (isStudio && cartwallStream && ws) {
-            const pc = createPeerConnection('studio_cartwall');
-            cartwallStream.getTracks().forEach(track => pc.addTrack(track, cartwallStream));
-            pc.createOffer()
-                .then(offer => pc.setLocalDescription(offer))
-                .then(() => sendSignal('studio_cartwall', { sdp: pc.localDescription }));
-            
-            return () => {
-                pc.close();
-                peerConnectionsRef.current.delete('studio_cartwall');
-            };
+        if (!isStudio || !cartwallStream || !ws) {
+            return;
         }
-    }, [isStudio, cartwallStream, ws, createPeerConnection]);
+    
+        const peerId = 'studio_cartwall';
+        if (peerConnectionsRef.current.has(peerId)) {
+            return;
+        }
+    
+        console.log('[WebRTC] Studio cartwall stream available. Creating peer connection to server.');
+        
+        const pc = createPeerConnection(peerId);
+    
+        cartwallStream.getAudioTracks().forEach(track => {
+            pc.addTrack(track, cartwallStream);
+        });
+    
+        pc.createOffer()
+            .then(offer => pc.setLocalDescription(offer))
+            .then(() => {
+                if (pc.localDescription) {
+                    sendSignal(peerId, { sdp: pc.localDescription });
+                }
+            })
+            .catch(e => console.error('[WebRTC] Error creating offer for cartwall stream:', e));
+    
+        return () => {
+            console.log('[WebRTC] Cleaning up studio cartwall peer connection.');
+            pc.close();
+            peerConnectionsRef.current.delete(peerId);
+        };
+    }, [isStudio, cartwallStream, ws, createPeerConnection, sendSignal]);
 
     const handleMicToggle = async () => {
         if (micStatus === 'connecting' || !isSecureContext) return;
@@ -251,7 +271,7 @@ const RemoteStudio = forwardRef<RemoteStudioRef, RemoteStudioProps>((props, ref)
         } else if (payload.candidate) {
             pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
         }
-    }, [incomingSignal, ws, createPeerConnection]);
+    }, [incomingSignal, ws, createPeerConnection, sendSignal]);
 
 
     const handleDeviceSelectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
