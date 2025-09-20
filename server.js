@@ -1,3 +1,4 @@
+
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -1993,7 +1994,8 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         
         /* Chat page specific */
         .chat-container { display: flex; flex-direction: column; height: 100%; padding: 0; }
-        .chat-header { padding: 15px; text-align: center; flex-shrink: 0; font-size: 1.2rem; font-weight: bold; }
+        .chat-header { padding: 15px; text-align: center; flex-shrink: 0; font-size: 1.2rem; font-weight: bold; position: relative; }
+        #close-chat-btn { position: absolute; right: 15px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-color); font-size: 1.5rem; cursor: pointer; }
         #chat-messages { flex-grow: 1; overflow-y: auto; padding: 0 20px; display: flex; flex-direction: column; gap: 12px; }
         .message { max-width: 80%; padding: 10px 15px; border-radius: 18px; line-height: 1.4; word-wrap: break-word; }
         .message p { margin: 0; }
@@ -2012,12 +2014,66 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         #player-page .slide-hint { bottom: 20px; }
         #chat-page .slide-hint { top: calc(15px + env(safe-area-inset-top)); bottom: auto; }
 
+        #desktop-chat-bubble { display: none; }
+
         /* Desktop Chat Fallback */
         @media (min-width: 769px) {
-            #player-page, #chat-page { transition: none !important; transform: none !important; position: static !important; }
-            #chat-page { display: none !important; }
+            .page { position: static !important; transform: none !important; }
             .slide-hint { display: none !important; }
-            /* Show desktop chat bubble if needed, logic is omitted for this change */
+
+            #desktop-chat-bubble {
+                display: flex;
+                position: fixed;
+                bottom: 2rem;
+                right: 2rem;
+                width: 4rem;
+                height: 4rem;
+                background-color: #2563EB;
+                color: white;
+                border-radius: 9999px;
+                box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.1);
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+                transition: transform 0.2s;
+            }
+            #desktop-chat-bubble:hover { transform: scale(1.1); }
+            #desktop-chat-bubble svg { width: 2rem; height: 2rem; }
+            #chat-notification-dot {
+                position: absolute;
+                top: 0;
+                right: 0;
+                width: 1rem;
+                height: 1rem;
+                background-color: #EF4444;
+                border-radius: 9999px;
+                border: 2px solid #2563EB;
+                display: none;
+            }
+            
+            #chat-page {
+                position: fixed !important;
+                background: rgba(0,0,0,0.5);
+                backdrop-filter: blur(8px);
+                -webkit-backdrop-filter: blur(8px);
+                z-index: 50;
+                opacity: 0;
+                pointer-events: none;
+                transition: opacity 0.3s ease;
+                padding: 0;
+            }
+            body.is-desktop-chat-active #chat-page {
+                opacity: 1;
+                pointer-events: auto;
+            }
+            
+            #chat-page .content-container {
+                max-width: 400px;
+                height: 80vh;
+                max-height: 700px;
+                animation: slide-in-up 0.3s ease-out;
+            }
+             @keyframes slide-in-up { from { transform: translateY(30px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
         }
     </style>
 </head>
@@ -2045,7 +2101,10 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             slide down for music &#9660;
         </div>
         <div class="content-container chat-container">
-            <div class="chat-header">Chat</div>
+            <div class="chat-header">
+                Chat
+                <button id="close-chat-btn" aria-label="Close chat">&times;</button>
+            </div>
             <div id="chat-messages"></div>
             <div class="chat-input-area">
                 <form id="chat-form">
@@ -2058,6 +2117,11 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
             </div>
         </div>
     </div>
+    
+    <button id="desktop-chat-bubble" title="Open Listener Chat">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.068.158 2.148.279 3.238.364.466.037.893.281 1.153.671L12 21l2.652-3.978c.26-.39.687-.634 1.153-.67 1.09-.086 2.17-.206 3.238-.365 1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>
+        <span id="chat-notification-dot"></span>
+    </button>
 
     <audio id="audioPlayer" preload="none" crossOrigin="anonymous"></audio>
 
@@ -2076,6 +2140,10 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         const chatForm = document.getElementById('chat-form');
         const nicknameInput = document.getElementById('nickname-input');
         const messageInput = document.getElementById('message-input');
+        const desktopChatBubble = document.getElementById('desktop-chat-bubble');
+        const chatNotificationDot = document.getElementById('chat-notification-dot');
+        const chatPage = document.getElementById('chat-page');
+        const closeChatBtn = document.getElementById('close-chat-btn');
         
         let publicStreamUrl = '';
         let stationName = ${JSON.stringify(stationName || 'Live Stream')};
@@ -2284,6 +2352,9 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                     if (data.payload.logoSrc) { defaultLogoSrc = data.payload.logoSrc; updateLogo(data.payload.logoSrc); }
                 } else if (data.type === 'chatMessage') {
                     addChatMessage(data.payload);
+                    if (!body.classList.contains('is-desktop-chat-active')) {
+                        chatNotificationDot.style.display = 'block';
+                    }
                 }
             };
             ws.onclose = () => setTimeout(connectWs, 5000);
@@ -2307,27 +2378,31 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         }
         
         // Mobile Swipe Logic
-        document.addEventListener('touchstart', e => {
-            touchStartY = e.touches[0].clientY;
-        }, { passive: true });
-
-        document.addEventListener('touchend', e => {
-            touchEndY = e.changedTouches[0].clientY;
-            handleSwipe();
-        }, { passive: true });
-
+        document.addEventListener('touchstart', e => { touchStartY = e.touches[0].clientY; }, { passive: true });
+        document.addEventListener('touchend', e => { touchEndY = e.changedTouches[0].clientY; handleSwipe(); }, { passive: true });
         const handleSwipe = () => {
-            const deltaY = touchStartY - touchEndY;
-            const swipeThreshold = 50; // Minimum pixels to trigger a swipe
-
             if (window.innerWidth > 768) return;
-
-            if (deltaY > swipeThreshold) { // Swipe Up
-                body.classList.add('is-chat-active');
-            } else if (deltaY < -swipeThreshold) { // Swipe Down
-                body.classList.remove('is-chat-active');
-            }
+            const deltaY = touchStartY - touchEndY;
+            const swipeThreshold = 50;
+            if (deltaY > swipeThreshold) { body.classList.add('is-chat-active'); }
+            else if (deltaY < -swipeThreshold) { body.classList.remove('is-chat-active'); }
         };
+
+        // Desktop Chat Modal Logic
+        if (desktopChatBubble) {
+            desktopChatBubble.addEventListener('click', () => {
+                body.classList.add('is-desktop-chat-active');
+                chatNotificationDot.style.display = 'none';
+            });
+        }
+        if (closeChatBtn) {
+            closeChatBtn.addEventListener('click', () => body.classList.remove('is-desktop-chat-active'));
+        }
+        if (chatPage) {
+            chatPage.addEventListener('click', (e) => {
+                if (e.target === chatPage) body.classList.remove('is-desktop-chat-active');
+            });
+        }
         
         // --- Audio Reactive Background for Desktop ---
         if (window.innerWidth > 768) {

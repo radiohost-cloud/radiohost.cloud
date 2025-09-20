@@ -449,7 +449,6 @@ const AppInternal: React.FC = () => {
     // --- NEW: Chat State ---
     const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
     const [hasUnreadChat, setHasUnreadChat] = useState(false);
-    const [isDesktopChatOpen, setIsDesktopChatOpen] = useState(false);
     
     // --- NEW: Server Stream Status State ---
     const [serverStreamStatus, setServerStreamStatus] = useState<string>('inactive');
@@ -2207,30 +2206,6 @@ const AppInternal: React.FC = () => {
                     </div>
                 </main>
             </>
-             {!isMobile && isStudio && (
-                <>
-                    <button
-                        onClick={() => {
-                            setIsDesktopChatOpen(true);
-                            setHasUnreadChat(false);
-                        }}
-                        className="fixed bottom-8 right-8 z-40 h-16 w-16 bg-blue-600 text-white rounded-full shadow-lg hover:bg-blue-700 active:scale-95 transition-all flex items-center justify-center"
-                        title="Open Listener Chat"
-                    >
-                        <ChatIcon className="w-8 h-8" />
-                        {hasUnreadChat && (
-                            <span className="absolute top-0 right-0 block h-4 w-4 rounded-full bg-red-500 ring-2 ring-blue-600" />
-                        )}
-                    </button>
-                    <MobileChat
-                        isOpen={isDesktopChatOpen}
-                        onClose={() => setIsDesktopChatOpen(false)}
-                        messages={chatMessages}
-                        onSendMessage={handleSendChatMessage}
-                        currentUser={currentUser}
-                    />
-                </>
-            )}
              <MetadataSettingsModal
                 folder={editingMetadataFolder}
                 onClose={() => setEditingMetadataFolder(null)}
