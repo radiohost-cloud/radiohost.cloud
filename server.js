@@ -13,6 +13,7 @@ import NodeID3 from 'node-id3';
 import ffmpeg from 'fluent-ffmpeg';
 import { spawn } from 'child_process';
 import wrtc from '@roamhq/wrtc';
+import { PassThrough } from 'stream';
 const { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } = wrtc;
 
 // --- Basic Setup ---
@@ -496,9 +497,9 @@ let serverStreamError = null;
 let isEngineStarting = false;
 
 // --- NEW Audio Mixing State ---
-const audioSourceFeeders = new Map(); // key: 'playlist' or presenter email, value: ffmpeg process
+const audioSourceFeeders = new Map(); // key: 'playlist' or presenter email, value: { process, stream }
 let currentLiveSource = 'playlist'; // 'playlist' or presenter email
-let studioCartwallFeeder = null;
+let studioCartwallFeeder = null; // Will store { process, stream }
 let mainMixerCommand = null;
 
 // --- Metadata Update Logic ---
@@ -616,23 +617,23 @@ const rebuildMainMixer = () => {
         return;
     }
 
-    const stdioConfig = ['ignore', 'pipe', 'pipe']; // stdin (mixer doesn't use it), stdout, stderr
+    const stdioConfig = ['ignore', 'pipe', 'pipe']; // 0: stdin, 1: stdout, 2: stderr
     const mixerInputsArgs = [];
     const filterInputs = [];
     const sourceStreams = [];
 
-    const playlistFeeder = audioSourceFeeders.get('playlist');
-    if (currentLiveSource === 'playlist' && playlistFeeder && !playlistFeeder.killed) {
-        sourceStreams.push(playlistFeeder.stdout);
+    const playlistFeederData = audioSourceFeeders.get('playlist');
+    if (currentLiveSource === 'playlist' && playlistFeederData && !playlistFeederData.process.killed) {
+        sourceStreams.push(playlistFeederData.stream);
     }
 
-    const presenterFeeder = audioSourceFeeders.get(currentLiveSource);
-    if (currentLiveSource !== 'playlist' && presenterFeeder && !presenterFeeder.killed) {
-        sourceStreams.push(presenterFeeder.stdout);
+    const presenterFeederData = audioSourceFeeders.get(currentLiveSource);
+    if (currentLiveSource !== 'playlist' && presenterFeederData && !presenterFeederData.process.killed) {
+        sourceStreams.push(presenterFeederData.stream);
     }
     
-    if (studioCartwallFeeder && !studioCartwallFeeder.killed) {
-        sourceStreams.push(studioCartwallFeeder.stdout);
+    if (studioCartwallFeeder && !studioCartwallFeeder.process.killed) {
+        sourceStreams.push(studioCartwallFeeder.stream);
     }
 
     if (sourceStreams.length === 0) {
@@ -644,7 +645,7 @@ const rebuildMainMixer = () => {
         const pipeIndex = 3 + index;
         mixerInputsArgs.push('-i', `pipe:${pipeIndex}`);
         filterInputs.push(`[${index}:a]`);
-        stdioConfig.push('pipe');
+        stdioConfig.push('pipe'); // Request a pipe for this file descriptor
     });
     
     const filterComplexString = `${filterInputs.join('')}amix=inputs=${sourceStreams.length}:duration=first`;
@@ -665,6 +666,12 @@ const rebuildMainMixer = () => {
     });
     mainMixerCommand.stderr.on('data', (data) => console.error(`[FFMPEG Mixer Stderr] ${data.toString()}`));
     mainMixerCommand.stdout.pipe(icecastStreamCommand.stdin, { end: false });
+    mainMixerCommand.stdout.on('error', (err) => {
+        if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
+            console.error('[FFMPEG Mixer] stdout error:', err);
+        }
+    });
+
 
     mainMixerCommand.on('exit', (code, signal) => {
         if (signal !== 'SIGTERM') {
@@ -675,13 +682,8 @@ const rebuildMainMixer = () => {
     sourceStreams.forEach((sourceStream, index) => {
         const mixerInputPipe = mainMixerCommand.stdio[3 + index];
         if (mixerInputPipe) {
-            sourceStream.unpipe(); // Ensure no old pipes are attached
             sourceStream.pipe(mixerInputPipe, { end: false });
-            sourceStream.on('error', (err) => {
-                if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
-                     console.error(`[Mixer] Error on source stream (feeder stdout) for input ${index}:`, err);
-                }
-            });
+            
             mixerInputPipe.on('error', (err) => {
                 if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
                     console.error(`[Mixer] Error on mixer input pipe ${index}:`, err);
@@ -697,14 +699,14 @@ const stopStreamingEngine = async (broadcast = true) => {
     if (playoutInterval) clearInterval(playoutInterval);
     playoutInterval = null;
 
-    killProcess(audioSourceFeeders.get('playlist'));
+    killProcess(audioSourceFeeders.get('playlist')?.process);
     audioSourceFeeders.delete('playlist');
     currentFeederTrackId = null;
 
-    killProcess(studioCartwallFeeder);
+    killProcess(studioCartwallFeeder?.process);
     studioCartwallFeeder = null;
 
-    audioSourceFeeders.forEach(killProcess);
+    audioSourceFeeders.forEach(feederData => killProcess(feederData.process));
     audioSourceFeeders.clear();
 
     killProcess(mainMixerCommand);
@@ -731,7 +733,7 @@ const pausePlayout = async (broadcast = true) => {
     if (playoutInterval) clearInterval(playoutInterval);
     playoutInterval = null;
 
-    killProcess(audioSourceFeeders.get('playlist'));
+    killProcess(audioSourceFeeders.get('playlist')?.process);
     audioSourceFeeders.delete('playlist');
     currentFeederTrackId = null;
 
@@ -815,7 +817,7 @@ const startStreamingEngine = () => {
                     console.log('[Playout] Attempting to restart playout engine due to main stream error.');
                     if (playoutInterval) clearInterval(playoutInterval);
                     playoutInterval = null;
-                    killProcess(audioSourceFeeders.get('playlist'));
+                    killProcess(audioSourceFeeders.get('playlist')?.process);
                     audioSourceFeeders.delete('playlist');
                     await startPlayoutEngine(db.data.sharedPlayerState.currentTrackIndex);
                 }
@@ -916,7 +918,7 @@ const startPlayoutForTrack = async (trackIndex) => {
         return;
     }
     
-    killProcess(audioSourceFeeders.get('playlist'));
+    killProcess(audioSourceFeeders.get('playlist')?.process);
     
     currentFeederTrackId = track.id;
 
@@ -924,7 +926,16 @@ const startPlayoutForTrack = async (trackIndex) => {
     try {
         const feederArgs = ['-i', trackPath, '-f', 's16le', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', '-loglevel', 'error', '-'];
         const feeder = spawn('ffmpeg', feederArgs);
-        audioSourceFeeders.set('playlist', feeder);
+        
+        const passthrough = new PassThrough();
+        feeder.stdout.pipe(passthrough);
+        feeder.stdout.on('error', (err) => {
+            if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
+                console.error(`[FFMPEG Feeder] stdout error for track '${track.title}':`, err);
+            }
+        });
+        audioSourceFeeders.set('playlist', { process: feeder, stream: passthrough });
+
         
         feeder.on('error', (err) => {
             console.error(`[FFMPEG Feeder] Process spawn error for track '${track.title}':`, err);
@@ -932,11 +943,7 @@ const startPlayoutForTrack = async (trackIndex) => {
                advanceTrack();
             }
         });
-        feeder.stdout.on('error', (err) => {
-            if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
-                console.error(`[FFMPEG Feeder] stdout error for track '${track.title}':`, err);
-            }
-        });
+
         feeder.stderr.on('data', (data) => console.error(`[FFMPEG Feeder Stderr for ${track.title}] ${data.toString()}`));
         feeder.on('exit', (code, signal) => {
             audioSourceFeeders.delete('playlist');
@@ -992,7 +999,7 @@ const startPlayoutEngine = async (startIndex) => {
 };
 
 const advanceTrack = async (jumpToIndex = -1) => {
-    killProcess(audioSourceFeeders.get('playlist'));
+    killProcess(audioSourceFeeders.get('playlist')?.process);
     audioSourceFeeders.delete('playlist');
     currentFeederTrackId = null;
 
@@ -1437,8 +1444,9 @@ const createPeerConnection = (email) => {
         const sourceEmail = email.startsWith('studio_cartwall') ? 'studio_cartwall' : email;
         console.log(`[WebRTC] Received audio track from ${sourceEmail}. Setting up decoder.`);
         
-        if (audioSourceFeeders.has(sourceEmail)) {
-            killProcess(audioSourceFeeders.get(sourceEmail));
+        const existingFeeder = (sourceEmail === 'studio_cartwall') ? studioCartwallFeeder : audioSourceFeeders.get(sourceEmail);
+        if (existingFeeder) {
+            killProcess(existingFeeder.process);
         }
         
         const sink = new wrtc.RTCAudioSink(event.track);
@@ -1449,18 +1457,23 @@ const createPeerConnection = (email) => {
             '-f', 's16le', '-ar', '44100', '-ac', '2', '-loglevel', 'error', '-'
         ];
         const feeder = spawn('ffmpeg', args);
+        const passthrough = new PassThrough();
+
+        feeder.stdout.pipe(passthrough);
+        feeder.stdout.on('error', (err) => {
+            if (err.code !== 'EPIPE') { console.error(`[Feeder stdout] Error for remote source '${sourceEmail}':`, err); }
+        });
         
         feeder.on('error', (err) => {
             console.error(`[FFMPEG Feeder] Process spawn error for remote source '${sourceEmail}':`, err);
         });
 
         if (sourceEmail === 'studio_cartwall') {
-            studioCartwallFeeder = feeder;
-            rebuildMainMixer();
+            studioCartwallFeeder = { process: feeder, stream: passthrough };
         } else {
-             audioSourceFeeders.set(sourceEmail, feeder);
-             rebuildMainMixer();
+             audioSourceFeeders.set(sourceEmail, { process: feeder, stream: passthrough });
         }
+        rebuildMainMixer();
 
         sink.ondata = ({ samples }) => {
             if (feeder && !feeder.killed) {
@@ -1475,11 +1488,11 @@ const createPeerConnection = (email) => {
         feeder.on('exit', (code, signal) => {
             console.log(`[FFMPEG] Feeder for ${sourceEmail} exited with code ${code}, signal ${signal}.`);
             if (sourceEmail === 'studio_cartwall') {
-                studioCartwallFeeder = null;
-                rebuildMainMixer();
+                if (studioCartwallFeeder?.process === feeder) studioCartwallFeeder = null;
             } else {
-                audioSourceFeeders.delete(sourceEmail);
+                if (audioSourceFeeders.get(sourceEmail)?.process === feeder) audioSourceFeeders.delete(sourceEmail);
             }
+            rebuildMainMixer();
         });
 
         sink.onstop = () => {
@@ -2047,13 +2060,13 @@ wss.on('connection', async (ws, req) => {
         console.log(`[WebSocket] Client disconnected: ${email}`);
         clients.delete(email);
         
-        const feeder = audioSourceFeeders.get(email);
-        if (feeder) {
-            killProcess(feeder);
+        const feederData = audioSourceFeeders.get(email);
+        if (feederData) {
+            killProcess(feederData.process);
             audioSourceFeeders.delete(email);
         }
         if (email === studioUserEmail) {
-            killProcess(studioCartwallFeeder);
+            killProcess(studioCartwallFeeder?.process);
             studioCartwallFeeder = null;
         }
 
