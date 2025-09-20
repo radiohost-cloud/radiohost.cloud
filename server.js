@@ -1997,7 +1997,7 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
         /* Chat page specific */
         .chat-container { display: flex; flex-direction: column; height: 100%; padding: 0; }
         .chat-header { padding: 15px; text-align: center; flex-shrink: 0; font-size: 1.2rem; font-weight: bold; position: relative; }
-        #close-chat-btn { position: absolute; right: 15px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-color); font-size: 1.5rem; cursor: pointer; }
+        #close-chat-btn { position: absolute; right: 15px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-color); font-size: 1.5rem; cursor: pointer; display: none; }
         #chat-messages { flex-grow: 1; overflow-y: auto; padding: 0 20px; display: flex; flex-direction: column; gap: 12px; }
         .message { max-width: 80%; padding: 10px 15px; border-radius: 18px; line-height: 1.4; word-wrap: break-word; }
         .message p { margin: 0; }
@@ -2053,7 +2053,6 @@ const getPlayerPageHTML = (stationName, streamingConfig, logoSrc) => `
                 height: 1rem;
                 background-color: #EF4444; /* red-500 */
                 border-radius: 9999px;
-                border: 2px solid #DC2626; /* red-600 */
                 display: none;
             }
             
