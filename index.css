@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+:root {
+  --scrollbar-track-bg: #e5e7eb; /* bg-neutral-200 */
+  --scrollbar-thumb-bg: #9ca3af; /* bg-neutral-400 */
+  --scrollbar-thumb-hover-bg: #6b7280; /* bg-neutral-500 */
+}
+.dark {
+  --scrollbar-track-bg: #18181b; /* bg-zinc-900 */
+  --scrollbar-thumb-bg: #3f3f46; /* bg-zinc-700 */
+  --scrollbar-thumb-hover-bg: #52525b; /* bg-zinc-600 */
+}
+
+/* Custom scrollbar for a monochrome look */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track-bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb-bg);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover-bg);
+}
+
+/* Animation for track ending */
+@keyframes pulse-ending {
+  50% {
+    background-color: #15803d; /* A darker shade of green-600 */
+  }
+}
+.animate-pulse-ending {
+  animation: pulse-ending 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Animation for active cartwall item */
+@keyframes pulse-cart-bg {
+  from {
+    /* Using a transparent gradient overlay that sits on top of the background-color */
+    background-image: linear-gradient(rgba(34, 197, 94, 0), rgba(34, 197, 94, 0));
+  }
+  to {
+    background-image: linear-gradient(rgba(34, 197, 94, 0.3), rgba(34, 197, 94, 0.3));
+  }
+}
+.animate-pulse-cart {
+  /* This animation layers a gradient on top of the item's background color */
+  animation: pulse-cart-bg 0.8s infinite alternate ease-in-out;
+}
+
+@keyframes slide-in-up {
+    from {
+        transform: translateY(100%);
+    }
+    to {
+        transform: translateY(0);
+    }
+}
+.animate-slide-in-up {
+    animation: slide-in-up 0.3s ease-out forwards;
+}

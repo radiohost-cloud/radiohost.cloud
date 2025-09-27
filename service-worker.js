@@ -1,0 +1,1 @@
+// Service worker is not used now that DEMO mode has been removed.

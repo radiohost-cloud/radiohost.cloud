@@ -1,0 +1,7 @@
+{
+  "name": "Radiohost.cloud #TEST16",
+  "description": "24/7 #3",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
