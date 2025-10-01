@@ -1,6 +1,5 @@
 import React from 'react';
 
-// FIX: Added IconProps interface to accept a 'title' prop for accessibility, which was causing a TypeScript error in Playlist.tsx.
 interface IconProps extends React.SVGProps<SVGSVGElement> {
     title?: string;
 }

@@ -44,7 +44,9 @@ const Cartwall: React.FC<CartwallProps> = ({ pages, onUpdatePages, activePageId,
     const handlePlay = useCallback((index: number) => {
         if (!activePage || !activePage.items[index]) return;
         const track = activePage.items[index];
-        onPlay(track!, index);
+        if (track) {
+            onPlay(track, index);
+        }
     }, [activePage, onPlay]);
     
     const handleDrop = useCallback((e: React.DragEvent, index: number) => {

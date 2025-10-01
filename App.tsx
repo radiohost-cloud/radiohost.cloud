@@ -31,8 +31,6 @@ import MobileApp from './components/MobileApp';
 import Chat from './components/Chat';
 import PublicStreamPage from './components/PublicStreamPage';
 
-// lamejs is no longer needed, client-side encoding is removed.
-
 const createInitialLibrary = (): Folder => ({
     id: 'root',
     name: 'Media Library',
@@ -67,7 +65,6 @@ const defaultPlayoutPolicy: PlayoutPolicy = {
     autoFillSourceId: null,
     autoFillTargetDuration: 60, // minutes
     voiceTrackEditorPreviewDuration: 5, // 5 seconds default
-    // FIX: Add default streamingConfig to PlayoutPolicy
     streamingConfig: {
         isEnabled: false,
         serverUrl: 'localhost',
@@ -158,8 +155,6 @@ const getProminentColorsAndTextColor = (img: HTMLImageElement): { colors: string
     
     return { colors: prominentColors, textColor };
 };
-
-// --- Recursive Helper Functions for Immutable Tree Updates (Client-side helpers removed) ---
 
 const findTrackInTree = (node: Folder, trackId: string): Track | null => {
     for (const child of node.children) {
@@ -294,7 +289,6 @@ const AppInternal: React.FC = () => {
     const [pflTrackId, setPflTrackId] = useState<string | null>(null);
     const [isPflPlaying, setIsPflPlaying] = useState(false);
     const [pflProgress, setPflProgress] = useState(0);
-    // FIX: Add state for active PFL channels in the mixer to satisfy AudioMixerProps.
     const [activePfls, setActivePfls] = useState(new Set<string>());
     
     // --- Auto Backup State ---
@@ -311,6 +305,11 @@ const AppInternal: React.FC = () => {
     
     // --- Audio Mixer State ---
     const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
+
+    // --- Cartwall State ---
+    const [activeCartPlayers, setActiveCartPlayers] = useState(new Map<number, { progress: number; duration: number }>());
+    const cartAudioNodesRef = useRef<Map<number, { element: HTMLAudioElement; sourceNode: MediaElementAudioSourceNode; gainNode: GainNode }>>(new Map());
+
 
     // --- Audio Player Refs ---
     const audioPlayerRef = useRef<HTMLAudioElement>(null);
@@ -342,7 +341,6 @@ const AppInternal: React.FC = () => {
     const currentPlayingItemIdRef = useRef(currentPlayingItemId);
     currentPlayingItemIdRef.current = currentPlayingItemId;
 
-    // FIX: Moved `allUsers` state declaration before its usage to fix block-scoped variable error.
     // --- NEW: User Management State ---
     const [allUsers, setAllUsers] = useState<User[]>([]);
     
@@ -380,7 +378,12 @@ const AppInternal: React.FC = () => {
     const audioContextRef = useRef<AudioContext | null>(null);
     const destinationNodeRef = useRef<MediaStreamAudioDestinationNode | null>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const playerSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
+    
+    // --- NEW REFS FOR AUDIO GRAPH NODES ---
+    const audioNodesRef = useRef<{
+        sources: Map<AudioSourceId, MediaStreamAudioSourceNode | MediaElementAudioSourceNode>;
+        gains: Map<AudioSourceId, GainNode>;
+    }>({ sources: new Map(), gains: new Map() });
 
 
     const currentTrack = useMemo(() => {
@@ -569,13 +572,11 @@ const AppInternal: React.FC = () => {
 
     // --- NEW EFFECT FOR AUDIO CAPTURE SETUP ---
     useEffect(() => {
-        // Only run for studio user in a secure context
         if (!isSecureContext || !isStudio) return;
 
         const player = audioPlayerRef.current;
         if (!player) return;
 
-        // Initialize audio context and nodes once
         if (!audioContextRef.current) {
             try {
                 const newAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -592,18 +593,20 @@ const AppInternal: React.FC = () => {
         const audioCtx = audioContextRef.current;
         const destinationNode = destinationNodeRef.current;
 
-        // Connect the player element source if it hasn't been connected yet.
-        // This ensures it only happens once.
-        if (player && !playerSourceNodeRef.current) {
+        if (player && !audioNodesRef.current.sources.has('mainPlayer')) {
             try {
-                // Resume context if it was suspended by browser autoplay policy
-                if (audioCtx.state === 'suspended') {
-                    audioCtx.resume();
-                }
-                playerSourceNodeRef.current = audioCtx.createMediaElementSource(player);
-                playerSourceNodeRef.current.connect(audioCtx.destination); // Connect to speakers for local playback
-                playerSourceNodeRef.current.connect(destinationNode);      // Connect to the capture stream destination
-                console.log("[Audio Capture] Main player audio source connected to broadcast destination.");
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                
+                const playerSourceNode = audioCtx.createMediaElementSource(player);
+                const playerGainNode = audioCtx.createGain();
+
+                playerSourceNode.connect(playerGainNode);
+                playerGainNode.connect(audioCtx.destination);
+                playerGainNode.connect(destinationNode);
+
+                audioNodesRef.current.sources.set('mainPlayer', playerSourceNode);
+                audioNodesRef.current.gains.set('mainPlayer', playerGainNode);
+                console.log("[Audio Capture] Main player audio source connected to graph.");
             } catch(e) {
                  console.error("Error connecting media element source:", e);
             }
@@ -763,7 +766,6 @@ const AppInternal: React.FC = () => {
         }));
     }, [playoutPolicy.playoutMode]);
     
-// FIX: Moved function definitions before their usage to fix block-scoped variable errors.
     const getTrackSrc = useCallback(async (track: Track): Promise<string | null> => {
         const trackWithOriginalId = { ...track, id: track.originalId || track.id };
         return dataService.getTrackSrc(trackWithOriginalId);
@@ -821,12 +823,17 @@ const AppInternal: React.FC = () => {
         if (playoutPolicy.playoutMode === 'presenter') return;
         const targetIndex = playlist.findIndex(item => item.id === itemId);
         if (targetIndex === -1) return;
-
+    
         const newTrack = playlist[targetIndex];
         if ('markerType' in newTrack) return;
-
+    
         stopPfl();
-        sendStudioAction('setPlayerState', { currentTrackIndex: targetIndex, isPlaying: true, trackProgress: 0 });
+        sendStudioAction('setPlayerState', { 
+            currentTrackIndex: targetIndex, 
+            isPlaying: true, 
+            trackProgress: 0,
+            currentPlayingItemId: newTrack.id 
+        });
     }, [stopPfl, playoutPolicy.playoutMode, sendStudioAction, playlist]);
 
     // --- PLAYBACK ENGINE ---
@@ -1046,9 +1053,41 @@ const AppInternal: React.FC = () => {
     }, [isPflPlaying, playoutPolicy.pflDuckingLevel]);
 
     const handleSourceStream = useCallback((stream: MediaStream | null, sourceId: AudioSourceId = 'mic') => {
-        // This is now only for presenter mode visualizers and potential future local effects
-        // The main stream is not processed on the client.
-    }, []);
+        if (!isStudio || !audioContextRef.current) return;
+    
+        const { sources, gains } = audioNodesRef.current;
+    
+        // Clean up existing node for this source
+        if (sources.has(sourceId)) {
+            sources.get(sourceId)?.disconnect();
+            sources.delete(sourceId);
+        }
+        if (gains.has(sourceId)) {
+            gains.get(sourceId)?.disconnect();
+            gains.delete(sourceId);
+        }
+    
+        if (stream) {
+            const sourceNode = audioContextRef.current.createMediaStreamSource(stream);
+            const gainNode = audioContextRef.current.createGain();
+            
+            const config = mixerConfig[sourceId];
+            if (config) {
+                gainNode.gain.value = config.muted ? 0 : config.gain;
+            }
+    
+            sourceNode.connect(gainNode);
+            // Route to main output (for monitoring)
+            gainNode.connect(audioContextRef.current.destination);
+            // Route to broadcast destination
+            if (destinationNodeRef.current) {
+                gainNode.connect(destinationNodeRef.current);
+            }
+    
+            sources.set(sourceId, sourceNode);
+            gains.set(sourceId, gainNode);
+        }
+    }, [isStudio, mixerConfig]);
     
     const handlePflTrack = useCallback(async (trackId: string) => {
         const player = pflAudioRef.current;
@@ -1083,7 +1122,6 @@ const AppInternal: React.FC = () => {
         }
     }, [getTrackSrc, isPflPlaying, pflTrackId, stopPfl, mediaLibrary]);
 
-    // FIX: Add handler for AudioMixer's onPflToggle prop.
     const handlePflToggle = (channel: 'playlist' | 'cartwall' | 'remotes') => {
         setActivePfls(prev => {
             const newSet = new Set(prev);
@@ -2073,6 +2111,101 @@ const AppInternal: React.FC = () => {
         }
     }, []);
 
+    const handleCartwallPlay = useCallback((track: CartwallItem, index: number) => {
+        if (!isStudio || !audioContextRef.current) return;
+    
+        // Stop and clean up if already playing
+        if (cartAudioNodesRef.current.has(index)) {
+            const existing = cartAudioNodesRef.current.get(index)!;
+            existing.element.pause();
+            existing.element.remove(); // Make sure it's garbage collected
+            existing.sourceNode.disconnect();
+            existing.gainNode.disconnect();
+            cartAudioNodesRef.current.delete(index);
+            setActiveCartPlayers(prev => {
+                const next = new Map(prev);
+                next.delete(index);
+                return next;
+            });
+            return;
+        }
+    
+        const audio = new Audio();
+        audio.crossOrigin = "anonymous";
+    
+        getTrackSrc(track).then(src => {
+            if (!src || !audioContextRef.current) return;
+    
+            audio.src = src;
+            const audioCtx = audioContextRef.current;
+    
+            const sourceNode = audioCtx.createMediaElementSource(audio);
+            const gainNode = audioCtx.createGain();
+            const cartConfig = mixerConfig.cartwall;
+            gainNode.gain.value = cartConfig.muted ? 0 : cartConfig.gain;
+    
+            sourceNode.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            if (destinationNodeRef.current) {
+                gainNode.connect(destinationNodeRef.current);
+            }
+    
+            cartAudioNodesRef.current.set(index, { element: audio, sourceNode, gainNode });
+    
+            audio.onloadedmetadata = () => {
+                setActiveCartPlayers(prev => new Map(prev).set(index, { progress: 0, duration: audio.duration }));
+            };
+    
+            audio.ontimeupdate = () => {
+                setActiveCartPlayers(prev => {
+                    if (!prev.has(index)) return prev;
+                    return new Map(prev).set(index, { progress: audio.currentTime, duration: audio.duration });
+                });
+            };
+    
+            audio.onended = () => {
+                sourceNode.disconnect();
+                gainNode.disconnect();
+                cartAudioNodesRef.current.delete(index);
+                setActiveCartPlayers(prev => {
+                    const next = new Map(prev);
+                    next.delete(index);
+                    return next;
+                });
+            };
+    
+            audio.play().catch(e => console.error("Cartwall playback failed:", e));
+        });
+    }, [isStudio, getTrackSrc, mixerConfig.cartwall]);
+    
+    // Effect to sync mixer config with audio nodes
+    useEffect(() => {
+        if (!isStudio) return;
+    
+        // Sync main player gain
+        const mainPlayerGain = audioNodesRef.current.gains.get('mainPlayer');
+        const mainPlayerConfig = mixerConfig.mainPlayer;
+        if (mainPlayerGain && mainPlayerConfig) {
+            mainPlayerGain.gain.value = mainPlayerConfig.muted ? 0 : mainPlayerConfig.gain;
+        }
+    
+        // Sync mic and remote gains
+        audioNodesRef.current.gains.forEach((gainNode, sourceId) => {
+            if (sourceId === 'mainPlayer' || sourceId === 'cartwall') return; // Handled separately
+            const config = mixerConfig[sourceId];
+            if (config) {
+                gainNode.gain.value = config.muted ? 0 : config.gain;
+            }
+        });
+    
+        // Sync cartwall gains
+        const cartConfig = mixerConfig.cartwall;
+        cartAudioNodesRef.current.forEach(({ gainNode }) => {
+            gainNode.gain.value = cartConfig.muted ? 0 : cartConfig.gain;
+        });
+    
+    }, [mixerConfig, isStudio]);
+
     if (isLoadingSession) {
         return (
             <div className="flex flex-col h-screen bg-white dark:bg-black items-center justify-center space-y-6">
@@ -2101,7 +2234,6 @@ const AppInternal: React.FC = () => {
                 displayTrack={displayTrack}
                 nextTrack={nextTrack}
                 mixerConfig={mixerConfig}
-                // FIX: Pass the 'setMixerConfig' state setter to the onMixerChange prop.
                 onMixerChange={setMixerConfig}
                 onStreamAvailable={handleSourceStream}
                 ws={wsRef.current}
@@ -2233,13 +2365,10 @@ const AppInternal: React.FC = () => {
                             </div>
                             <div className="flex-grow relative">
                                 <div className="absolute inset-0 overflow-y-auto">
-                                    {/* FIX: Remove obsolete props from Cartwall and provide dummy implementations for new props. */}
-                                    {/* FIX: Corrected prop name from 'activePageId' to 'activeCartwallPageId'. */}
-                                    {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(newGrid) => setPlayoutPolicy(p => ({ ...p, cartwallGrid: newGrid }))} onPlay={() => {}} activePlayers={new Map()} />}
+                                    {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(newGrid) => setPlayoutPolicy(p => ({ ...p, cartwallGrid: newGrid }))} onPlay={handleCartwallPlay} activePlayers={activeCartPlayers} />}
                                     {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
                                     {isStudio && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
                                     {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} />}
-                                    {/* FIX: Pass missing `onPflToggle` and `activePfls` props to AudioMixer. */}
                                     {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={{}} onPflToggle={handlePflToggle} activePfls={activePfls} />}
                                     {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
                                     {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
