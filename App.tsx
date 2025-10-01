@@ -2,6 +2,8 @@
 
 
 
+
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -315,6 +317,9 @@ const AppInternal: React.FC = () => {
     
     // --- Audio Mixer State ---
     const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
+
+    // --- Audio Player Refs ---
+    const audioPlayerRef = useRef<HTMLAudioElement>(null);
 
     // --- Refs to provide stable functions to useEffects ---
     const currentUserRef = useRef(currentUser);
@@ -733,13 +738,41 @@ const AppInternal: React.FC = () => {
     
     const handleNext = useCallback(() => {
         if (playoutPolicy.playoutMode === 'presenter') return;
-        sendStudioAction('nextTrack', {});
-    }, [playoutPolicy.playoutMode, sendStudioAction]);
+        const nextPlayableIndex = findNextPlayableIndex(playlist, currentTrackIndex, 1);
+        if (nextPlayableIndex !== -1) {
+            const nextTrack = playlist[nextPlayableIndex] as Track;
+            sendStudioAction('setPlayerState', { 
+                currentTrackIndex: nextPlayableIndex, 
+                trackProgress: 0, 
+                isPlaying: true, // Clicking next should start/continue playback
+                currentPlayingItemId: nextTrack.id 
+            });
+        } else {
+            sendStudioAction('setPlayerState', { isPlaying: false });
+        }
+    }, [playoutPolicy.playoutMode, sendStudioAction, playlist, currentTrackIndex]);
 
     const handlePrevious = useCallback(() => {
         if (playoutPolicy.playoutMode === 'presenter') return;
-        sendStudioAction('previousTrack', {});
-    }, [playoutPolicy.playoutMode, sendStudioAction]);
+
+        if (trackProgress > 3 && audioPlayerRef.current) {
+            audioPlayerRef.current.currentTime = 0;
+            setTrackProgress(0);
+            sendStudioAction('setPlayerState', { trackProgress: 0 });
+            return;
+        }
+
+        const prevPlayableIndex = findNextPlayableIndex(playlist, currentTrackIndex, -1);
+        if (prevPlayableIndex !== -1) {
+            const prevTrack = playlist[prevPlayableIndex] as Track;
+            sendStudioAction('setPlayerState', { 
+                currentTrackIndex: prevPlayableIndex, 
+                trackProgress: 0, 
+                isPlaying: true,
+                currentPlayingItemId: prevTrack.id 
+            });
+        }
+    }, [playoutPolicy.playoutMode, sendStudioAction, playlist, currentTrackIndex, trackProgress]);
 
     const handlePlayTrack = useCallback(async (itemId: string) => {
         if (playoutPolicy.playoutMode === 'presenter') return;
@@ -752,6 +785,111 @@ const AppInternal: React.FC = () => {
         stopPfl();
         sendStudioAction('setPlayerState', { currentTrackIndex: targetIndex, isPlaying: true, trackProgress: 0 });
     }, [stopPfl, playoutPolicy.playoutMode, sendStudioAction, playlist]);
+
+    // --- PLAYBACK ENGINE ---
+    
+    // Main playback engine effect: handles loading tracks and play/pause state.
+    useEffect(() => {
+        if (playoutPolicy.playoutMode !== 'studio') return;
+
+        const player = audioPlayerRef.current;
+        if (!player) return;
+
+        const item = playlist[currentTrackIndex];
+        const track = item && !('markerType' in item) ? item : undefined;
+
+        const playTrack = async (trackToPlay: Track) => {
+            if (player.dataset.trackId === trackToPlay.id) {
+                if (isPlaying && player.paused) {
+                    player.play().catch(e => console.error("Playback failed", e));
+                } else if (!isPlaying && !player.paused) {
+                    player.pause();
+                }
+                return;
+            }
+
+            const src = await getTrackSrc(trackToPlay);
+            if (src) {
+                player.src = src;
+                player.dataset.trackId = trackToPlay.id;
+                if (isPlaying) {
+                    try {
+                        await player.play();
+                    } catch (e) {
+                        console.error("Autoplay failed:", e);
+                        sendStudioAction('setPlayerState', { isPlaying: false });
+                    }
+                }
+            } else {
+                console.warn("Could not load track src, skipping to next.");
+                handleNext();
+            }
+        };
+
+        if (track) {
+            playTrack(track);
+        } else {
+            player.pause();
+            player.src = "";
+            delete player.dataset.trackId;
+        }
+    }, [currentTrackIndex, playlist, isPlaying, playoutPolicy.playoutMode, getTrackSrc, sendStudioAction, handleNext]);
+    
+    // Attaches event listeners for progress updates and auto-advancement.
+    useEffect(() => {
+        const player = audioPlayerRef.current;
+        if (!player) return;
+
+        const handleTimeUpdate = () => {
+            setTrackProgress(player.currentTime);
+        };
+
+        const handleEnded = () => {
+            if (playoutPolicy.playoutMode !== 'studio') return;
+            if (stopAfterTrackId && stopAfterTrackId === player.dataset.trackId) {
+                sendStudioAction('setPlayerState', { isPlaying: false });
+                return;
+            }
+            
+            const nextIdx = findNextPlayableIndex(playlist, currentTrackIndex, 1);
+            if (nextIdx !== -1) {
+                const nextTrack = playlist[nextIdx] as Track;
+                sendStudioAction('setPlayerState', {
+                    currentTrackIndex: nextIdx,
+                    trackProgress: 0,
+                    isPlaying: true,
+                    currentPlayingItemId: nextTrack.id
+                });
+            } else {
+                sendStudioAction('setPlayerState', { isPlaying: false });
+            }
+        };
+
+        player.addEventListener('timeupdate', handleTimeUpdate);
+        player.addEventListener('ended', handleEnded);
+
+        return () => {
+            player.removeEventListener('timeupdate', handleTimeUpdate);
+            player.removeEventListener('ended', handleEnded);
+        };
+    }, [playlist, currentTrackIndex, stopAfterTrackId, playoutPolicy.playoutMode, sendStudioAction]);
+
+    // Syncs progress to the server periodically.
+    useEffect(() => {
+        if (playoutPolicy.playoutMode !== 'studio' || !isPlaying) return;
+        
+        const interval = setInterval(() => {
+            const player = audioPlayerRef.current;
+            if (player && !player.paused) {
+                sendStudioAction('setPlayerState', { trackProgress: player.currentTime });
+            }
+        }, 1000);
+
+        return () => clearInterval(interval);
+    }, [isPlaying, playoutPolicy.playoutMode, sendStudioAction]);
+
+    // --- END PLAYBACK ENGINE ---
+
 
     const timeline = useMemo(() => {
         const timelineMap = new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>();
@@ -2106,6 +2244,7 @@ const AppInternal: React.FC = () => {
                 currentUser={currentUser}
             />
             
+            <audio ref={audioPlayerRef} crossOrigin="anonymous" />
             <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
 
         </div>
