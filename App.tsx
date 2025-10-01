@@ -1,9 +1,3 @@
-
-
-
-
-
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
@@ -382,6 +376,12 @@ const AppInternal: React.FC = () => {
         startHeight: 0,
     });
 
+    // --- NEW REFS FOR AUDIO CAPTURE ---
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const destinationNodeRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const playerSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
+
 
     const currentTrack = useMemo(() => {
         const item = playlist[currentTrackIndex];
@@ -566,6 +566,49 @@ const AppInternal: React.FC = () => {
     }, [isSecureContext, handleLogout]);
 
     const isStudio = playoutPolicy.playoutMode === 'studio';
+
+    // --- NEW EFFECT FOR AUDIO CAPTURE SETUP ---
+    useEffect(() => {
+        // Only run for studio user in a secure context
+        if (!isSecureContext || !isStudio) return;
+
+        const player = audioPlayerRef.current;
+        if (!player) return;
+
+        // Initialize audio context and nodes once
+        if (!audioContextRef.current) {
+            try {
+                const newAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+                audioContextRef.current = newAudioContext;
+                destinationNodeRef.current = newAudioContext.createMediaStreamDestination();
+                console.log("[Audio Capture] AudioContext and DestinationNode created.");
+            } catch (e) {
+                console.error("Failed to create AudioContext:", e);
+                setIsPublicStreamEnabled(false);
+                setPublicStreamError("Audio engine could not be initialized.");
+                return;
+            }
+        }
+        const audioCtx = audioContextRef.current;
+        const destinationNode = destinationNodeRef.current;
+
+        // Connect the player element source if it hasn't been connected yet.
+        // This ensures it only happens once.
+        if (player && !playerSourceNodeRef.current) {
+            try {
+                // Resume context if it was suspended by browser autoplay policy
+                if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+                playerSourceNodeRef.current = audioCtx.createMediaElementSource(player);
+                playerSourceNodeRef.current.connect(audioCtx.destination); // Connect to speakers for local playback
+                playerSourceNodeRef.current.connect(destinationNode);      // Connect to the capture stream destination
+                console.log("[Audio Capture] Main player audio source connected to broadcast destination.");
+            } catch(e) {
+                 console.error("Error connecting media element source:", e);
+            }
+        }
+    }, [isSecureContext, isStudio]);
 
     useEffect(() => {
         // This effect is now redundant for initial load, but can stay for dynamic user updates if needed.
@@ -1931,10 +1974,60 @@ const AppInternal: React.FC = () => {
     const handleTogglePublicStream = (enabled: boolean) => {
         if (isStudio && wsRef.current?.readyState === WebSocket.OPEN) {
             if (enabled) {
+                // Ensure audio context and destination are ready
+                if (!destinationNodeRef.current) {
+                    console.error("Audio capture destination not ready. Cannot start stream.");
+                    setPublicStreamStatus('error');
+                    setPublicStreamError('Audio engine could not be initialized. Please refresh.');
+                    setIsPublicStreamEnabled(false);
+                    return;
+                }
+
+                // Send command to server to start ffmpeg
                 const config = playoutPolicyRef.current.streamingConfig;
                 wsRef.current.send(JSON.stringify({ type: 'streamStart', payload: config }));
+
+                // Start client-side recording and streaming
+                try {
+                    const stream = destinationNodeRef.current.stream;
+                    const options = { mimeType: 'audio/webm; codecs=opus' };
+                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                        console.error("Opus codec not supported. Broadcasting may fail.");
+                    }
+                    
+                    mediaRecorderRef.current = new MediaRecorder(stream, options);
+
+                    mediaRecorderRef.current.ondataavailable = (event) => {
+                        if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(event.data);
+                        }
+                    };
+                    
+                    mediaRecorderRef.current.onerror = (event) => {
+                        console.error("MediaRecorder Error:", event);
+                    };
+
+                    mediaRecorderRef.current.start(250); // Send data every 250ms
+                    console.log("[Broadcast] MediaRecorder started, streaming to server.");
+                } catch (e) {
+                    console.error("Failed to start MediaRecorder:", e);
+                    setPublicStreamStatus('error');
+                    setPublicStreamError('Failed to start audio recorder. Check microphone permissions or browser support.');
+                    setIsPublicStreamEnabled(false);
+                    // Also tell server to stop trying
+                     wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
+                }
+
             } else {
+                // Send command to server to stop ffmpeg
                 wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
+
+                // Stop client-side recording
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                    mediaRecorderRef.current.stop();
+                    console.log("[Broadcast] MediaRecorder stopped.");
+                }
+                mediaRecorderRef.current = null;
             }
         }
     };
