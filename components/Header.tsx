@@ -280,7 +280,7 @@ const Header: React.FC<HeaderProps> = ({
     const DECK_VIEW_THRESHOLD = 180; // pixels
     const showDeckView = headerHeight >= DECK_VIEW_THRESHOLD;
 
-    const isHostMode = true; // PATCH: STORAGE SERVER ONLY
+    const isHostMode = sessionStorage.getItem('appMode') === 'HOST';
     const statusInfo = {
         connected: { color: 'bg-green-500', text: 'Connected' },
         connecting: { color: 'bg-yellow-500 animate-pulse', text: 'Connecting...' },

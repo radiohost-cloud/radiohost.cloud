@@ -6,6 +6,7 @@ const AppWrapper: React.FC = () => {
 
     useEffect(() => {
         // Force HOST mode as DEMO mode is removed.
+        sessionStorage.setItem('appMode', 'HOST');
         setIsReady(true);
     }, []);
 

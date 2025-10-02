@@ -51,7 +51,9 @@ const Auth: React.FC<AuthProps> = ({ onLogin, onSignup }) => {
             if (isLogin) {
                 user = await dataService.login(email, password);
                 if (user) {
-                    // PATCH: STORAGE SERVER ONLY
+                    if (user.role) {
+                        sessionStorage.setItem('playoutMode', user.role);
+                    }
                     dataService.putAppState('currentUserEmail', email);
                     onLogin(user);
                 } else {
@@ -61,7 +63,9 @@ const Auth: React.FC<AuthProps> = ({ onLogin, onSignup }) => {
                 const newUser: User = { email, password, nickname };
                 user = await dataService.signup(newUser);
                  if (user) {
-                    // PATCH: STORAGE SERVER ONLY
+                    if (user.role) {
+                        sessionStorage.setItem('playoutMode', user.role);
+                    }
                     dataService.putAppState('currentUserEmail', email);
                     onSignup(user);
                  } else {
