@@ -566,7 +566,6 @@ const AppInternal: React.FC = () => {
         const getAudioDevices = async () => {
              if (!isSecureContext || !navigator.mediaDevices?.enumerateDevices) { return; }
              try {
-                await navigator.mediaDevices.getUserMedia({ audio: true });
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 setAvailableAudioDevices(devices.filter(d => d.kind === 'audiooutput'));
              } catch(e) { console.error("Could not get audio devices", e); }
@@ -2200,6 +2199,13 @@ const AppInternal: React.FC = () => {
     const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
 
     const handleTogglePublicStream = (enabled: boolean) => {
+        if (!isSecureContext) {
+            console.error('[Broadcast] Cannot start - insecure context detected');
+            setPublicStreamError('Broadcasting dostępne wyłącznie przez HTTPS/localhost');
+            setIsPublicStreamEnabled(false);
+            return;
+        }
+
         console.log(`[handleTogglePublicStream] Attempting to set public stream to: ${enabled}`);
         if (isStudio && wsRef.current?.readyState === WebSocket.OPEN) {
             if (enabled) {
