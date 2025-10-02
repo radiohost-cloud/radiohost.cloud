@@ -306,10 +306,11 @@ const AppInternal: React.FC = () => {
     
     // --- Audio Mixer State ---
     const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
+    const [audioLevels, setAudioLevels] = useState<Partial<Record<AudioSourceId, number>>>({});
 
     // --- Cartwall State ---
     const [activeCartPlayers, setActiveCartPlayers] = useState(new Map<number, { progress: number; duration: number }>());
-    const cartAudioNodesRef = useRef<Map<number, { element: HTMLAudioElement; sourceNode: MediaElementAudioSourceNode; gainNode: GainNode }>>(new Map());
+    const cartAudioNodesRef = useRef<Map<number, { element: HTMLAudioElement; sourceNode: MediaElementAudioSourceNode; gainNode: GainNode, analyserNode: AnalyserNode }>>(new Map());
 
 
     // --- Audio Player Refs ---
@@ -394,7 +395,8 @@ const AppInternal: React.FC = () => {
     const audioNodesRef = useRef<{
         sources: Map<AudioSourceId, MediaStreamAudioSourceNode | MediaElementAudioSourceNode>;
         gains: Map<AudioSourceId, GainNode>;
-    }>({ sources: new Map(), gains: new Map() });
+        analysers: Map<AudioSourceId, AnalyserNode>;
+    }>({ sources: new Map(), gains: new Map(), analysers: new Map() });
 
 
     const currentTrack = useMemo(() => {
@@ -564,19 +566,17 @@ const AppInternal: React.FC = () => {
         loadConfig();
 
         const getAudioDevices = async () => {
-             if (!isSecureContext || !navigator.mediaDevices?.enumerateDevices) { return; }
+             if (!navigator.mediaDevices?.enumerateDevices) { return; }
              try {
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 setAvailableAudioDevices(devices.filter(d => d.kind === 'audiooutput'));
              } catch(e) { console.error("Could not get audio devices", e); }
         }
         getAudioDevices();
-        if (isSecureContext) {
-            navigator.mediaDevices.addEventListener('devicechange', getAudioDevices);
-            return () => navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
-        }
+        navigator.mediaDevices.addEventListener('devicechange', getAudioDevices);
+        return () => navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
 
-    }, [isSecureContext, handleLogout]);
+    }, [handleLogout]);
 
     const isStudio = playoutPolicy.playoutMode === 'studio';
 
@@ -609,19 +609,90 @@ const AppInternal: React.FC = () => {
                 
                 const playerSourceNode = audioCtx.createMediaElementSource(player);
                 const playerGainNode = audioCtx.createGain();
+                const playerAnalyserNode = audioCtx.createAnalyser();
+                playerAnalyserNode.fftSize = 256;
 
                 playerSourceNode.connect(playerGainNode);
-                playerGainNode.connect(audioCtx.destination);
-                playerGainNode.connect(destinationNode);
+                playerGainNode.connect(playerAnalyserNode);
+                playerAnalyserNode.connect(audioCtx.destination);
+                playerAnalyserNode.connect(destinationNode);
 
                 audioNodesRef.current.sources.set('mainPlayer', playerSourceNode);
                 audioNodesRef.current.gains.set('mainPlayer', playerGainNode);
+                audioNodesRef.current.analysers.set('mainPlayer', playerAnalyserNode);
+
                 console.log("[Audio Capture] Main player audio source connected to graph.");
             } catch(e) {
                  console.error("Error connecting media element source:", e);
             }
         }
     }, [isSecureContext, isStudio]);
+
+    useEffect(() => {
+        if (!isStudio) return;
+        let animationFrameId: number;
+
+        const updateLevels = () => {
+            const newLevels: Partial<Record<AudioSourceId, number>> = {};
+            const { analysers } = audioNodesRef.current;
+            
+            analysers.forEach((analyser, sourceId) => {
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                analyser.getByteTimeDomainData(dataArray);
+
+                let sumSquares = 0.0;
+                for (const amplitude of dataArray) {
+                    const normalized = (amplitude / 128.0) - 1.0;
+                    sumSquares += normalized * normalized;
+                }
+                const rms = Math.sqrt(sumSquares / bufferLength);
+                // Scale RMS to a 0-100 range for the meter.
+                // The multiplier (e.g., 300) can be tweaked for sensitivity.
+                newLevels[sourceId] = Math.min(100, rms * 300);
+            });
+            
+            cartAudioNodesRef.current.forEach(({ analyserNode }, index) => {
+                 const bufferLength = analyserNode.frequencyBinCount;
+                 const dataArray = new Uint8Array(bufferLength);
+                 analyserNode.getByteTimeDomainData(dataArray);
+
+                 let sumSquares = 0.0;
+                 for (const amplitude of dataArray) {
+                     const normalized = (amplitude / 128.0) - 1.0;
+                     sumSquares += normalized * normalized;
+                 }
+                 const rms = Math.sqrt(sumSquares / bufferLength);
+                 
+                 // Use a temporary key for the cartwall levels
+                 newLevels[`cartwall_${index}` as AudioSourceId] = Math.min(100, rms * 300);
+            });
+
+            // Combine all cartwall levels into a single 'cartwall' value (taking the max)
+            const cartwallLevel = Object.entries(newLevels)
+                .filter(([key]) => key.startsWith('cartwall_'))
+                .reduce((max, [, value]) => Math.max(max, value || 0), 0);
+            
+            newLevels.cartwall = cartwallLevel;
+
+            setAudioLevels(currentLevels => {
+                 // Prevent unnecessary re-renders if levels are very similar
+                const changed = Object.keys(newLevels).some(key => 
+                    Math.abs((newLevels[key as AudioSourceId] || 0) - (currentLevels[key as AudioSourceId] || 0)) > 0.5
+                );
+                return changed ? newLevels : currentLevels;
+            });
+            
+            animationFrameId = requestAnimationFrame(updateLevels);
+        };
+
+        animationFrameId = requestAnimationFrame(updateLevels);
+
+        return () => {
+            cancelAnimationFrame(animationFrameId);
+        };
+    }, [isStudio]);
+
 
     useEffect(() => {
         // This effect is now redundant for initial load, but can stay for dynamic user updates if needed.
@@ -1244,21 +1315,31 @@ const AppInternal: React.FC = () => {
     const handleSourceStream = useCallback((stream: MediaStream | null, sourceId: AudioSourceId = 'mic') => {
         if (!isStudio || !audioContextRef.current) return;
     
-        const { sources, gains } = audioNodesRef.current;
+        const { sources, gains, analysers } = audioNodesRef.current;
     
-        // Clean up existing node for this source
-        if (sources.has(sourceId)) {
-            sources.get(sourceId)?.disconnect();
+        // Clean up existing nodes for this source
+        const existingSource = sources.get(sourceId);
+        if (existingSource) {
+            existingSource.disconnect();
             sources.delete(sourceId);
         }
-        if (gains.has(sourceId)) {
-            gains.get(sourceId)?.disconnect();
+        const existingGain = gains.get(sourceId);
+        if (existingGain) {
+            existingGain.disconnect();
             gains.delete(sourceId);
+        }
+         const existingAnalyser = analysers.get(sourceId);
+        if (existingAnalyser) {
+            existingAnalyser.disconnect();
+            analysers.delete(sourceId);
         }
     
         if (stream) {
-            const sourceNode = audioContextRef.current.createMediaStreamSource(stream);
-            const gainNode = audioContextRef.current.createGain();
+            const audioCtx = audioContextRef.current;
+            const sourceNode = audioCtx.createMediaStreamSource(stream);
+            const gainNode = audioCtx.createGain();
+            const analyserNode = audioCtx.createAnalyser();
+            analyserNode.fftSize = 256;
             
             const config = mixerConfig[sourceId];
             if (config) {
@@ -1266,15 +1347,17 @@ const AppInternal: React.FC = () => {
             }
     
             sourceNode.connect(gainNode);
-            // Route to main output (for monitoring)
-            gainNode.connect(audioContextRef.current.destination);
-            // Route to broadcast destination
+            gainNode.connect(analyserNode);
+            
+            // Route to main output (for monitoring) and broadcast destination
+            analyserNode.connect(audioCtx.destination);
             if (destinationNodeRef.current) {
-                gainNode.connect(destinationNodeRef.current);
+                analyserNode.connect(destinationNodeRef.current);
             }
     
             sources.set(sourceId, sourceNode);
             gains.set(sourceId, gainNode);
+            analysers.set(sourceId, analyserNode);
         }
     }, [isStudio, mixerConfig]);
     
@@ -2199,10 +2282,10 @@ const AppInternal: React.FC = () => {
     const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
 
     const handleTogglePublicStream = (enabled: boolean) => {
-        if (!isSecureContext) {
+        if (!window.isSecureContext) {
             console.error('[Broadcast] Cannot start - insecure context detected');
             setPublicStreamError('Broadcasting dostępne wyłącznie przez HTTPS/localhost');
-            setIsPublicStreamEnabled(false);
+            setIsPublicStreamEnabled(false); // Make sure the toggle state reflects the failure
             return;
         }
 
@@ -2321,6 +2404,7 @@ const AppInternal: React.FC = () => {
             existing.element.remove(); // Make sure it's garbage collected
             existing.sourceNode.disconnect();
             existing.gainNode.disconnect();
+            audioNodesRef.current.analysers.delete(`cartwall_${index}` as AudioSourceId);
             cartAudioNodesRef.current.delete(index);
             setActiveCartPlayers(prev => {
                 const next = new Map(prev);
@@ -2341,16 +2425,21 @@ const AppInternal: React.FC = () => {
     
             const sourceNode = audioCtx.createMediaElementSource(audio);
             const gainNode = audioCtx.createGain();
+            const analyserNode = audioCtx.createAnalyser();
+            analyserNode.fftSize = 256;
+
             const cartConfig = mixerConfig.cartwall;
             gainNode.gain.value = cartConfig.muted ? 0 : cartConfig.gain;
     
             sourceNode.connect(gainNode);
-            gainNode.connect(audioCtx.destination);
+            gainNode.connect(analyserNode);
+            analyserNode.connect(audioCtx.destination);
             if (destinationNodeRef.current) {
-                gainNode.connect(destinationNodeRef.current);
+                analyserNode.connect(destinationNodeRef.current);
             }
     
-            cartAudioNodesRef.current.set(index, { element: audio, sourceNode, gainNode });
+            cartAudioNodesRef.current.set(index, { element: audio, sourceNode, gainNode, analyserNode });
+            audioNodesRef.current.analysers.set(`cartwall_${index}` as AudioSourceId, analyserNode);
     
             audio.onloadedmetadata = () => {
                 setActiveCartPlayers(prev => new Map(prev).set(index, { progress: 0, duration: audio.duration }));
@@ -2366,7 +2455,9 @@ const AppInternal: React.FC = () => {
             audio.onended = () => {
                 sourceNode.disconnect();
                 gainNode.disconnect();
+                analyserNode.disconnect();
                 cartAudioNodesRef.current.delete(index);
+                audioNodesRef.current.analysers.delete(`cartwall_${index}` as AudioSourceId);
                 setActiveCartPlayers(prev => {
                     const next = new Map(prev);
                     next.delete(index);
@@ -2440,7 +2531,7 @@ const AppInternal: React.FC = () => {
                 isStudio={isStudio}
                 incomingSignal={rtcSignal}
                 onlinePresenters={onlinePresenters}
-                audioLevels={{}} // Removed client-side metering
+                audioLevels={audioLevels}
                 onInsertVoiceTrack={handleInsertVoiceTrack}
                 chatMessages={chatMessages}
                 onSendChatMessage={handleSendChatMessage}
@@ -2569,7 +2660,7 @@ const AppInternal: React.FC = () => {
                                     {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
                                     {isStudio && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
                                     {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} />}
-                                    {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={{}} onPflToggle={handlePflToggle} activePfls={activePfls} />}
+                                    {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} onPflToggle={handlePflToggle} activePfls={activePfls} />}
                                     {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
                                     {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
                                         isPublicStreamEnabled={isPublicStreamEnabled}
@@ -2613,7 +2704,7 @@ const AppInternal: React.FC = () => {
                                         isStudio={playoutPolicy.playoutMode === 'studio'}
                                         incomingSignal={rtcSignal}
                                         onlinePresenters={onlinePresenters}
-                                        audioLevels={{}}
+                                        audioLevels={audioLevels}
                                         isSecureContext={isSecureContext}
                                     />
                                 </div>

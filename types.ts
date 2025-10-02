@@ -144,7 +144,8 @@ export interface PlayoutHistoryEntry {
 
 // --- NEW AUDIO MIXER TYPES ---
 
-export type AudioSourceId = 'mainPlayer' | 'mic' | 'pfl' | 'cartwall' | `remote_${string}`;
+// FIX: Add 'remotes' to AudioSourceId to represent the group channel for all remote presenters.
+export type AudioSourceId = 'mainPlayer' | 'mic' | 'pfl' | 'cartwall' | 'remotes' | `remote_${string}`;
 export type AudioBusId = 'main' | 'monitor';
 
 export interface AudioBus {
