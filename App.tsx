@@ -335,6 +335,16 @@ const AppInternal: React.FC = () => {
     const activeRightColumnTabRef = useRef(activeRightColumnTab);
     activeRightColumnTabRef.current = activeRightColumnTab;
     const timelineRef = useRef(new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>());
+    
+    // --- NEW REFS FOR AUTOFILL ---
+    const isAutoFillingRef = useRef(false);
+    const trackProgressRef = useRef(trackProgress);
+    trackProgressRef.current = trackProgress;
+    const isPlayingRef = useRef(isPlaying);
+    isPlayingRef.current = isPlaying;
+    const currentTrackIndexRef = useRef(currentTrackIndex);
+    currentTrackIndexRef.current = currentTrackIndex;
+
 
     // --- NEW REFS FOR STABLE WEBSOCKET ---
     const isMobileRef = useRef(isMobile);
@@ -720,6 +730,193 @@ const AppInternal: React.FC = () => {
         autoBackupInterval, isAutoModeEnabled, mixerConfig, currentUser,
         lastAutoBackupTimestamp
     ], 1000);
+
+    const sendStudioAction = useCallback((action: string, payload: any) => {
+        if (playoutPolicy.playoutMode !== 'studio' || wsRef.current?.readyState !== WebSocket.OPEN) return;
+        wsRef.current.send(JSON.stringify({
+            type: 'studio-action',
+            payload: { action, payload }
+        }));
+    }, [playoutPolicy.playoutMode]);
+
+    // --- Auto-Fill Logic ---
+    useEffect(() => {
+        const autoFillInterval = setInterval(async () => {
+            const { isAutoFillEnabled, autoFillLeadTime, autoFillSourceType, autoFillSourceId, autoFillTargetDuration, artistSeparation, titleSeparation } = playoutPolicyRef.current;
+            
+            // 1. Check if autofill is enabled, in studio mode, and not already running
+            if (!isAutoFillEnabled || isAutoFillingRef.current || playoutPolicyRef.current.playoutMode !== 'studio') {
+                return;
+            }
+    
+            const playlist = playlistRef.current;
+            const currentIdx = currentTrackIndexRef.current;
+            const progress = trackProgressRef.current;
+            const playing = isPlayingRef.current;
+            
+            // 2. Calculate remaining duration
+            let remainingDuration = 0;
+            if (playing && playlist.length > 0 && currentIdx < playlist.length) {
+                const currentItem = playlist[currentIdx];
+                if (currentItem && !('markerType' in currentItem)) {
+                    remainingDuration += currentItem.duration - progress;
+                }
+                for (let i = currentIdx + 1; i < playlist.length; i++) {
+                    const item = playlist[i];
+                    if (!('markerType' in item)) {
+                        remainingDuration += item.duration;
+                    }
+                }
+            } else if (playlist.length > 0) {
+                // Not playing, calculate total duration of remaining tracks
+                for (let i = currentIdx; i < playlist.length; i++) {
+                    const item = playlist[i];
+                    if (!('markerType' in item)) {
+                        remainingDuration += item.duration;
+                    }
+                }
+            }
+    
+            console.log(`[AutoFill] Checking... Remaining playlist duration: ~${Math.round(remainingDuration / 60)} minutes.`);
+            
+            // 3. Compare with lead time
+            const leadTimeInSeconds = autoFillLeadTime * 60;
+            if (remainingDuration >= leadTimeInSeconds) {
+                return; // Enough music in the playlist
+            }
+    
+            console.log(`[AutoFill] Triggered! Remaining time (${remainingDuration.toFixed(0)}s) is less than lead time (${leadTimeInSeconds}s).`);
+            
+            if (!autoFillSourceId) {
+                console.warn('[AutoFill] Aborted. No source folder or tag is configured.');
+                return;
+            }
+            
+            isAutoFillingRef.current = true;
+            
+            try {
+                // 4. Get candidate tracks from source
+                const getTracksFromSource = (rootNode: Folder, sourceType: 'folder' | 'tag', sourceId: string): Track[] => {
+                    const tracks: Track[] = [];
+    
+                    const collectSongsFromFolder = (folder: Folder) => {
+                        folder.children.forEach(item => {
+                            if (item.type === 'folder') {
+                                collectSongsFromFolder(item);
+                            } else if (item.type === TrackType.SONG) {
+                                tracks.push(item);
+                            }
+                        });
+                    };
+    
+                    const findAndCollect = (node: Folder): boolean => {
+                        if (node.id === sourceId) {
+                            collectSongsFromFolder(node);
+                            return true;
+                        }
+                        for (const child of node.children) {
+                            if (child.type === 'folder' && findAndCollect(child)) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    
+                    const collectByTag = (node: LibraryItem, tag: string) => {
+                        if (node.type === 'folder') {
+                            node.children.forEach(child => collectByTag(child, tag));
+                        } else if (node.type === TrackType.SONG && node.tags?.includes(tag)) {
+                            if (!tracks.some(t => t.id === node.id)) {
+                                tracks.push(node);
+                            }
+                        }
+                    };
+    
+                    if (sourceType === 'folder' && sourceId) {
+                        findAndCollect(rootNode);
+                    } else if (sourceType === 'tag' && sourceId) {
+                        collectByTag(rootNode, sourceId);
+                    }
+    
+                    return tracks;
+                };
+                
+                let candidateTracks = getTracksFromSource(mediaLibraryRef.current, autoFillSourceType, autoFillSourceId);
+                console.log(`[AutoFill] Found ${candidateTracks.length} candidate tracks from source '${autoFillSourceId}'.`);
+    
+                if (candidateTracks.length === 0) {
+                    console.warn('[AutoFill] No candidate tracks found in the source. Cannot fill playlist.');
+                    return;
+                }
+    
+                // Shuffle candidates
+                for (let i = candidateTracks.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [candidateTracks[i], candidateTracks[j]] = [candidateTracks[j], candidateTracks[i]];
+                }
+                
+                // 5. Select tracks to add, respecting separation rules
+                const tracksToAdd: Track[] = [];
+                let durationAdded = 0;
+                const targetDurationInSeconds = autoFillTargetDuration * 60;
+                
+                for (const candidate of candidateTracks) {
+                    if (durationAdded >= targetDurationInSeconds) break;
+    
+                    const checkHistory = [...playlistRef.current, ...tracksToAdd].filter(item => !('markerType' in item)) as Track[];
+                    let durationLookback = 0;
+                    let hasConflict = false;
+    
+                    for (let i = checkHistory.length - 1; i >= 0; i--) {
+                        const historyTrack = checkHistory[i];
+                        if (historyTrack.artist && historyTrack.artist === candidate.artist && durationLookback / 60 < artistSeparation) {
+                            hasConflict = true;
+                            break;
+                        }
+                        if (historyTrack.title === candidate.title && durationLookback / 60 < titleSeparation) {
+                            hasConflict = true;
+                            break;
+                        }
+                        durationLookback += historyTrack.duration;
+                        if (durationLookback / 60 > Math.max(artistSeparation, titleSeparation)) {
+                            break; // No need to look back further
+                        }
+                    }
+                    
+                    if (!hasConflict) {
+                        tracksToAdd.push(candidate);
+                        durationAdded += candidate.duration;
+                    }
+                }
+    
+                if (tracksToAdd.length === 0) {
+                    console.warn('[AutoFill] Could not find any suitable tracks to add after applying separation rules.');
+                    return;
+                }
+    
+                console.log(`[AutoFill] Adding ${tracksToAdd.length} tracks (~${Math.round(durationAdded/60)} minutes) to the playlist.`);
+    
+                // 6. Add tracks to playlist
+                const newPlaylistItems = tracksToAdd.map(track => ({
+                    ...track,
+                    originalId: track.id,
+                    id: `pl-item-af-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+                    addedBy: 'auto-fill' as const
+                }));
+    
+                const newPlaylist = [...playlist, ...newPlaylistItems];
+                sendStudioAction('setPlaylist', newPlaylist);
+    
+            } catch (error) {
+                console.error('[AutoFill] An error occurred during the fill process:', error);
+            } finally {
+                isAutoFillingRef.current = false;
+            }
+    
+        }, 10000); // Run every 10 seconds
+    
+        return () => clearInterval(autoFillInterval);
+    }, [sendStudioAction]);
     
     useEffect(() => {
         return () => {
@@ -758,14 +955,6 @@ const AppInternal: React.FC = () => {
         setPflTrackId(null);
         setPflProgress(0);
     }, []);
-    
-    const sendStudioAction = useCallback((action: string, payload: any) => {
-        if (playoutPolicy.playoutMode !== 'studio' || wsRef.current?.readyState !== WebSocket.OPEN) return;
-        wsRef.current.send(JSON.stringify({
-            type: 'studio-action',
-            payload: { action, payload }
-        }));
-    }, [playoutPolicy.playoutMode]);
     
     const getTrackSrc = useCallback(async (track: Track): Promise<string | null> => {
         const trackWithOriginalId = { ...track, id: track.originalId || track.id };
