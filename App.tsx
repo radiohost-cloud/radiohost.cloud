@@ -88,8 +88,6 @@ const initialMixerConfig: MixerConfig = {
     mic: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: false, gain: 1 } } },
     pfl: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
     cartwall: { gain: 1, muted: false, sends: { main: { enabled: true, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
-    // FIX: Added 'remotes' to initialMixerConfig to satisfy the MixerConfig type.
-    remotes: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
 };
 
 
@@ -245,7 +243,6 @@ const findNextPlayableIndex = (playlist: SequenceItem[], startIndex: number, dir
 type StreamStatus = 'inactive' | 'starting' | 'broadcasting' | 'error' | 'stopping';
 
 // --- App Component ---
-// FIX: Changed AppInternal to a regular function component definition to resolve type error.
 const AppInternal: React.FC = () => {
     const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
     const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -282,7 +279,6 @@ const AppInternal: React.FC = () => {
     const [loadedArtworkUrl, setLoadedArtworkUrl] = useState<string | null>(null);
     const [validationWarning, setValidationWarning] = useState<{ track: Track; beforeItemId: string | null; message: string; } | null>(null);
     const [isSecureContext, setIsSecureContext] = useState(window.isSecureContext);
-    const [audioLevels, setAudioLevels] = useState<Record<string, number>>({});
 
     const [isAutoModeEnabled, setIsAutoModeEnabled] = useState(false);
 
@@ -310,6 +306,7 @@ const AppInternal: React.FC = () => {
     
     // --- Audio Mixer State ---
     const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
+    const [audioLevels, setAudioLevels] = useState<Partial<Record<AudioSourceId, number>>>({});
 
     // --- Cartwall State ---
     const [activeCartPlayers, setActiveCartPlayers] = useState(new Map<number, { progress: number; duration: number }>());
@@ -401,10 +398,6 @@ const AppInternal: React.FC = () => {
         analysers: Map<AudioSourceId, AnalyserNode>;
     }>({ sources: new Map(), gains: new Map(), analysers: new Map() });
 
-    // --- Broadcast State ---
-    const [isPublicStreamEnabled, setIsPublicStreamEnabled] = useState(false);
-    const [publicStreamStatus, setPublicStreamStatus] = useState<StreamStatus>('inactive');
-    const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
 
     const currentTrack = useMemo(() => {
         const item = playlist[currentTrackIndex];
@@ -586,32 +579,6 @@ const AppInternal: React.FC = () => {
     }, [handleLogout]);
 
     const isStudio = playoutPolicy.playoutMode === 'studio';
-    
-    const handleTogglePublicStream = useCallback((enabled: boolean) => {
-        if (!isSecureContext) {
-            console.error('[Broadcast] Cannot start - insecure context detected');
-            setPublicStreamError('Broadcasting dostępne wyłącznie przez HTTPS/localhost');
-            return;
-        }
-
-        setIsPublicStreamEnabled(enabled);
-        if (enabled) {
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({ type: 'streamStart' }));
-                setPublicStreamStatus('starting');
-                setPublicStreamError(null);
-            } else {
-                setPublicStreamError("WebSocket not connected. Cannot start stream.");
-                setIsPublicStreamEnabled(false);
-            }
-        } else {
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
-                setPublicStreamStatus('stopping');
-                setPublicStreamError(null);
-            }
-        }
-    }, [isSecureContext]);
 
     // --- NEW EFFECT FOR AUDIO CAPTURE SETUP ---
     useEffect(() => {
@@ -643,7 +610,7 @@ const AppInternal: React.FC = () => {
                 const playerSourceNode = audioCtx.createMediaElementSource(player);
                 const playerGainNode = audioCtx.createGain();
                 const playerAnalyserNode = audioCtx.createAnalyser();
-                playerAnalyserNode.fftSize = 2048;
+                playerAnalyserNode.fftSize = 256;
 
                 playerSourceNode.connect(playerGainNode);
                 playerGainNode.connect(playerAnalyserNode);
@@ -662,47 +629,69 @@ const AppInternal: React.FC = () => {
     }, [isSecureContext, isStudio]);
 
     useEffect(() => {
-        let rafId: number;
+        if (!isStudio) return;
+        let animationFrameId: number;
+
         const updateLevels = () => {
-          const newLevels: Record<string, number> = {};
-          
-          audioNodesRef.current.analysers.forEach((analyser, channelId) => {
-            const dataArray = new Float32Array(analyser.frequencyBinCount);
-            analyser.getFloatTimeDomainData(dataArray);
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-              sum += dataArray[i] * dataArray[i];
-            }
-            const rms = Math.sqrt(sum / dataArray.length);
-            newLevels[channelId] = rms;
-            console.log('[VU Meter Debug] channelId:', channelId, 'RMS:', rms);
-          });
-          
-          cartAudioNodesRef.current.forEach(({ analyserNode }, index) => {
-             const channelId = `cartwall_${index}`;
-             const dataArray = new Float32Array(analyserNode.frequencyBinCount);
-             analyserNode.getFloatTimeDomainData(dataArray);
-             let sum = 0;
-             for (let i = 0; i < dataArray.length; i++) {
-               sum += dataArray[i] * dataArray[i];
-             }
-             const rms = Math.sqrt(sum / dataArray.length);
-             newLevels[channelId] = rms;
-             console.log('[VU Meter Debug] channelId:', channelId, 'RMS:', rms);
-          });
+            const newLevels: Partial<Record<AudioSourceId, number>> = {};
+            const { analysers } = audioNodesRef.current;
+            
+            analysers.forEach((analyser, sourceId) => {
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                analyser.getByteTimeDomainData(dataArray);
 
-          const cartwallLevel = Object.entries(newLevels)
-            .filter(([key]) => key.startsWith('cartwall_'))
-            .reduce((max, [, value]) => Math.max(max, value || 0), 0);
-        
-          newLevels.cartwall = cartwallLevel;
+                let sumSquares = 0.0;
+                for (const amplitude of dataArray) {
+                    const normalized = (amplitude / 128.0) - 1.0;
+                    sumSquares += normalized * normalized;
+                }
+                const rms = Math.sqrt(sumSquares / bufferLength);
+                // Scale RMS to a 0-100 range for the meter.
+                // The multiplier (e.g., 300) can be tweaked for sensitivity.
+                newLevels[sourceId] = Math.min(100, rms * 300);
+            });
+            
+            cartAudioNodesRef.current.forEach(({ analyserNode }, index) => {
+                 const bufferLength = analyserNode.frequencyBinCount;
+                 const dataArray = new Uint8Array(bufferLength);
+                 analyserNode.getByteTimeDomainData(dataArray);
 
-          setAudioLevels(newLevels);
-          rafId = requestAnimationFrame(updateLevels);
+                 let sumSquares = 0.0;
+                 for (const amplitude of dataArray) {
+                     const normalized = (amplitude / 128.0) - 1.0;
+                     sumSquares += normalized * normalized;
+                 }
+                 const rms = Math.sqrt(sumSquares / bufferLength);
+                 
+                 // Use a temporary key for the cartwall levels
+                 newLevels[`cartwall_${index}` as AudioSourceId] = Math.min(100, rms * 300);
+            });
+
+            // Combine all cartwall levels into a single 'cartwall' value (taking the max)
+            const cartwallLevel = Object.entries(newLevels)
+                .filter(([key]) => key.startsWith('cartwall_'))
+                .reduce((max, [, value]) => Math.max(max, value || 0), 0);
+            
+            newLevels.cartwall = cartwallLevel;
+
+            setAudioLevels(currentLevels => {
+                 // Prevent unnecessary re-renders if levels are very similar
+                const changed = Object.keys(newLevels).some(key => 
+                    Math.abs((newLevels[key as AudioSourceId] || 0) - (currentLevels[key as AudioSourceId] || 0)) > 0.5
+                );
+                return changed ? newLevels : currentLevels;
+            });
+            
+            animationFrameId = requestAnimationFrame(updateLevels);
         };
-        rafId = requestAnimationFrame(updateLevels);
-        return () => cancelAnimationFrame(rafId);
-      }, []);
+
+        animationFrameId = requestAnimationFrame(updateLevels);
+
+        return () => {
+            cancelAnimationFrame(animationFrameId);
+        };
+    }, [isStudio]);
 
 
     useEffect(() => {
@@ -1327,7 +1316,6 @@ const AppInternal: React.FC = () => {
         if (!isStudio || !audioContextRef.current) return;
     
         const { sources, gains, analysers } = audioNodesRef.current;
-        const audioCtx = audioContextRef.current;
     
         // Clean up existing nodes for this source
         const existingSource = sources.get(sourceId);
@@ -1347,10 +1335,11 @@ const AppInternal: React.FC = () => {
         }
     
         if (stream) {
+            const audioCtx = audioContextRef.current;
             const sourceNode = audioCtx.createMediaStreamSource(stream);
             const gainNode = audioCtx.createGain();
             const analyserNode = audioCtx.createAnalyser();
-            analyserNode.fftSize = 2048;
+            analyserNode.fftSize = 256;
             
             const config = mixerConfig[sourceId];
             if (config) {
@@ -1459,16 +1448,1321 @@ const AppInternal: React.FC = () => {
         let estimatedStartTime: number;
         if (insertIndex > 0) {
             const prevItem = currentPlaylist[insertIndex - 1];
-             // NOTE: The rest of this function was truncated. This is a placeholder implementation.
+            const prevTimelineData = timelineRef.current.get(prevItem.id);
+            estimatedStartTime = prevTimelineData ? prevTimelineData.endTime.getTime() : Date.now();
+        } else {
+             estimatedStartTime = Date.now();
+        }
+        
+        const checkPoints: { track: { artist?: string; title: string }, time: number }[] = playoutHistory.map(h => ({ track: h, time: h.playedAt }));
+        currentPlaylist.forEach(item => {
+            if (!('markerType' in item)) {
+                const timelineData = timelineRef.current.get(item.id);
+                if (timelineData) checkPoints.push({ track: item, time: timelineData.startTime.getTime() });
+            }
+        });
+
+        for (const point of checkPoints) {
+            const timeDiff = Math.abs(estimatedStartTime - point.time);
+            if (point.track.artist && point.track.artist === trackToAdd.artist && timeDiff < artistSeparationMs) {
+                const minutesAgo = Math.round(timeDiff / 60000);
+                return { isValid: false, message: `Artist separation violation. "${trackToAdd.artist}" was played ${minutesAgo} minute${minutesAgo !== 1 ? 's' : ''} ago (policy: ${artistSeparation} min).` };
+            }
+            if (point.track.title === trackToAdd.title && timeDiff < titleSeparationMs) {
+                 const minutesAgo = Math.round(timeDiff / 60000);
+                return { isValid: false, message: `Title separation violation. "${trackToAdd.title}" was played ${minutesAgo} minute${minutesAgo !== 1 ? 's' : ''} ago (policy: ${titleSeparation} min).` };
+            }
         }
         return { isValid: true, message: '' };
-    }, [playlist, playoutPolicy]);
+    }, [playoutPolicy, playlist, playoutHistory]);
 
-    // NOTE: The rest of the App.tsx component was truncated.
-    // The following is a placeholder to ensure the file is syntactically valid and has a default export.
-    return <div>Component was truncated and could not be fully recovered.</div>;
+    const handleAttemptToAddTrack = useCallback((track: Track, beforeItemId: string | null) => {
+        const validation = validateTrackPlacement(track, beforeItemId);
+        if (validation.isValid) handleInsertTrackInPlaylist(track, beforeItemId);
+        else setValidationWarning({ track, beforeItemId, message: validation.message });
+    }, [validateTrackPlacement, handleInsertTrackInPlaylist]);
+
+    const sendLibraryAction = useCallback((action: string, payload: any) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+                type: 'libraryAction',
+                payload: { action, payload }
+            }));
+        }
+    }, []);
+
+    const addVoiceTrackToState = useCallback(async (track: Track, blob: Blob, vtMix: VtMixDetails, beforeItemId: string | null) => {
+        const nickname = track.addedByNickname || currentUserRef.current?.nickname;
+        if (!nickname) {
+            console.error("Cannot save voice track: nickname is missing.");
+            return;
+        }
+
+        const destinationPath = `Voicetracks/${nickname}`;
+        const trackWithMetadata = { ...track, artist: nickname, addedByNickname: nickname };
+        
+        const savedTrack = await dataService.addTrack(trackWithMetadata, blob, undefined, destinationPath);
+    
+        setPlaylist(currentPlaylist => {
+            const updated = [...currentPlaylist];
+            const insertIndex = beforeItemId ? updated.findIndex(item => item.id === beforeItemId) : updated.length;
+            const trackWithMix = { ...savedTrack, vtMix, originalId: savedTrack.id, id: `pl-item-vt-${Date.now()}-${Math.random().toString(36).substring(2, 9)}` };
+            
+            if (insertIndex !== -1) {
+                updated.splice(insertIndex, 0, trackWithMix);
+            } else {
+                updated.push(trackWithMix);
+            }
+            
+            sendStudioAction('setPlaylist', updated);
+            return updated;
+        });
+    }, [sendStudioAction]);
+    
+    const addVoiceTrackToStateRef = useRef(addVoiceTrackToState);
+    addVoiceTrackToStateRef.current = addVoiceTrackToState;
+
+
+    const handleInsertVoiceTrack = useCallback(async (voiceTrack: Track, blob: Blob, vtMix: VtMixDetails, beforeItemId: string | null) => {
+        const nickname = currentUserRef.current?.nickname;
+        if (!nickname) {
+            console.error("Cannot create voice track: user nickname is missing.");
+            return;
+        }
+        const finalVoiceTrack = { ...voiceTrack, artist: nickname, addedByNickname: nickname };
+
+        if (playoutPolicy.playoutMode === 'presenter') {
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                const reader = new FileReader();
+                reader.readAsDataURL(blob);
+                reader.onloadend = () => {
+                    const payload = { voiceTrack: finalVoiceTrack, vtMix, beforeItemId, audioDataUrl: reader.result as string };
+                    wsRef.current?.send(JSON.stringify({ type: 'voiceTrackAdd', payload }));
+                    console.log('[Presenter] Sent new VT to studio.');
+                };
+            } else {
+                console.error("WebSocket not connected. Cannot send VT to studio.");
+            }
+        } else {
+            addVoiceTrackToState(finalVoiceTrack, blob, vtMix, beforeItemId);
+        }
+    }, [addVoiceTrackToState, playoutPolicy.playoutMode]);
+
+    const handleRemoveFromPlaylist = useCallback((itemIdToRemove: string) => {
+        if (playoutPolicy.playoutMode === 'presenter') {
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                const item = playlist.find(i => i.id === itemIdToRemove);
+                if (item && ('markerType' in item || item.type !== TrackType.VOICETRACK || item.addedByNickname !== currentUser?.nickname)) {
+                    console.warn("[Permissions] Presenter attempt to remove an item they don't own.");
+                    return;
+                }
+                wsRef.current.send(JSON.stringify({
+                    type: 'presenter-action',
+                    payload: { action: 'requestRemoveItem', payload: { itemId: itemIdToRemove } }
+                }));
+            }
+        } else {
+            const newPlaylist = playlist.filter(i => i.id !== itemIdToRemove);
+            sendStudioAction('setPlaylist', newPlaylist);
+        }
+    }, [sendStudioAction, playlist, playoutPolicy.playoutMode, currentUser]);
+
+    const handleReorderPlaylist = useCallback((draggedId: string, dropTargetId: string | null) => {
+        const newPlaylist = [...playlist];
+        const dragIndex = newPlaylist.findIndex(item => item.id === draggedId);
+        if (dragIndex === -1) return;
+        const [draggedItem] = newPlaylist.splice(dragIndex, 1);
+        const dropIndex = dropTargetId ? newPlaylist.findIndex(item => item.id === dropTargetId) : newPlaylist.length;
+        if (dropIndex === -1) newPlaylist.push(draggedItem);
+        else newPlaylist.splice(dropIndex, 0, draggedItem);
+        sendStudioAction('setPlaylist', newPlaylist);
+    }, [sendStudioAction, playlist]);
+
+
+    const handleClearPlaylist = useCallback(() => {
+        const newPlaylist = currentTrack ? [currentTrack] : [];
+        sendStudioAction('setPlaylist', newPlaylist);
+    }, [currentTrack, sendStudioAction]);
+    
+    const handleRemoveFromLibrary = useCallback((id: string) => {
+        sendLibraryAction('removeItem', { itemId: id });
+    }, [sendLibraryAction]);
+
+    const handleRemoveMultipleFromLibrary = useCallback((ids: string[]) => {
+        sendLibraryAction('removeMultipleItems', { itemIds: ids });
+    }, [sendLibraryAction]);
+
+    const handleCreateFolder = useCallback((parentId: string, folderName: string) => {
+        sendLibraryAction('createFolder', { parentId, folderName });
+    }, [sendLibraryAction]);
+    
+    const handleAddUrlTrackToLibrary = useCallback((track: Track, destinationFolderId: string) => {
+        sendLibraryAction('addUrlTrack', { track, destinationFolderId });
+    }, [sendLibraryAction]);
+
+    const handleMoveItemInLibrary = useCallback((itemId: string, destinationFolderId: string) => {
+        sendLibraryAction('moveItem', { itemId, destinationFolderId });
+    }, [sendLibraryAction]);
+    
+    const handleUpdateFolderMetadataSettings = useCallback((folderId: string, settings: { enabled: boolean; customText?: string; suppressDuplicateWarning?: boolean }) => {
+        sendLibraryAction('updateFolderMetadata', { folderId, settings });
+    }, [sendLibraryAction]);
+    
+    const handleUpdateTrackMetadata = useCallback((trackId: string, newMetadata: { title: string; artist: string; type: TrackType; remoteArtworkUrl?: string; }) => {
+        sendLibraryAction('updateTrackMetadata', { trackId, newMetadata });
+    }, [sendLibraryAction]);
+
+    const handleUpdateTrackTags = useCallback((trackId: string, tags: string[]) => {
+        sendLibraryAction('updateTrackTags', { trackId, tags });
+    }, [sendLibraryAction]);
+
+    const handleUpdateFolderTags = useCallback((folderId: string, tags: string[]) => {
+        sendLibraryAction('updateFolderTags', { folderId, tags });
+    }, [sendLibraryAction]);
+
+    const handleLogin = useCallback((user: User) => {
+        // This will trigger a full reload of the app state via useEffect
+        setCurrentUser(user);
+        if (user.role) {
+             sessionStorage.setItem('playoutMode', user.role);
+             setPlayoutPolicy(p => ({ ...p, playoutMode: user.role }));
+        }
+    }, []);
+    const handleSignup = useCallback((user: User) => { setCurrentUser(user); }, []);
+
+    const handleLogoChange = useCallback((file: File) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const dataUrl = e.target?.result as string;
+            setLogoSrc(dataUrl);
+            const img = new Image();
+            img.onload = () => {
+                const { colors, textColor } = getProminentColorsAndTextColor(img);
+                const gradient = `linear-gradient(135deg, ${colors[0]} 0%, ${colors[1]} 100%)`;
+                setLogoHeaderGradient(gradient);
+                setLogoHeaderTextColor(textColor);
+            };
+            img.src = dataUrl;
+        };
+        reader.readAsDataURL(file);
+    }, []);
+
+    const handleLogoReset = useCallback(() => {
+        setLogoSrc(null);
+        setLogoHeaderGradient(null);
+        setLogoHeaderTextColor('white');
+    }, []);
+
+    const handleArtworkLoaded = useCallback((url: string | null) => {
+        setLoadedArtworkUrl(url);
+    }, []);
+
+    useEffect(() => {
+        if (isPlaying && loadedArtworkUrl) {
+            const img = new Image();
+            img.crossOrigin = 'Anonymous';
+            img.onload = () => {
+                const { colors, textColor } = getProminentColorsAndTextColor(img);
+                setHeaderGradient(`linear-gradient(135deg, ${colors[0]} 0%, ${colors[1]} 100%)`);
+                setHeaderTextColor(textColor);
+            };
+            img.onerror = () => {
+                setHeaderGradient(logoHeaderGradient);
+                setHeaderTextColor(logoHeaderTextColor);
+            }
+            img.src = loadedArtworkUrl;
+        } else {
+            setHeaderGradient(logoHeaderGradient);
+            setHeaderTextColor(logoHeaderTextColor);
+        }
+    }, [loadedArtworkUrl, isPlaying, logoHeaderGradient, logoHeaderTextColor]);
+
+    const handleMouseDown = useCallback((dividerIndex: number) => (e: React.MouseEvent) => {
+        if ((dividerIndex === 0 && isLibraryCollapsed) || (dividerIndex === 1 && isRightColumnCollapsed)) return;
+        e.preventDefault();
+        if (!mainRef.current) return;
+        dragInfoRef.current = { isDragging: true, dividerIndex, startX: e.clientX, startWidths: [...columnWidths] };
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+    }, [columnWidths, isLibraryCollapsed, isRightColumnCollapsed]);
+
+    useEffect(() => {
+        const handleMouseMove = (moveEvent: MouseEvent) => {
+            if (!dragInfoRef.current.isDragging || !mainRef.current) return;
+            const { startX, startWidths, dividerIndex } = dragInfoRef.current;
+            const mainWidth = mainRef.current.getBoundingClientRect().width;
+            if (mainWidth === 0) return;
+            const dx = moveEvent.clientX - startX;
+            const dxPercent = (dx / mainWidth) * 100;
+            const newWidths = [...startWidths];
+            const leftColumnIndex = dividerIndex;
+            const rightColumnIndex = dividerIndex + 1;
+            const minWidthPercent = 15;
+            let potentialLeftWidth = startWidths[leftColumnIndex] + dxPercent;
+            let potentialRightWidth = startWidths[rightColumnIndex] - dxPercent;
+            const totalResizableWidth = startWidths[leftColumnIndex] + startWidths[rightColumnIndex];
+            if (potentialLeftWidth < minWidthPercent) {
+                potentialLeftWidth = minWidthPercent;
+                potentialRightWidth = totalResizableWidth - potentialLeftWidth;
+            }
+            if (potentialRightWidth < minWidthPercent) {
+                potentialRightWidth = minWidthPercent;
+                potentialLeftWidth = totalResizableWidth - potentialRightWidth;
+            }
+            newWidths[leftColumnIndex] = potentialLeftWidth;
+            newWidths[rightColumnIndex] = potentialRightWidth;
+            setColumnWidths(newWidths);
+        };
+        const handleMouseUp = () => {
+            if (dragInfoRef.current.isDragging) {
+                dragInfoRef.current.isDragging = false;
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            }
+        };
+        window.addEventListener('mousemove', handleMouseMove);
+        window.addEventListener('mouseup', handleMouseUp);
+        return () => {
+            window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, []);
+    
+    useEffect(() => {
+        const handleMouseMove = (moveEvent: MouseEvent) => {
+            if (!headerDragInfoRef.current.isDragging) return;
+            const { startY, startHeight } = headerDragInfoRef.current;
+            const dy = moveEvent.clientY - startY;
+            const maxHeight = window.innerHeight / 2;
+            const minHeight = 0;
+            let newHeight = startHeight + dy;
+            newHeight = Math.max(minHeight, Math.min(maxHeight, newHeight));
+            setHeaderHeight(newHeight);
+        };
+        const handleMouseUp = () => {
+            if (headerDragInfoRef.current.isDragging) {
+                headerDragInfoRef.current.isDragging = false;
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            }
+        };
+        if (headerDragInfoRef.current.isDragging) {
+            window.addEventListener('mousemove', handleMouseMove);
+            window.addEventListener('mouseup', handleMouseUp, { once: true });
+        }
+        return () => {
+            window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, [headerDragInfoRef.current.isDragging]);
+
+    const handleHeaderResizeMouseDown = useCallback((e: React.MouseEvent) => {
+        e.preventDefault();
+        headerDragInfoRef.current = { isDragging: true, startY: e.clientY, startHeight: headerHeight };
+        document.body.style.cursor = 'row-resize';
+        document.body.style.userSelect = 'none';
+    }, [headerHeight]);
+
+    const handleHeaderResizeDoubleClick = useCallback(() => {
+        setHeaderHeight(prevHeight => (prevHeight > 0 ? 0 : 80));
+    }, []);
+
+    const handleHeaderWheel = useCallback((e: React.WheelEvent) => {
+        e.preventDefault();
+        setHeaderHeight(prevHeight => {
+            const minHeight = 80;
+            const maxHeight = window.innerHeight / 2;
+            if (prevHeight < minHeight) return minHeight;
+            if (e.deltaY > 0) return maxHeight;
+            if (e.deltaY < 0) return minHeight;
+            return prevHeight;
+        });
+    }, []);
+
+    const nextIndex = useMemo(() => findNextPlayableIndex(playlist, currentTrackIndex, 1), [playlist, currentTrackIndex]);
+    const nextNextIndex = useMemo(() => (nextIndex !== -1 ? findNextPlayableIndex(playlist, nextIndex, 1) : -1), [playlist, nextIndex]);
+
+    const nextTrack = useMemo(() => {
+        if (nextIndex !== -1 && nextIndex !== currentTrackIndex) {
+            return playlist[nextIndex] as Track;
+        }
+        return undefined;
+    }, [playlist, currentTrackIndex, nextIndex]);
+
+    const nextNextTrack = useMemo(() => {
+        if (nextNextIndex !== -1 && nextNextIndex !== nextIndex) {
+            return playlist[nextNextIndex] as Track;
+        }
+        return undefined;
+    }, [playlist, nextIndex, nextNextIndex]);
+    
+    const handleToggleLibraryCollapse = useCallback(() => setIsLibraryCollapsed(p => !p), []);
+    const handleToggleRightColumnCollapse = useCallback(() => setIsRightColumnCollapsed(p => !p), []);
+
+    const displayedColumnWidths = useMemo(() => {
+        const [libWidth, playlistWidth, rightColWidth] = columnWidths;
+        if (isLibraryCollapsed && isRightColumnCollapsed) return [0, 100, 0];
+        if (isLibraryCollapsed) {
+            const totalRemaining = playlistWidth + rightColWidth;
+            if (libWidth > 0 && totalRemaining > 0) {
+                const newPlaylistWidth = playlistWidth + (libWidth * (playlistWidth / totalRemaining));
+                const newRightColWidth = rightColWidth + (libWidth * (rightColWidth / totalRemaining));
+                return [0, newPlaylistWidth, newRightColWidth];
+            }
+            return [0, 70, 30];
+        }
+        if (isRightColumnCollapsed) {
+            const totalRemaining = libWidth + playlistWidth;
+            if (rightColWidth > 0 && totalRemaining > 0) {
+                const newLibWidth = libWidth + (rightColWidth * (libWidth / totalRemaining));
+                const newPlaylistWidth = playlistWidth + (rightColWidth * (playlistWidth / totalRemaining));
+                return [newLibWidth, newPlaylistWidth, 0];
+            }
+            return [30, 70, 0];
+        }
+        return columnWidths;
+    }, [isLibraryCollapsed, isRightColumnCollapsed, columnWidths]);
+
+    const generateBackupData = useCallback(() => {
+        const user = currentUserRef.current;
+        const playlistToSave = playlist.filter(item => 'markerType' in item || item.type !== TrackType.LOCAL_FILE);
+        const settingsToSave = { 
+            playoutPolicy, logoSrc, headerGradient: logoHeaderGradient, headerTextColor: logoHeaderTextColor, columnWidths,
+            isMicPanelCollapsed, headerHeight, isLibraryCollapsed, isRightColumnCollapsed, isAutoBackupEnabled, 
+            isAutoBackupOnStartupEnabled, autoBackupInterval, isAutoModeEnabled,
+        };
+        
+        return {
+            type: "radiohost.cloud_backup", version: 1, timestamp: new Date().toISOString(), userType: user ? 'user' : 'guest', email: user?.email || null,
+            data: {
+                library: mediaLibrary, settings: settingsToSave, playlist: playlistToSave, cartwall: cartwallPages, broadcasts: broadcasts,
+            }
+        };
+    }, [playlist, playoutPolicy, logoSrc, logoHeaderGradient, logoHeaderTextColor, columnWidths, isMicPanelCollapsed, headerHeight, isLibraryCollapsed, isRightColumnCollapsed, isAutoBackupEnabled, isAutoBackupOnStartupEnabled, autoBackupInterval, isAutoModeEnabled, mediaLibrary, cartwallPages, broadcasts]);
+
+    const handleExportData = useCallback(() => {
+        try {
+            const exportData = generateBackupData();
+            const jsonString = JSON.stringify(exportData, null, 2);
+            const blob = new Blob([jsonString], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const date = new Date().toISOString().slice(0, 10);
+            const userName = currentUser?.nickname?.replace(/\s/g, '_') || 'guest';
+            a.href = url;
+            a.download = `radiohost_backup_${userName}_${date}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            console.error("Error during export:", error);
+            alert("An error occurred while exporting data. Please check the console for details.");
+        }
+    }, [generateBackupData, currentUser]);
+    
+    const handleImportData = useCallback((data: any) => {
+        try {
+            if (data.library) {
+                sendLibraryAction('setLibrary', { library: data.library });
+            }
+            if (data.playlist) {
+                setPlaylist(data.playlist);
+                sendStudioAction('setPlaylist', data.playlist);
+            }
+            if (data.cartwall) {
+                let loadedPages: CartwallPage[] | null = null;
+                if (Array.isArray(data.cartwall) && data.cartwall.length > 0) {
+                    if (typeof data.cartwall[0] === 'object' && data.cartwall[0] !== null && 'id' in data.cartwall[0] && 'name' in data.cartwall[0] && 'items' in data.cartwall[0]) {
+                        loadedPages = data.cartwall;
+                    } else {
+                        loadedPages = [{ id: 'default', name: 'Page 1', items: data.cartwall as (CartwallItem | null)[] }];
+                    }
+                }
+                setCartwallPages(loadedPages || [{ id: 'default', name: 'Page 1', items: Array(16).fill(null) }]);
+            }
+            if (data.broadcasts) setBroadcasts(data.broadcasts);
+            if (data.settings) {
+                setPlayoutPolicy({ ...defaultPlayoutPolicy, ...data.settings.playoutPolicy });
+                setLogoSrc(data.settings.logoSrc || null);
+                setLogoHeaderGradient(data.settings.headerGradient || null);
+                setLogoHeaderTextColor(data.settings.headerTextColor || 'white');
+                if (data.settings.columnWidths) setColumnWidths(data.settings.columnWidths);
+                setIsMicPanelCollapsed(data.settings.isMicPanelCollapsed ?? false);
+                setHeaderHeight(data.settings.headerHeight ?? 80);
+                setIsLibraryCollapsed(data.settings.isLibraryCollapsed ?? false);
+                setIsRightColumnCollapsed(data.settings.isRightColumnCollapsed ?? false);
+                setIsAutoBackupEnabled(data.settings.isAutoBackupEnabled || false);
+                setIsAutoBackupOnStartupEnabled(data.settings.isAutoBackupOnStartupEnabled || false);
+                setAutoBackupInterval(data.settings.autoBackupInterval ?? 24);
+                setIsAutoModeEnabled(data.settings.isAutoModeEnabled || false);
+            }
+            alert('Data imported successfully!');
+        } catch (e) {
+            console.error("Failed to import data", e);
+            alert('There was an error importing the data. Check the console for details.');
+        }
+    }, [sendStudioAction, sendLibraryAction]);
+
+
+    const handleSetAutoBackupFolder = useCallback(async () => {
+        if (!('showDirectoryPicker' in window)) {
+            alert("Your browser doesn't support this feature. Please use a modern browser like Chrome or Edge.");
+            return;
+        }
+        try {
+            const handle = await (window as any).showDirectoryPicker();
+            if (await verifyPermission(handle)) {
+                autoBackupFolderHandleRef.current = handle;
+                setAutoBackupFolderPath(handle.name);
+                await dataService.setConfig('autoBackupFolderHandle', handle);
+                await dataService.setConfig('autoBackupFolderPath', handle.name);
+            }
+        } catch (err) {
+            if ((err as Error).name !== 'AbortError') console.error("Error setting auto-backup folder:", err);
+        }
+    }, []);
+
+    useEffect(() => {
+        const checkAndRequestBackupFolder = async () => {
+            if ((isAutoBackupEnabled || isAutoBackupOnStartupEnabled) && !autoBackupFolderHandleRef.current) {
+                const handleFromDb = await dataService.getConfig<FileSystemDirectoryHandle>('autoBackupFolderHandle');
+                if (handleFromDb && (await verifyPermission(handleFromDb))) {
+                    autoBackupFolderHandleRef.current = handleFromDb;
+                    setAutoBackupFolderPath(handleFromDb.name);
+                } else {
+                    if (isAutoBackupEnabled || isAutoBackupOnStartupEnabled) {
+                        await handleSetAutoBackupFolder();
+                    }
+                }
+            }
+        };
+        checkAndRequestBackupFolder();
+    }, [isAutoBackupEnabled, isAutoBackupOnStartupEnabled, handleSetAutoBackupFolder]);
+    
+    const startupBackupPerformed = useRef(false);
+    useEffect(() => {
+        const performBackupAction = async (reason: 'startup' | 'interval') => {
+             try {
+                if (!autoBackupFolderHandleRef.current || !(await verifyPermission(autoBackupFolderHandleRef.current))) {
+                    console.error(`[AutoBackup] Permission for backup folder lost or folder not set. Disabling auto-backup. Reason: ${reason}`);
+                    setIsAutoBackupEnabled(false);
+                    return;
+                }
+                const backupDirHandle = await autoBackupFolderHandleRef.current.getDirectoryHandle('Backups', { create: true });
+                const backupData = generateBackupData();
+                const jsonString = JSON.stringify(backupData, null, 2);
+                const date = new Date();
+                const dateString = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+                const timeString = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}`;
+                const userName = currentUser?.nickname?.replace(/\s/g, '_') || 'guest';
+                const fileName = `radiohost_backup_${userName}_${dateString}_${timeString}.json`;
+                const fileHandle = await backupDirHandle.getFileHandle(fileName, { create: true });
+                const writable = await fileHandle.createWritable();
+                await writable.write(jsonString);
+                await writable.close();
+                setLastAutoBackupTimestamp(Date.now());
+                console.log(`[AutoBackup] Successful (${reason}). Saved to Backups/${fileName}`);
+            } catch (error) {
+                console.error(`[AutoBackup] Failed (${reason}):`, error);
+            }
+        };
+
+        if (isAutoBackupOnStartupEnabled && autoBackupFolderHandleRef.current && !startupBackupPerformed.current) {
+            startupBackupPerformed.current = true;
+            console.log("[AutoBackup] Performing backup on application startup.");
+            setTimeout(() => performBackupAction('startup'), 3000);
+        }
+
+        const intervalId = setInterval(() => {
+            if (!isAutoBackupEnabled || !autoBackupFolderHandleRef.current) return;
+            const now = Date.now();
+            if (autoBackupInterval <= 0) return;
+            const intervalMillis = autoBackupInterval * 60 * 60 * 1000;
+            if (now - lastAutoBackupTimestamp > intervalMillis) performBackupAction('interval');
+        }, 1000 * 60 * 5);
+
+        return () => clearInterval(intervalId);
+    }, [generateBackupData, isAutoBackupOnStartupEnabled, isAutoBackupEnabled, autoBackupInterval, lastAutoBackupTimestamp, currentUser]);
+
+
+    const allFolders = useMemo(() => getAllFolders(mediaLibrary), [mediaLibrary]);
+    const allTags = useMemo(() => getAllTags(mediaLibrary), [mediaLibrary]);
+    
+    const handleInsertTimeMarker = useCallback((marker: TimeMarker, beforeItemId: string | null) => {
+        const newPlaylist = [...playlist];
+        const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+        if (insertIndex !== -1) newPlaylist.splice(insertIndex, 0, marker);
+        else newPlaylist.push(marker);
+        sendStudioAction('setPlaylist', newPlaylist);
+    }, [sendStudioAction, playlist]);
+
+    const handleUpdateTimeMarker = useCallback((markerId: string, updates: Partial<TimeMarker>) => {
+        const newPlaylist = playlist.map(item => item.id === markerId && 'markerType' in item ? { ...item, ...updates } : item);
+        sendStudioAction('setPlaylist', newPlaylist);
+    }, [sendStudioAction, playlist]);
+    
+    const handleCloseWhatsNewPopup = useCallback(() => {
+        sessionStorage.setItem('radiohost_whatsNewPopupSeen_v1', 'true');
+        setIsWhatsNewOpen(false);
+    }, []);
+
+    const handleToggleAutoMode = useCallback((enabled: boolean) => {
+        setIsAutoModeEnabled(enabled);
+        if (enabled) {
+            setPlayoutPolicy(p => ({ ...p, isAutoFillEnabled: true }));
+            if (!isPlaying && playlist.length > 0) handleTogglePlay();
+        }
+    }, [handleTogglePlay, isPlaying, playlist.length]);
+
+    const handleOpenArtworkModal = useCallback((url: string) => {
+        setArtworkModalUrl(url);
+        setIsArtworkModalOpen(true);
+    }, []);
+
+    const handleCloseArtworkModal = useCallback(() => setIsArtworkModalOpen(false), []);
+
+    const handleOpenBroadcastEditor = useCallback((broadcast: Broadcast | null) => {
+        setEditingBroadcast(broadcast);
+        setIsBroadcastEditorOpen(true);
+    }, []);
+
+    const handleCloseBroadcastEditor = useCallback(() => {
+        setIsBroadcastEditorOpen(false);
+        setEditingBroadcast(null);
+    }, []);
+
+    const handleSaveBroadcast = useCallback((broadcast: Broadcast) => {
+        setBroadcasts(prev => {
+            const newBroadcasts = prev.map(b => b.id === broadcast.id ? broadcast : b);
+            if (!newBroadcasts.some(b => b.id === broadcast.id)) {
+                newBroadcasts.push(broadcast);
+            }
+            return newBroadcasts;
+        });
+        handleCloseBroadcastEditor();
+    }, [handleCloseBroadcastEditor]);
+
+    const handleDeleteBroadcast = useCallback((broadcastId: string) => {
+        setBroadcasts(prev => prev.filter(b => b.id !== broadcastId));
+    }, []);
+
+    const loadBroadcastsToPlaylist = useCallback((broadcastsToLoad: Broadcast[]) => {
+        if (isStudio && broadcastsToLoad.length > 0) {
+            broadcastsToLoad.sort((a, b) => a.startTime - b.startTime);
+            const allItemsToInsert = broadcastsToLoad.flatMap(b => b.playlist.map(item => {
+                 if ('markerType' in item) return item;
+                 return { ...item, originalId: item.id, id: `pl-item-bc-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`, addedBy: 'broadcast' as const };
+            }));
+            
+            const newPlaylist = [ ...playlist.slice(0, 1), ...allItemsToInsert, ...playlist.slice(1) ];
+            sendStudioAction('setPlaylist', newPlaylist);
+    
+            const now = Date.now();
+            const loadedIds = new Set(broadcastsToLoad.map(b => b.id));
+            setBroadcasts(currentBroadcasts => currentBroadcasts.map(b => loadedIds.has(b.id) ? { ...b, lastLoaded: now } : b));
+        }
+    }, [isStudio, sendStudioAction, playlist]);
+
+    const handleManualLoadBroadcast = useCallback((broadcastId: string) => {
+        const broadcastToLoad = broadcasts.find(b => b.id === broadcastId);
+        if (broadcastToLoad) loadBroadcastsToPlaylist([broadcastToLoad]);
+    }, [loadBroadcastsToPlaylist, broadcasts]);
+    
+    const handleVoiceTrackCreate = useCallback(async (voiceTrack: Track, blob: Blob): Promise<Track> => {
+        const nickname = voiceTrack.addedByNickname;
+        if (!nickname) {
+            console.error("Cannot save voice track from Broadcast Editor: nickname is missing.");
+            throw new Error("Could not save voice track: missing user information.");
+        }
+        const destinationPath = `Voicetracks/${nickname}`;
+        const trackWithArtist = { ...voiceTrack, artist: nickname };
+        const savedTrack = await dataService.addTrack(trackWithArtist, blob, undefined, destinationPath);
+        return savedTrack;
+    }, []);
+
+    // --- NEW: WebSocket Logic for HOST mode ---
+    useEffect(() => {
+        if (!currentUser) {
+            setWsStatus('disconnected');
+            return;
+        }
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/socket?email=${currentUser.email}`;
+        
+        setWsStatus('connecting');
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+            console.log('[WebSocket] Connected');
+            setWsStatus('connected');
+            if (playoutPolicyRef.current.playoutMode === 'studio') {
+                ws.send(JSON.stringify({ type: 'configUpdate', payload: { logoSrc: logoSrcRef.current } }));
+            }
+            // Start heartbeat
+            heartbeatIntervalRef.current = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ping' }));
+                }
+            }, 30000);
+        };
+
+        ws.onmessage = (event) => {
+            if (event.data instanceof Blob) {
+                // This path is for binary data if ever needed, ignoring for now.
+                return;
+            }
+            const data = JSON.parse(event.data);
+            if (data.type === 'pong') return; // Ignore pong messages from server
+
+            if (data.type === 'state-update') {
+                const { playlist: serverPlaylist, playerState: serverPlayerState } = data.payload;
+                if (serverPlaylist) {
+                    if (JSON.stringify(serverPlaylist) !== JSON.stringify(playlistRef.current)) {
+                        setPlaylist(serverPlaylist);
+                    }
+                }
+                if (serverPlayerState) {
+                     if (serverPlayerState.currentPlayingItemId !== undefined) {
+                         setCurrentPlayingItemId(serverPlayerState.currentPlayingItemId);
+                     }
+                    if (serverPlayerState.currentTrackIndex !== undefined) setCurrentTrackIndex(serverPlayerState.currentTrackIndex);
+                    if (serverPlayerState.isPlaying !== undefined) setIsPlaying(serverPlayerState.isPlaying);
+                    if (serverPlayerState.trackProgress !== undefined) setTrackProgress(serverPlayerState.trackProgress);
+                    if (serverPlayerState.stopAfterTrackId !== undefined) setStopAfterTrackId(serverPlayerState.stopAfterTrackId);
+                }
+            } else if (data.type === 'library-update') {
+                if (JSON.stringify(data.payload) !== JSON.stringify(mediaLibraryRef.current)) {
+                    setMediaLibrary(data.payload);
+                }
+            } else if (data.type === 'webrtc-signal') {
+                setRtcSignal(data);
+            } else if (data.type === 'chatMessage') {
+                setChatMessages(prev => [...prev.slice(-100), data.payload]);
+                if (activeRightColumnTabRef.current !== 'chat' && !isMobileRef.current) {
+                    setHasUnreadChat(true);
+                }
+            } else if (playoutPolicyRef.current.playoutMode === 'studio' && data.type === 'voiceTrackAdd') {
+                const { voiceTrack, vtMix, beforeItemId, audioDataUrl } = data.payload;
+                fetch(audioDataUrl)
+                    .then(res => res.blob())
+                    .then(blob => {
+                        addVoiceTrackToStateRef.current(voiceTrack, blob, vtMix, beforeItemId);
+                        console.log('[Studio] Received and added new VT from presenter.');
+                    })
+                    .catch(err => console.error("Failed to process incoming VT blob:", err));
+            } else if (data.type === 'presenter-action' && playoutPolicyRef.current.playoutMode === 'studio') {
+                const { action, payload } = data.payload;
+                const { senderEmail } = data; // Server must attach this
+            
+                if (action === 'requestRemoveItem') {
+                    const { itemId } = payload;
+                    const item = playlistRef.current.find(i => i.id === itemId);
+                    const senderUser = allUsersRef.current.find(u => u.email === senderEmail);
+            
+                    if (!item || !senderUser) {
+                        console.warn(`[Studio] Received invalid removal request from ${senderEmail} for item ${itemId}.`);
+                        return;
+                    }
+            
+                    const canDelete = item.type === TrackType.VOICETRACK && item.addedByNickname === senderUser.nickname;
+            
+                    if (canDelete) {
+                        console.log(`[Studio] Presenter ${senderUser.nickname} approved to delete item ${itemId}.`);
+                        const newPlaylist = playlistRef.current.filter(i => i.id !== itemId);
+                        sendStudioAction('setPlaylist', newPlaylist);
+                    } else {
+                        console.warn(`[Studio] Presenter ${senderUser.nickname} is NOT allowed to delete item ${itemId}.`);
+                    }
+                }
+            } else if (data.type === 'presenterOnAirRequest') {
+                console.log(`[Studio] Received on-air request from ${data.payload.presenterEmail}`);
+                // This is now just a notification. The studio user must click the toggle.
+            } else if (data.type === 'presenterStatusUpdate') {
+                const { presenterEmail, onAir } = data.payload;
+                if (playoutPolicyRef.current.playoutMode === 'studio') {
+                    const sourceId: AudioSourceId = `remote_${presenterEmail}`;
+                    setMixerConfig(prevConfig => {
+                        if (!prevConfig[sourceId] && onAir) {
+                            console.warn(`Received on-air status for unknown remote user: ${presenterEmail}. Ignoring until their stream is established.`);
+                            return prevConfig;
+                        }
+                        const newConfig = JSON.parse(JSON.stringify(prevConfig));
+                        if(newConfig[sourceId]) {
+                            newConfig[sourceId].sends.main.enabled = onAir;
+                        }
+                        return newConfig;
+                    });
+                } else if (currentUserRef.current?.email === presenterEmail) {
+                    setMixerConfig(prevConfig => {
+                        const newConfig = JSON.parse(JSON.stringify(prevConfig));
+                        newConfig.mic.sends.main.enabled = onAir;
+                        return newConfig;
+                    });
+                }
+            } else if (data.type === 'presenters-update') {
+                console.log('[WebSocket] Received presenters update:', data.payload.presenters);
+                setOnlinePresenters(data.payload.presenters);
+            } else if (data.type === 'icecastStatusUpdate') {
+                const newStatus = data.payload.status;
+                setPublicStreamStatus(newStatus);
+                setIsPublicStreamEnabled(newStatus === 'starting' || newStatus === 'broadcasting' || newStatus === 'stopping');
+                if (data.payload.error) {
+                    setPublicStreamError(data.payload.error);
+                } else {
+                    setPublicStreamError(null);
+                }
+            }
+        };
+
+        ws.onclose = () => {
+            console.log('[WebSocket] Disconnected');
+            setWsStatus('disconnected');
+            if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+        };
+        ws.onerror = (error) => {
+            console.error('[WebSocket] Error:', error);
+            setWsStatus('disconnected');
+            if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+        };
+
+        return () => {
+            if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+            ws.close();
+        };
+    }, [currentUser]);
+    
+    // Effect to clean up resources for departed presenters
+    useEffect(() => {
+        if (!isStudio) return;
+
+        const onlineEmails = new Set(onlinePresenters.map(p => p.email));
+        
+        const presentersToClean = Object.keys(mixerConfig)
+            .filter(id => id.startsWith('remote_') && !onlineEmails.has(id.replace('remote_', '')))
+            .map(id => id.replace('remote_', ''));
+            
+        if (presentersToClean.length > 0) {
+            console.log('[Cleanup] Removing departed presenters:', presentersToClean);
+            
+            const newMixerConfig = { ...mixerConfig };
+            let configChanged = false;
+            
+            presentersToClean.forEach(email => {
+                const sourceId: AudioSourceId = `remote_${email}`;
+                
+                remoteStudioRef.current?.cleanupConnection(email);
+
+                handleSourceStream(null, sourceId);
+                
+                if (newMixerConfig[sourceId]) {
+                    delete newMixerConfig[sourceId];
+                    configChanged = true;
+                }
+            });
+            
+            if (configChanged) {
+                setMixerConfig(newMixerConfig);
+            }
+        }
+    }, [onlinePresenters, isStudio, mixerConfig, handleSourceStream]);
+
+
+    useEffect(() => {
+        if (isStudio && wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'configUpdate', payload: { logoSrc } }));
+        }
+    }, [logoSrc, isStudio, wsStatus]);
+    
+    // --- Public Stream State & Logic ---
+    const [isPublicStreamEnabled, setIsPublicStreamEnabled] = useState(false);
+    const [publicStreamStatus, setPublicStreamStatus] = useState<StreamStatus>('inactive');
+    const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
+
+    const handleTogglePublicStream = (enabled: boolean) => {
+        if (!window.isSecureContext) {
+            console.error('[Broadcast] Cannot start - insecure context detected');
+            setPublicStreamError('Broadcasting dostępne wyłącznie przez HTTPS/localhost');
+            setIsPublicStreamEnabled(false); // Make sure the toggle state reflects the failure
+            return;
+        }
+
+        console.log(`[handleTogglePublicStream] Attempting to set public stream to: ${enabled}`);
+        if (isStudio && wsRef.current?.readyState === WebSocket.OPEN) {
+            if (enabled) {
+                // Ensure audio context and destination are ready
+                if (!destinationNodeRef.current) {
+                    console.error("Audio capture destination not ready. Cannot start stream.");
+                    setPublicStreamStatus('error');
+                    setPublicStreamError('Audio engine could not be initialized. Please refresh.');
+                    setIsPublicStreamEnabled(false);
+                    return;
+                }
+
+                // Send command to server to start ffmpeg
+                const config = playoutPolicyRef.current.streamingConfig;
+                wsRef.current.send(JSON.stringify({ type: 'streamStart', payload: config }));
+
+                // Start client-side recording and streaming
+                try {
+                    const stream = destinationNodeRef.current.stream;
+                    const options = { mimeType: 'audio/webm; codecs=opus' };
+                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                        console.error("Opus codec not supported. Broadcasting may fail.");
+                    }
+                    
+                    mediaRecorderRef.current = new MediaRecorder(stream, options);
+
+                    mediaRecorderRef.current.ondataavailable = (event) => {
+                        if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(event.data);
+                        }
+                    };
+                    
+                    mediaRecorderRef.current.onerror = (event) => {
+                        console.error("MediaRecorder Error:", event);
+                    };
+
+                    mediaRecorderRef.current.start(250); // Send data every 250ms
+                    console.log("[Broadcast] MediaRecorder started, streaming to server.");
+                } catch (e) {
+                    console.error("Failed to start MediaRecorder:", e);
+                    setPublicStreamStatus('error');
+                    setPublicStreamError('Failed to start audio recorder. Check microphone permissions or browser support.');
+                    setIsPublicStreamEnabled(false);
+                    // Also tell server to stop trying
+                     wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
+                }
+
+            } else {
+                // Send command to server to stop ffmpeg
+                wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
+
+                // Stop client-side recording
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                    mediaRecorderRef.current.stop();
+                    console.log("[Broadcast] MediaRecorder stopped.");
+                }
+                mediaRecorderRef.current = null;
+            }
+        } else {
+            console.error(`[handleTogglePublicStream] Action failed. Conditions not met. Studio mode: ${isStudio}, WS ready state: ${wsRef.current?.readyState}`);
+            setIsPublicStreamEnabled(!enabled);
+        }
+    };
+
+    // Effect for metadata updates
+    useEffect(() => {
+        if (isStudio && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            const nextTrackTitle = (isPlaying && nextTrack)
+                ? `${nextTrack.artist || ''} - ${nextTrack.title || ''}`.replace(/^ - /, '').trim()
+                : null;
+    
+            const metadataHeader = playoutPolicy.streamingConfig.metadataHeader;
+            const trackTitle = isPlaying ? (displayTrack?.title || '...') : 'Silence';
+            const finalTitle = metadataHeader && metadataHeader.trim() !== ''
+                ? `${metadataHeader.trim()}: ${trackTitle}`
+                : trackTitle;
+
+            const metadataPayload = {
+                title: finalTitle,
+                artist: isPlaying ? (displayTrack?.artist || 'RadioHost.cloud') : 'RadioHost.cloud',
+                artworkUrl: isPlaying ? loadedArtworkUrl : null,
+                nextTrackTitle: nextTrackTitle
+            };
+            
+            wsRef.current.send(JSON.stringify({ type: 'metadataUpdate', payload: metadataPayload }));
+        }
+    }, [displayTrack, isPlaying, loadedArtworkUrl, isStudio, nextTrack, playoutPolicy.streamingConfig.metadataHeader]);
+
+    const handleSendChatMessage = useCallback((text: string, from?: string) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            const message: ChatMessage = {
+                from: from || 'Studio',
+                text,
+                timestamp: Date.now(),
+            };
+            wsRef.current.send(JSON.stringify({
+                type: 'chatMessage',
+                payload: message
+            }));
+            // Optimistically add the message to the sender's own UI, as the server
+            // might not echo it back to the studio/presenter client.
+            setChatMessages(prev => [...prev.slice(-100), message]);
+        }
+    }, []);
+
+    const handleCartwallPlay = useCallback((track: CartwallItem, index: number) => {
+        if (!isStudio || !audioContextRef.current) return;
+    
+        // Stop and clean up if already playing
+        if (cartAudioNodesRef.current.has(index)) {
+            const existing = cartAudioNodesRef.current.get(index)!;
+            existing.element.pause();
+            existing.element.remove(); // Make sure it's garbage collected
+            existing.sourceNode.disconnect();
+            existing.gainNode.disconnect();
+            audioNodesRef.current.analysers.delete(`cartwall_${index}` as AudioSourceId);
+            cartAudioNodesRef.current.delete(index);
+            setActiveCartPlayers(prev => {
+                const next = new Map(prev);
+                next.delete(index);
+                return next;
+            });
+            return;
+        }
+    
+        const audio = new Audio();
+        audio.crossOrigin = "anonymous";
+    
+        getTrackSrc(track).then(src => {
+            if (!src || !audioContextRef.current) return;
+    
+            audio.src = src;
+            const audioCtx = audioContextRef.current;
+    
+            const sourceNode = audioCtx.createMediaElementSource(audio);
+            const gainNode = audioCtx.createGain();
+            const analyserNode = audioCtx.createAnalyser();
+            analyserNode.fftSize = 256;
+
+            const cartConfig = mixerConfig.cartwall;
+            gainNode.gain.value = cartConfig.muted ? 0 : cartConfig.gain;
+    
+            sourceNode.connect(gainNode);
+            gainNode.connect(analyserNode);
+            analyserNode.connect(audioCtx.destination);
+            if (destinationNodeRef.current) {
+                analyserNode.connect(destinationNodeRef.current);
+            }
+    
+            cartAudioNodesRef.current.set(index, { element: audio, sourceNode, gainNode, analyserNode });
+            audioNodesRef.current.analysers.set(`cartwall_${index}` as AudioSourceId, analyserNode);
+    
+            audio.onloadedmetadata = () => {
+                setActiveCartPlayers(prev => new Map(prev).set(index, { progress: 0, duration: audio.duration }));
+            };
+    
+            audio.ontimeupdate = () => {
+                setActiveCartPlayers(prev => {
+                    if (!prev.has(index)) return prev;
+                    return new Map(prev).set(index, { progress: audio.currentTime, duration: audio.duration });
+                });
+            };
+    
+            audio.onended = () => {
+                sourceNode.disconnect();
+                gainNode.disconnect();
+                analyserNode.disconnect();
+                cartAudioNodesRef.current.delete(index);
+                audioNodesRef.current.analysers.delete(`cartwall_${index}` as AudioSourceId);
+                setActiveCartPlayers(prev => {
+                    const next = new Map(prev);
+                    next.delete(index);
+                    return next;
+                });
+            };
+    
+            audio.play().catch(e => console.error("Cartwall playback failed:", e));
+        });
+    }, [isStudio, getTrackSrc, mixerConfig.cartwall]);
+    
+    // Effect to sync mixer config with audio nodes
+    useEffect(() => {
+        if (!isStudio) return;
+    
+        // Sync main player gain
+        const mainPlayerGain = audioNodesRef.current.gains.get('mainPlayer');
+        const mainPlayerConfig = mixerConfig.mainPlayer;
+        if (mainPlayerGain && mainPlayerConfig) {
+            mainPlayerGain.gain.value = mainPlayerConfig.muted ? 0 : mainPlayerConfig.gain;
+        }
+    
+        // Sync mic and remote gains
+        audioNodesRef.current.gains.forEach((gainNode, sourceId) => {
+            if (sourceId === 'mainPlayer' || sourceId === 'cartwall') return; // Handled separately
+            const config = mixerConfig[sourceId];
+            if (config) {
+                gainNode.gain.value = config.muted ? 0 : config.gain;
+            }
+        });
+    
+        // Sync cartwall gains
+        const cartConfig = mixerConfig.cartwall;
+        cartAudioNodesRef.current.forEach(({ gainNode }) => {
+            gainNode.gain.value = cartConfig.muted ? 0 : cartConfig.gain;
+        });
+    
+    }, [mixerConfig, isStudio]);
+
+    if (isLoadingSession) {
+        return (
+            <div className="flex flex-col h-screen bg-white dark:bg-black items-center justify-center space-y-6">
+                <LogoIcon className="h-12 w-auto text-black dark:text-white" />
+                <div className="flex items-center gap-4 text-neutral-500 dark:text-neutral-400">
+                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-current"></div>
+                    <span>Loading your studio...</span>
+                </div>
+            </div>
+        );
+    }
+
+    if (window.location.pathname.toLowerCase() === '/stream') {
+        return <PublicStreamPage />;
+    }
+
+    if (!currentUser) {
+        return <Auth onLogin={handleLogin} onSignup={handleSignup} />;
+    }
+
+    if (isMobile) {
+        return (
+            <MobileApp
+                currentUser={currentUser}
+                onLogout={handleLogout}
+                displayTrack={displayTrack}
+                nextTrack={nextTrack}
+                mixerConfig={mixerConfig}
+                onMixerChange={setMixerConfig}
+                onStreamAvailable={handleSourceStream}
+                ws={wsRef.current}
+                isStudio={isStudio}
+                incomingSignal={rtcSignal}
+                onlinePresenters={onlinePresenters}
+                audioLevels={audioLevels}
+                onInsertVoiceTrack={handleInsertVoiceTrack}
+                chatMessages={chatMessages}
+                onSendChatMessage={handleSendChatMessage}
+                logoSrc={logoSrc}
+                wsStatus={wsStatus}
+                trackProgress={trackProgress}
+                isPlaying={isPlaying}
+                isSecureContext={isSecureContext}
+            />
+        );
+    }
+
+
+    return (
+        <div className="flex flex-col h-full bg-white dark:bg-black text-black dark:text-white font-sans overflow-hidden">
+            <>
+                <div
+                    style={{ height: `${headerHeight}px` }}
+                    className="relative flex-shrink-0 bg-neutral-100/50 dark:bg-neutral-900/50 transition-[height] duration-200 ease-out"
+                    onWheel={handleHeaderWheel}
+                >
+                    <Header
+                        currentUser={currentUser}
+                        onLogout={handleLogout}
+                        currentTrack={displayTrack}
+                        onNext={handleNext}
+                        onPrevious={handlePrevious}
+                        isPlaying={isPlaying}
+                        onTogglePlay={handleTogglePlay}
+                        isPresenterLive={mixerConfig.mic.sends.main.enabled}
+                        progress={trackProgress}
+                        logoSrc={logoSrc}
+                        onLogoChange={handleLogoChange}
+                        onLogoReset={handleLogoReset}
+                        headerGradient={headerGradient}
+                        headerTextColor={headerTextColor}
+                        onOpenHelp={() => setIsHelpModalOpen(true)}
+                        isAutoModeEnabled={isAutoModeEnabled}
+                        onToggleAutoMode={handleToggleAutoMode}
+                        onArtworkClick={handleOpenArtworkModal}
+                        onArtworkLoaded={handleArtworkLoaded}
+                        headerHeight={headerHeight}
+                        nextTrack={nextTrack}
+                        nextNextTrack={nextNextTrack}
+                        onPlayTrack={handlePlayTrack}
+                        onEject={handleRemoveFromPlaylist}
+                        playoutMode={playoutPolicy.playoutMode}
+                        wsStatus={wsStatus}
+                    />
+                </div>
+                <VerticalResizer
+                    onMouseDown={handleHeaderResizeMouseDown}
+                    onDoubleClick={handleHeaderResizeDoubleClick}
+                    title="Drag to resize player, double-click to toggle visibility"
+                />
+                <main ref={mainRef} className="flex-grow flex p-4 min-h-0">
+                    <div style={{ flexBasis: `${displayedColumnWidths[0]}%` }} className={`flex-shrink-0 h-full overflow-hidden transition-all duration-300 ease-in-out ${!isLibraryCollapsed && 'border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900'}`}>
+                        <MediaLibrary
+                            rootFolder={mediaLibrary}
+                            onAddToPlaylist={(track) => handleAttemptToAddTrack(track, null)}
+                            onAddUrlTrackToLibrary={handleAddUrlTrackToLibrary}
+                            onRemoveItem={handleRemoveFromLibrary}
+                            onRemoveMultipleItems={handleRemoveMultipleFromLibrary}
+                            onCreateFolder={handleCreateFolder}
+                            onMoveItem={handleMoveItemInLibrary}
+                            onOpenMetadataSettings={(folder) => setEditingMetadataFolder(folder)}
+                            onOpenTrackMetadataEditor={(track) => setEditingTrack(track)}
+                            onUpdateTrackTags={handleUpdateTrackTags}
+                            onUpdateFolderTags={handleUpdateFolderTags}
+                            onPflTrack={handlePflTrack}
+                            pflTrackId={pflTrackId}
+                            playoutMode={playoutPolicy.playoutMode}
+                        />
+                    </div>
+
+                    <Resizer onMouseDown={handleMouseDown(0)} onDoubleClick={handleToggleLibraryCollapse} title="Double-click to toggle Library panel" />
+
+                    <div style={{ flexBasis: `${displayedColumnWidths[1]}%` }} className="h-full min-w-0 border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900 overflow-hidden">
+                        <Playlist
+                            items={playlist}
+                            currentPlayingItemId={currentPlayingItemId}
+                            currentTrackIndex={currentTrackIndex}
+                            currentUser={currentUser}
+                            onRemove={handleRemoveFromPlaylist}
+                            onReorder={handleReorderPlaylist}
+                            onPlayTrack={handlePlayTrack}
+                            onInsertTrack={handleAttemptToAddTrack}
+                            isPlaying={isPlaying}
+                            stopAfterTrackId={stopAfterTrackId}
+                            onSetStopAfterTrackId={(id) => sendStudioAction('setPlayerState', { stopAfterTrackId: id })}
+                            trackProgress={trackProgress}
+                            onClearPlaylist={handleClearPlaylist}
+                            onPflTrack={handlePflTrack}
+                            pflTrackId={pflTrackId}
+                            isPflPlaying={isPflPlaying}
+                            pflProgress={pflProgress}
+                            mediaLibrary={mediaLibrary}
+                            timeline={timeline}
+                            onInsertTimeMarker={handleInsertTimeMarker}
+                            onUpdateTimeMarker={handleUpdateTimeMarker}
+                            onInsertVoiceTrack={handleInsertVoiceTrack}
+                            policy={playoutPolicy}
+                            isContributor={playoutPolicy.playoutMode === 'presenter'}
+                        />
+                    </div>
+
+                    <Resizer onMouseDown={handleMouseDown(1)} onDoubleClick={handleToggleRightColumnCollapse} title="Double-click to toggle Side panel" />
+
+                    <div style={{ flexBasis: `${displayedColumnWidths[2]}%` }} className={`flex-shrink-0 h-full flex flex-col overflow-hidden transition-all duration-300 ease-in-out ${!isRightColumnCollapsed && 'border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900'}`}>
+                         <div className="flex-grow flex flex-col min-h-0">
+                            <div className="flex-shrink-0 border-b border-neutral-200 dark:border-neutral-800">
+                                <nav className="flex justify-around text-center">
+                                    <button onClick={() => setActiveRightColumnTab('cartwall')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'cartwall' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Cartwall">Cartwall</button>
+                                    {isStudio && <button onClick={() => setActiveRightColumnTab('scheduler')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'scheduler' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Scheduler">Scheduler</button>}
+                                    {isStudio && <button onClick={() => { setActiveRightColumnTab('chat'); setHasUnreadChat(false); }} className={`px-3 py-2 w-full text-sm font-semibold transition-colors relative ${activeRightColumnTab === 'chat' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Chat">{hasUnreadChat && <span className="absolute top-1 right-2 w-2 h-2 bg-red-500 rounded-full"></span>}Chat</button>}
+                                    <button onClick={() => setActiveRightColumnTab('lastfm')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'lastfm' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Last.fm Info">Last.fm</button>
+                                    {isStudio && <button onClick={() => setActiveRightColumnTab('mixer')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'mixer' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Mixer">Mixer</button>}
+                                    {isStudio && <button onClick={() => setActiveRightColumnTab('users')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'users' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Users">Users</button>}
+                                    {isStudio && <button onClick={() => setActiveRightColumnTab('stream')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'stream' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Stream">Stream</button>}
+                                    {isStudio && <button onClick={() => setActiveRightColumnTab('settings')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'settings' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Settings">Settings</button>}
+                                </nav>
+                            </div>
+                            <div className="flex-grow relative">
+                                <div className="absolute inset-0 overflow-y-auto">
+                                    {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(newGrid) => setPlayoutPolicy(p => ({ ...p, cartwallGrid: newGrid }))} onPlay={handleCartwallPlay} activePlayers={activeCartPlayers} />}
+                                    {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
+                                    {isStudio && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
+                                    {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} />}
+                                    {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} onPflToggle={handlePflToggle} activePfls={activePfls} />}
+                                    {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
+                                    {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
+                                        isPublicStreamEnabled={isPublicStreamEnabled}
+                                        publicStreamStatus={publicStreamStatus}
+                                        publicStreamError={publicStreamError}
+                                        onTogglePublicStream={handleTogglePublicStream}
+                                        isAudioEngineReady={true}
+                                        isAudioEngineInitializing={publicStreamStatus === 'starting'}
+                                        isSecureContext={isSecureContext}
+                                        policy={playoutPolicy}
+                                        onUpdatePolicy={setPlayoutPolicy}
+                                    />}
+                                    {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} allFolders={allFolders} allTags={allTags} />}
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex-shrink-0 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900">
+                            <div
+                                className="flex justify-between items-center p-3 cursor-pointer hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50"
+                                onClick={() => setIsMicPanelCollapsed(p => !p)}
+                                aria-expanded={!isMicPanelCollapsed}
+                                aria-controls="mic-panel"
+                            >
+                                <div className="flex items-center gap-2">
+                                    {isStudio ? <UsersIcon className="w-5 h-5" /> : <MicrophoneIcon className="w-5 h-5" />}
+                                    <h3 className="font-semibold text-black dark:text-white">{isStudio ? 'Remote Presenters' : 'Microphone'}</h3>
+                                </div>
+                                <button className="text-black dark:text-white">
+                                    {isMicPanelCollapsed ? <ChevronUpIcon className="w-5 h-5" /> : <ChevronDownIcon className="w-5 h-5" />}
+                                </button>
+                            </div>
+                            {!isMicPanelCollapsed && (
+                                <div id="mic-panel">
+                                    <RemoteStudio
+                                        ref={remoteStudioRef}
+                                        mixerConfig={mixerConfig}
+                                        onMixerChange={setMixerConfig}
+                                        onStreamAvailable={handleSourceStream}
+                                        ws={wsRef.current}
+                                        currentUser={currentUser}
+                                        isStudio={playoutPolicy.playoutMode === 'studio'}
+                                        incomingSignal={rtcSignal}
+                                        onlinePresenters={onlinePresenters}
+                                        audioLevels={audioLevels}
+                                        isSecureContext={isSecureContext}
+                                    />
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </main>
+            </>
+             <MetadataSettingsModal
+                folder={editingMetadataFolder}
+                onClose={() => setEditingMetadataFolder(null)}
+                onSave={handleUpdateFolderMetadataSettings}
+             />
+             <TrackMetadataModal
+                track={editingTrack}
+                onClose={() => setEditingTrack(null)}
+                onSave={handleUpdateTrackMetadata}
+             />
+             <HelpModal
+                isOpen={isHelpModalOpen}
+                onClose={() => setIsHelpModalOpen(false)}
+             />
+            <WhatsNewPopup
+                isOpen={isWhatsNewOpen}
+                onClose={handleCloseWhatsNewPopup}
+            />
+            <ArtworkModal
+                isOpen={isArtworkModalOpen}
+                artworkUrl={artworkModalUrl}
+                onClose={handleCloseArtworkModal}
+            />
+             <ConfirmationDialog
+                isOpen={!!validationWarning}
+                onClose={() => setValidationWarning(null)}
+                onConfirm={handleConfirmValidationAndAddTrack}
+                title="Playout Policy Warning"
+                confirmText="Add Anyway"
+                confirmButtonClass="bg-yellow-600 hover:bg-yellow-500 text-black"
+            >
+                {validationWarning?.message}
+            </ConfirmationDialog>
+            <BroadcastEditor
+                isOpen={isBroadcastEditorOpen}
+                onClose={handleCloseBroadcastEditor}
+                onSave={handleSaveBroadcast}
+                existingBroadcast={editingBroadcast}
+                mediaLibrary={mediaLibrary}
+                onVoiceTrackCreate={handleVoiceTrackCreate}
+                policy={playoutPolicy}
+                currentUser={currentUser}
+            />
+            
+            <audio ref={audioPlayerRef} crossOrigin="anonymous" />
+            <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
+
+        </div>
+    );
 };
 
-const App = () => <AppInternal />;
-
+const App = React.memo(AppInternal);
 export default App;

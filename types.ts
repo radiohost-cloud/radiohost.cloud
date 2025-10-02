@@ -1,3 +1,11 @@
+
+
+
+
+
+
+
+
 export enum TrackType {
   SONG = 'Song',
   JINGLE = 'Jingle',
@@ -137,7 +145,7 @@ export interface PlayoutHistoryEntry {
 // --- NEW AUDIO MIXER TYPES ---
 
 // FIX: Add 'remotes' to AudioSourceId to represent the group channel for all remote presenters.
-export type AudioSourceId = 'mainPlayer' | 'mic' | 'pfl' | 'cartwall' | 'remotes' | `remote_${string}` | `cartwall_${number}`;
+export type AudioSourceId = 'mainPlayer' | 'mic' | 'pfl' | 'cartwall' | 'remotes' | `remote_${string}`;
 export type AudioBusId = 'main' | 'monitor';
 
 export interface AudioBus {
