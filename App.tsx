@@ -2,7 +2,6 @@ import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType, type CartwallItem, CartwallPage, type VtMixDetails, type Broadcast, type User, ChatMessage } from './types';
 import Header from './components/Header';
 import MediaLibrary from './components/MediaLibrary';
-import Playlist from './components/Playlist';
 import Auth from './components/Auth';
 import * as dataService from './services/dataService';
 import Settings from './components/Settings';
@@ -30,6 +29,8 @@ import { LogoIcon } from './components/icons/LogoIcon';
 import MobileApp from './components/MobileApp';
 import Chat from './components/Chat';
 import PublicStreamPage from './components/PublicStreamPage';
+// FIX: Imported the Playlist component which was being used without being imported.
+import Playlist from './components/Playlist';
 
 const createInitialLibrary = (): Folder => ({
     id: 'root',
@@ -2010,6 +2011,7 @@ const AppInternal: React.FC = () => {
     const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
 
     const handleTogglePublicStream = (enabled: boolean) => {
+        console.log(`[handleTogglePublicStream] Attempting to set public stream to: ${enabled}`);
         if (isStudio && wsRef.current?.readyState === WebSocket.OPEN) {
             if (enabled) {
                 // Ensure audio context and destination are ready
@@ -2067,6 +2069,9 @@ const AppInternal: React.FC = () => {
                 }
                 mediaRecorderRef.current = null;
             }
+        } else {
+            console.error(`[handleTogglePublicStream] Action failed. Conditions not met. Studio mode: ${isStudio}, WS ready state: ${wsRef.current?.readyState}`);
+            setIsPublicStreamEnabled(!enabled);
         }
     };
 
