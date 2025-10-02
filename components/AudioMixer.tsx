@@ -165,7 +165,8 @@ const AudioMixer: React.FC<AudioMixerProps> = ({ mixerConfig, onMixerChange, aud
                 />
                 {/* Master Channel */}
                 <div className="relative flex flex-col items-center p-4 rounded-xl shadow-lg bg-gradient-to-br from-neutral-800 to-neutral-900 border border-neutral-700">
-                     <VUMeterBar level={(audioLevels.mainPlayer || 0 + audioLevels.cartwall || 0 + remoteLevel) / 3} />
+                     {/* FIX: Fixed operator precedence for calculating master level. */}
+                     <VUMeterBar level={((audioLevels.mainPlayer || 0) + (audioLevels.cartwall || 0) + remoteLevel) / 3} />
                      <div className="my-4 relative">
                         <div style={{ width: 110, height: 110 }} className="flex items-center justify-center">
                              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">

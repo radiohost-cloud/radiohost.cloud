@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import App from './App';
+import App from './App.tsx';
 
 const AppWrapper: React.FC = () => {
     const [isReady, setIsReady] = useState(false);
