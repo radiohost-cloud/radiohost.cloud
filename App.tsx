@@ -412,6 +412,11 @@ const AppInternal: React.FC = () => {
         lastStatusChange: Date.now(),
         lastError: null as { message: string; code?: number; reason?: string } | null,
         connectionAttempts: 0,
+        handshakeConfirmed: false,
+        lastPingSent: 0,
+        lastPongReceived: 0,
+        lastWsErrorEvent: null as string | null,
+        lastWsCloseEvent: null as { code: number; reason: string } | null,
     });
 
 
@@ -2168,6 +2173,16 @@ const AppInternal: React.FC = () => {
         const wsUrl = `${protocol}//${window.location.host}/socket?email=${currentUser.email}`;
         
         setWsStatus('connecting');
+        setPublicStreamDiagnostics(prev => ({ // Reset relevant fields for new connection
+            ...prev,
+            wsReadyState: 0,
+            handshakeConfirmed: false,
+            lastPingSent: 0,
+            lastPongReceived: 0,
+            lastError: null,
+            lastWsErrorEvent: null,
+            lastWsCloseEvent: null,
+        }));
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
@@ -2193,7 +2208,11 @@ const AppInternal: React.FC = () => {
                 return;
             }
             const data = JSON.parse(event.data);
-            if (data.type === 'pong') return; // Ignore pong messages from server
+
+            if (data.type === 'pong') {
+                setPublicStreamDiagnostics(prev => ({ ...prev, lastPongReceived: Date.now() }));
+                return; // Ignore further processing of pong messages
+            }
 
             if (data.type === 'streamStarted') {
                 if (handshakeTimeoutRef.current) {
@@ -2201,6 +2220,7 @@ const AppInternal: React.FC = () => {
                     handshakeTimeoutRef.current = null;
                     console.log('[Broadcast] streamStarted message received, handshake confirmed.');
                 }
+                setPublicStreamDiagnostics(prev => ({ ...prev, handshakeConfirmed: true }));
             } else if (data.type === 'state-update') {
                 const { playlist: serverPlaylist, playerState: serverPlayerState } = data.payload;
                 if (serverPlaylist) {
@@ -2324,6 +2344,8 @@ const AppInternal: React.FC = () => {
                 wsReadyState: ws.readyState,
                 lastStatusChange: Date.now(),
                 lastError: wasStreaming ? { message: 'WebSocket connection closed unexpectedly.', code: event.code, reason: event.reason.toString() } : prev.lastError,
+                lastWsCloseEvent: { code: event.code, reason: event.reason },
+                handshakeConfirmed: false,
             }));
         };
         ws.onerror = (event) => {
@@ -2335,7 +2357,8 @@ const AppInternal: React.FC = () => {
                 ...prev,
                 wsReadyState: ws.readyState,
                 lastStatusChange: Date.now(),
-                lastError: { message: 'A WebSocket error occurred. Check the server connection.' }
+                lastError: { message: 'A WebSocket error occurred. Check the server connection.' },
+                lastWsErrorEvent: 'A WebSocket error occurred. See browser console for details.'
             }));
         };
 
@@ -2393,6 +2416,15 @@ const AppInternal: React.FC = () => {
         }
     }, []);
 
+    const handleTestEcho = useCallback(() => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'ping' }));
+            setPublicStreamDiagnostics(prev => ({ ...prev, lastPingSent: Date.now(), lastPongReceived: 0 }));
+        } else {
+            console.warn('[Echo Test] Cannot send ping, WebSocket is not open.');
+        }
+    }, []);
+
     const handleTogglePublicStream = useCallback(async (enabled: boolean) => {
       console.log(`[Broadcast] handleTogglePublicStream called with enabled: ${enabled}. Current status: ${publicStreamStatusRef.current}`);
       
@@ -2402,6 +2434,7 @@ const AppInternal: React.FC = () => {
             connectionAttempts: prev.connectionAttempts + 1,
             lastError: null,
             lastStatusChange: Date.now(),
+            handshakeConfirmed: false,
         }));
 
         if (!isSecureContext) {
@@ -2900,12 +2933,11 @@ const AppInternal: React.FC = () => {
                                         isPublicStreamEnabled={isPublicStreamEnabled}
                                         publicStreamStatus={publicStreamStatus}
                                         onTogglePublicStream={handleTogglePublicStream}
-                                        isAudioEngineReady={true}
-                                        isAudioEngineInitializing={publicStreamStatus === 'starting'}
                                         isSecureContext={isSecureContext}
                                         policy={playoutPolicy}
                                         onUpdatePolicy={setPlayoutPolicy}
                                         publicStreamDiagnostics={publicStreamDiagnostics}
+                                        onTestEcho={handleTestEcho}
                                     />}
                                     {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} allFolders={allFolders} allTags={allTags} />}
                                 </div>

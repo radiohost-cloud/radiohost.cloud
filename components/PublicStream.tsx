@@ -11,8 +11,6 @@ interface PublicStreamProps {
     isPublicStreamEnabled: boolean;
     publicStreamStatus: StreamStatus;
     onTogglePublicStream: (enabled: boolean) => void;
-    isAudioEngineReady: boolean;
-    isAudioEngineInitializing: boolean;
     isSecureContext: boolean;
     policy: PlayoutPolicy;
     onUpdatePolicy: (policy: PlayoutPolicy) => void;
@@ -24,19 +22,35 @@ interface PublicStreamProps {
         lastStatusChange: number;
         lastError: { message: string; code?: number; reason?: string } | null;
         connectionAttempts: number;
+        handshakeConfirmed: boolean;
+        lastPingSent: number;
+        lastPongReceived: number;
+        lastWsErrorEvent: string | null;
+        lastWsCloseEvent: { code: number; reason: string } | null;
     };
+    onTestEcho: () => void;
 }
+
+const DiagnosticRow: React.FC<{ label: string; status: string; details?: string | null; colorClass: string; }> = ({ label, status, details, colorClass }) => (
+    <div className="flex justify-between items-center text-xs py-1.5 border-b border-neutral-300 dark:border-neutral-700/50">
+        <span className="text-neutral-600 dark:text-neutral-400">{label}</span>
+        <div className="text-right">
+            <span className={`font-mono font-bold ${colorClass}`}>{status}</span>
+            {details && <p className="text-neutral-500 font-mono text-[10px]">{details}</p>}
+        </div>
+    </div>
+);
+
 
 const PublicStream: React.FC<PublicStreamProps> = ({ 
     isPublicStreamEnabled, 
     publicStreamStatus, 
     onTogglePublicStream, 
-    isAudioEngineReady,
-    isAudioEngineInitializing,
     isSecureContext,
     policy,
     onUpdatePolicy,
-    publicStreamDiagnostics
+    publicStreamDiagnostics,
+    onTestEcho
 }) => {
     const [directStreamUrl, setDirectStreamUrl] = useState('');
     const [isCopied, setIsCopied] = useState(false);
@@ -103,7 +117,10 @@ const PublicStream: React.FC<PublicStreamProps> = ({
 
     const isSettingsDisabled = publicStreamStatus !== 'inactive' && publicStreamStatus !== 'error';
 
-    const { mediaRecorderState, sentBlobs, hasAudioSignal, wsReadyState, lastStatusChange, lastError, connectionAttempts } = publicStreamDiagnostics;
+    const { mediaRecorderState, sentBlobs, hasAudioSignal, wsReadyState, lastError, connectionAttempts, handshakeConfirmed, lastPingSent, lastPongReceived, lastWsErrorEvent, lastWsCloseEvent } = publicStreamDiagnostics;
+    const isEchoSuccess = lastPongReceived > lastPingSent && lastPingSent > 0;
+    const isEchoPending = lastPingSent > 0 && lastPongReceived === 0 && (Date.now() - lastPingSent < 5000);
+    const isEchoFailed = lastPingSent > 0 && lastPongReceived === 0 && (Date.now() - lastPingSent >= 5000);
 
     const wsReadyStateText: {[key: number]: string} = {
         0: 'CONNECTING',
@@ -147,19 +164,45 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                             </WarningBox>
                         )}
                         
-                        <div className="text-xs text-neutral-500 dark:text-neutral-400 space-y-1 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                            <h4 className="font-bold text-sm text-neutral-600 dark:text-neutral-400 mb-2">Connection Status</h4>
-                            <div className="flex justify-between"><span>WebSocket State:</span> <span className="font-mono">{wsReadyStateText[wsReadyState ?? 3] ?? 'UNKNOWN'} ({wsReadyState ?? 'N/A'})</span></div>
-                            <div className="flex justify-between"><span>Connection Attempts:</span> <span className="font-mono">{connectionAttempts}</span></div>
-                            {lastError && (
-                                <div className="pt-1 mt-1 border-t border-neutral-300 dark:border-neutral-700">
-                                    <div className="flex justify-between text-red-500">
-                                        <span>Last Error:</span>
-                                        <span className="font-mono text-right">{lastError.message}</span>
-                                    </div>
-                                    {lastError.reason && <div className="flex justify-between text-red-500"><span/><span className="font-mono text-right">Reason: {lastError.reason} (Code: {lastError.code})</span></div>}
-                                </div>
-                            )}
+                         <div className="space-y-1 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                            <div className="flex justify-between items-center mb-2">
+                                <h4 className="font-bold text-sm text-neutral-700 dark:text-neutral-300">Advanced Diagnostics</h4>
+                                <button onClick={onTestEcho} className="px-2 py-1 text-xs font-semibold bg-blue-600 text-white rounded-md hover:bg-blue-700">Test Echo</button>
+                            </div>
+                            <DiagnosticRow
+                                label="WebSocket State"
+                                status={wsReadyStateText[wsReadyState ?? 3] ?? 'UNKNOWN'}
+                                colorClass={wsReadyState === 1 ? 'text-green-400' : 'text-yellow-400'}
+                                details={`(${wsReadyState ?? 'N/A'})`}
+                            />
+                            <DiagnosticRow
+                                label="Handshake Received"
+                                status={handshakeConfirmed ? 'YES' : 'NO'}
+                                colorClass={handshakeConfirmed ? 'text-green-400' : 'text-red-400'}
+                                details={!handshakeConfirmed ? "Waiting for 'streamStarted'..." : ''}
+                            />
+                            <DiagnosticRow
+                                label="Echo Test"
+                                status={isEchoSuccess ? 'OK' : isEchoPending ? 'PENDING' : isEchoFailed ? 'FAILED' : 'N/A'}
+                                colorClass={isEchoSuccess ? 'text-green-400' : isEchoPending ? 'text-yellow-400' : isEchoFailed ? 'text-red-400' : 'text-neutral-500'}
+                                details={isEchoSuccess ? `Pong received ${Date.now() - lastPongReceived}ms ago` : isEchoFailed ? 'No response' : ''}
+                            />
+                            <DiagnosticRow
+                                label="WebSocket Errors"
+                                status={lastWsErrorEvent ? 'YES' : 'NONE'}
+                                colorClass={lastWsErrorEvent ? 'text-red-400' : 'text-green-400'}
+                                details={lastWsErrorEvent}
+                            />
+                            <DiagnosticRow
+                                label="WebSocket Close Event"
+                                status={lastWsCloseEvent ? 'YES' : 'NONE'}
+                                colorClass={lastWsCloseEvent ? 'text-yellow-400' : 'text-green-400'}
+                                details={lastWsCloseEvent ? `Code: ${lastWsCloseEvent.code}, Reason: ${lastWsCloseEvent.reason || 'No reason'}` : ''}
+                            />
+                            <div className="pt-2 mt-1 border-t border-neutral-300 dark:border-neutral-700/50">
+                                <p className="text-neutral-600 dark:text-neutral-400 text-xs">Expected Backend:</p>
+                                <p className="font-mono text-xs text-neutral-700 dark:text-neutral-300">{`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/socket`}</p>
+                            </div>
                         </div>
 
                         <div className="text-xs text-neutral-500 dark:text-neutral-400 space-y-1 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
@@ -173,6 +216,17 @@ const PublicStream: React.FC<PublicStreamProps> = ({
             </div>
 
             <div className="flex-grow overflow-y-auto pr-2 space-y-6">
+                 <div className="space-y-4 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                    <h4 className="font-semibold text-sm">Troubleshooting Help</h4>
+                    <p className="text-xs text-neutral-600 dark:text-neutral-400">If you're seeing "No echo from backend" or connection errors, the problem may be one of the following:</p>
+                    <ul className="list-disc list-inside text-xs text-neutral-600 dark:text-neutral-400 space-y-1 pl-2">
+                        <li><b>Incorrect Port/Path:</b> Your environment might be misconfigured, preventing connection to the backend.</li>
+                        <li><b>Firewall/Proxy:</b> A network firewall or proxy may be blocking the WebSocket (`ws://` or `wss://`) connection.</li>
+                        <li><b>Backend Error:</b> The Node.js server may not be running or might have encountered a critical error. Check its console logs.</li>
+                        <li><b>SSL Certificate Issues:</b> If using a secure connection (`wss://`), an invalid or self-signed certificate on the server can cause failures.</li>
+                    </ul>
+                </div>
+
                 {/* Stream Settings */}
                 <div className={`space-y-4 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg ${isSettingsDisabled ? 'opacity-60' : ''}`}>
                     <h4 className="font-semibold text-sm">Server Connection</h4>
