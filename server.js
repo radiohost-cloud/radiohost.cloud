@@ -67,6 +67,15 @@ let streamProcess = {
 };
 let isStoppingIntentionally = false;
 
+const safeSend = (ws, message, clientEmail = 'unknown') => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+            ws.send(message);
+        } catch (error) {
+            console.error(`[WebSocket] Failed to send message to ${clientEmail}:`, error);
+        }
+    }
+};
 
 const broadcastState = () => {
   const statePayload = {
@@ -75,20 +84,14 @@ const broadcastState = () => {
   };
   const message = JSON.stringify({ type: 'state-update', payload: statePayload });
   clients.forEach((ws, email) => {
-    const user = db.data.users.find(u => u.email === email);
-    if (user && ws.readyState === ws.OPEN) {
-      ws.send(message);
-    }
+    safeSend(ws, message, email);
   });
 };
 
 const broadcastLibrary = () => {
     const message = JSON.stringify({ type: 'library-update', payload: state.mediaLibrary });
     clients.forEach((ws, email) => {
-        const user = db.data.users.find(u => u.email === email);
-        if (user && ws.readyState === ws.OPEN) {
-            ws.send(message);
-        }
+        safeSend(ws, message, email);
     });
 };
 
@@ -102,17 +105,17 @@ const broadcastPresenterList = async () => {
         .filter(u => presenterEmails.has(u.email))
         .map(({ password, ...user }) => user);
 
-    studioWs.send(JSON.stringify({
+    safeSend(studioWs, JSON.stringify({
         type: 'presenters-update',
         payload: { presenters }
-    }));
+    }), studioClientEmail);
     console.log(`[WebSocket] Sent updated presenter list to studio. Count: ${presenters.length}`);
 };
 
 const broadcastIcecastStatus = (status, error = null) => {
     console.log(`[Broadcast] Icecast status: ${status}`, error || '');
     const message = JSON.stringify({ type: 'icecastStatusUpdate', payload: { status, error }});
-    clients.forEach(ws => ws.readyState === WebSocket.OPEN && ws.send(message));
+    clients.forEach((ws, email) => safeSend(ws, message, email));
 };
 
 // --- Playout & Streaming Logic ---
@@ -136,9 +139,18 @@ const startFfmpegStream = (ws) => {
     const config = state.playoutPolicy?.streamingConfig;
     if (!config || !config.isEnabled) {
         console.log('[FFmpeg] Streaming not enabled in settings.');
+        broadcastIcecastStatus('error', 'Streaming is not enabled in the studio settings.');
         return;
     }
 
+    // Immediately send handshake confirmation
+    try {
+        ws.send(JSON.stringify({type: 'streamStarted', success: true}));
+        console.log('[Server] Sent streamStarted confirmation to client');
+    } catch (err) {
+        console.error('[Server] Error sending streamStarted confirmation:', err);
+    }
+    
     broadcastIcecastStatus('starting');
     const icecastUrl = `icecast://${config.username}:${config.password}@${config.serverUrl.replace(/^https?:\/\//, '')}:${config.port}${config.mountPoint.startsWith('/') ? config.mountPoint : `/${config.mountPoint}`}`;
     
@@ -364,6 +376,7 @@ wss.on('connection', async (ws, req) => {
 
     if (!email) return ws.close();
     
+    console.log('[Server] WebSocket connection opened');
     console.log(`[Server] WebSocket connection established for: ${email}`);
     
     await db.read();
@@ -381,8 +394,28 @@ wss.on('connection', async (ws, req) => {
     broadcastPresenterList();
     
     ws.on('message', async (message, isBinary) => {
+        console.log('[Server] ws.on(message) handler triggered');
+        const messageType = isBinary ? 'binary' : 'string';
+        console.log('[Server] Message received, type:', messageType, 'length:', message.length);
+        if(!isBinary) {
+            console.log('[Server] Message content:', message.toString());
+        }
+
+        if (Buffer.isBuffer(message)) {
+            console.log('[Server] Message is Buffer');
+        } else if (typeof message === 'string' || message instanceof String) {
+            console.log('[Server] Message is string');
+        }
+
+        try {
+          ws.send('pong');
+          console.log('[Server] Sent pong response');
+        } catch (error) {
+          console.error('[Server] Error sending pong:', error);
+        }
+
         if (isBinary) {
-            console.log(`[Server] Binary audio data received, size: ${message.length} bytes`);
+            console.log(`[Server] Audio data received: ${message.length} bytes`);
             if (streamProcess.ffmpeg && streamProcess.ws === ws) {
                 streamProcess.ffmpeg.stdin.write(message);
             }
@@ -391,9 +424,12 @@ wss.on('connection', async (ws, req) => {
 
         try {
             const data = JSON.parse(message.toString());
-            if (data.type === 'ping') return ws.send(JSON.stringify({ type: 'pong' }));
+            if (data.type === 'ping') {
+                safeSend(ws, JSON.stringify({ type: 'pong' }), email);
+                return;
+            }
             
-            console.log(`[WebSocket] Message from ${email}:`, data.type);
+            console.log(`[WebSocket] Processing message from ${email}:`, data.type);
 
             if (data.type.startsWith('stream') && email !== studioClientEmail) return;
             if ((data.type === 'studio-action' || data.type === 'libraryAction') && email !== studioClientEmail) return;
@@ -445,24 +481,22 @@ wss.on('connection', async (ws, req) => {
                 
                 case 'webrtc-signal':
                     const targetClient = clients.get(data.target);
-                    if (targetClient?.readyState === ws.OPEN) targetClient.send(JSON.stringify({ type: 'webrtc-signal', payload: data.payload, sender: email }));
+                    safeSend(targetClient, JSON.stringify({ type: 'webrtc-signal', payload: data.payload, sender: email }), data.target);
                     break;
                 
                 case 'voiceTrackAdd':
                 case 'requestOnAir':
                     const studioWs = clients.get(studioClientEmail);
-                    if (studioWs?.readyState === ws.OPEN) studioWs.send(JSON.stringify({ type: data.type, payload: { ...data.payload, presenterEmail: email } }));
+                    safeSend(studioWs, JSON.stringify({ type: data.type, payload: { ...data.payload, presenterEmail: email } }), studioClientEmail);
                     break;
                 
                 case 'presenter-action': {
                     const studioWsAction = clients.get(studioClientEmail);
-                    if (studioWsAction?.readyState === ws.OPEN) {
-                        studioWsAction.send(JSON.stringify({
-                            type: data.type,
-                            payload: data.payload,
-                            senderEmail: email
-                        }));
-                    }
+                    safeSend(studioWsAction, JSON.stringify({
+                        type: data.type,
+                        payload: data.payload,
+                        senderEmail: email
+                    }), studioClientEmail);
                     break;
                 }
 
@@ -471,11 +505,15 @@ wss.on('connection', async (ws, req) => {
                         const { presenterEmail, onAir } = data.payload;
                         state.presenterOnAirStatus.set(presenterEmail, onAir);
                         const updateMsg = JSON.stringify({ type: 'presenterStatusUpdate', payload: { presenterEmail, onAir } });
-                        clients.forEach(c => c.readyState === ws.OPEN && c.send(updateMsg));
+                        clients.forEach((c, cEmail) => safeSend(c, updateMsg, cEmail));
                     }
                     break;
             }
-        } catch (e) { console.error('[WebSocket] Error processing message:', e); }
+        } catch (e) {
+            if (message.toString() !== 'pong') {
+                console.error('[WebSocket] Error processing JSON message:', e); 
+            }
+        }
     });
 
     ws.on('close', () => {
@@ -494,7 +532,7 @@ wss.on('connection', async (ws, req) => {
                 state.presenterOnAirStatus.delete(email);
                 const updateMsg = JSON.stringify({ type: 'presenterStatusUpdate', payload: { presenterEmail: email, onAir: false } });
                 const studioWs = clients.get(studioClientEmail);
-                if (studioWs?.readyState === ws.OPEN) studioWs.send(updateMsg);
+                safeSend(studioWs, updateMsg, studioClientEmail);
             }
         }
     });
