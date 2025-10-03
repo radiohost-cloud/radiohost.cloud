@@ -88,6 +88,7 @@ const initialMixerConfig: MixerConfig = {
     mic: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: false, gain: 1 } } },
     pfl: { gain: 1, muted: false, sends: { main: { enabled: false, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
     cartwall: { gain: 1, muted: false, sends: { main: { enabled: true, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
+    remotes: { gain: 1, muted: false, sends: { main: { enabled: true, gain: 1 }, monitor: { enabled: true, gain: 1 } } },
 };
 
 
@@ -299,6 +300,7 @@ const AppInternal: React.FC = () => {
     const [autoBackupFolderPath, setAutoBackupFolderPath] = useState<string | null>(null);
     const [lastAutoBackupTimestamp, setLastAutoBackupTimestamp] = useState<number>(0);
      
+    const isStartingRef = useRef(false);
     const pflAudioRef = useRef<HTMLAudioElement>(null);
     const pflAudioUrlRef = useRef<string | null>(null);
     const remoteStudioRef = useRef<any>(null);
@@ -1032,13 +1034,42 @@ const AppInternal: React.FC = () => {
     }, []);
 
     const handleTogglePlay = useCallback(async () => {
+        console.log('[Playlist Start] Rozpoczynam - isPlaying:', isPlayingRef.current, 'playlistLength:', playlistRef.current.length, 'currentIndex:', currentTrackIndexRef.current);
         if (playoutPolicy.playoutMode === 'presenter') return;
-        if (playlist.length === 0) return;
-        const shouldPlay = !isPlaying;
-        if (shouldPlay) {
-            stopPfl();
+
+        if (playlistRef.current.length === 0) {
+            console.error('[Playlist Start] Playlista pusta - nie można uruchomić');
+            return;
         }
+
+        if (isStartingRef.current) {
+            console.warn('[Playlist Start] Już w trakcie uruchamiania - pomijam');
+            return;
+        }
+        isStartingRef.current = true;
+
+        const shouldPlay = !isPlaying;
+        
+        if (shouldPlay) {
+            console.log('[Playlist Start] Włączam odtwarzanie...');
+            if (audioContextRef.current?.state === 'suspended') {
+                console.log('[Playlist Start] AudioContext suspended - wznawianie...');
+                try {
+                    await audioContextRef.current.resume();
+                    console.log('[Playlist Start] AudioContext resumed, state:', audioContextRef.current.state);
+                } catch (e) {
+                    console.error('[Playlist Start] Błąd resume AudioContext:', e);
+                }
+            }
+            stopPfl();
+        } else {
+            console.log('[Playlist Start] Pauzuję odtwarzanie');
+        }
+
         sendStudioAction('setPlayerState', { isPlaying: shouldPlay });
+        isStartingRef.current = false;
+        console.log('[Playlist Start] Zakończono handleTogglePlay');
+
     }, [playoutPolicy.playoutMode, isPlaying, stopPfl, playlist, sendStudioAction]);
     
     const handleNext = useCallback(() => {
@@ -1123,11 +1154,30 @@ const AppInternal: React.FC = () => {
                 player.src = src;
                 player.dataset.trackId = trackToPlay.id;
                 if (isPlaying) {
+                    console.log('[Playlist Start] Wywołuję play() na mediaElement, readyState:', player.readyState);
                     try {
-                        await player.play();
-                    } catch (e) {
-                        console.error("Autoplay failed:", e);
-                        sendStudioAction('setPlayerState', { isPlaying: false });
+                        const playPromise = player.play();
+                        if (playPromise !== undefined) {
+                            await playPromise;
+                            console.log('[Playlist Start] play() succeeded');
+                        }
+                    } catch (error) {
+                        console.error('[Playlist Start] play() rejected:', error);
+                        // Retry strategy
+                        console.log('[Playlist Start] Próba ponownego uruchomienia za 500ms...');
+                        setTimeout(async () => {
+                            try {
+                                if (player && isPlayingRef.current) { // check isPlayingRef again in case user paused
+                                    await player.play();
+                                    console.log('[Playlist Start] Retry succeeded');
+                                } else {
+                                    console.log('[Playlist Start] Retry aborted, playback was paused.');
+                                }
+                            } catch (retryError) {
+                                console.error('[Playlist Start] Retry failed:', retryError);
+                                sendStudioAction('setPlayerState', { isPlaying: false });
+                            }
+                        }, 500);
                     }
                 }
             } else {
@@ -2281,77 +2331,106 @@ const AppInternal: React.FC = () => {
     const [publicStreamStatus, setPublicStreamStatus] = useState<StreamStatus>('inactive');
     const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
 
-    const handleTogglePublicStream = (enabled: boolean) => {
-        if (!window.isSecureContext) {
-            console.error('[Broadcast] Cannot start - insecure context detected');
-            setPublicStreamError('Broadcasting dostępne wyłącznie przez HTTPS/localhost');
-            setIsPublicStreamEnabled(false); // Make sure the toggle state reflects the failure
-            return;
+    const handleTogglePublicStream = useCallback((enabled: boolean) => {
+      console.log('[Broadcast] Toggle called - enabled:', enabled, 'isSecureContext:', window.isSecureContext, 'isStudio:', isStudio, 'wsState:', wsRef.current?.readyState);
+      
+      // Check secure context first
+      if (!window.isSecureContext) {
+        console.error('[Broadcast] Cannot start - insecure context detected');
+        setPublicStreamError('Broadcasting dostępne wyłącznie przez HTTPS/localhost');
+        setPublicStreamStatus('error');
+        return;
+      }
+      
+      if (!isStudio) {
+        console.error('[Broadcast] Cannot start - not in studio mode');
+        setPublicStreamError('Broadcasting dostępne tylko w trybie studio');
+        return;
+      }
+      
+      if (wsRef.current?.readyState !== WebSocket.OPEN) {
+        console.error('[Broadcast] Cannot start - WebSocket not open, state:', wsRef.current?.readyState);
+        setPublicStreamError('Brak połączenia z serwerem');
+        return;
+      }
+      
+      if (enabled) {
+        console.log('[Broadcast] Starting stream...');
+        console.log('[Broadcast] destinationNode:', destinationNodeRef.current);
+        
+        if (!destinationNodeRef.current) {
+          console.error('[Broadcast] destinationNode not initialized');
+          setPublicStreamStatus('error');
+          setPublicStreamError('Audio engine nie zainicjowany. Odśwież stronę.');
+          setIsPublicStreamEnabled(false);
+          return;
         }
-
-        console.log(`[handleTogglePublicStream] Attempting to set public stream to: ${enabled}`);
-        if (isStudio && wsRef.current?.readyState === WebSocket.OPEN) {
-            if (enabled) {
-                // Ensure audio context and destination are ready
-                if (!destinationNodeRef.current) {
-                    console.error("Audio capture destination not ready. Cannot start stream.");
-                    setPublicStreamStatus('error');
-                    setPublicStreamError('Audio engine could not be initialized. Please refresh.');
-                    setIsPublicStreamEnabled(false);
-                    return;
-                }
-
-                // Send command to server to start ffmpeg
-                const config = playoutPolicyRef.current.streamingConfig;
-                wsRef.current.send(JSON.stringify({ type: 'streamStart', payload: config }));
-
-                // Start client-side recording and streaming
-                try {
-                    const stream = destinationNodeRef.current.stream;
-                    const options = { mimeType: 'audio/webm; codecs=opus' };
-                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                        console.error("Opus codec not supported. Broadcasting may fail.");
-                    }
-                    
-                    mediaRecorderRef.current = new MediaRecorder(stream, options);
-
-                    mediaRecorderRef.current.ondataavailable = (event) => {
-                        if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
-                            wsRef.current.send(event.data);
-                        }
-                    };
-                    
-                    mediaRecorderRef.current.onerror = (event) => {
-                        console.error("MediaRecorder Error:", event);
-                    };
-
-                    mediaRecorderRef.current.start(250); // Send data every 250ms
-                    console.log("[Broadcast] MediaRecorder started, streaming to server.");
-                } catch (e) {
-                    console.error("Failed to start MediaRecorder:", e);
-                    setPublicStreamStatus('error');
-                    setPublicStreamError('Failed to start audio recorder. Check microphone permissions or browser support.');
-                    setIsPublicStreamEnabled(false);
-                    // Also tell server to stop trying
-                     wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
-                }
-
-            } else {
-                // Send command to server to stop ffmpeg
-                wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
-
-                // Stop client-side recording
-                if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-                    mediaRecorderRef.current.stop();
-                    console.log("[Broadcast] MediaRecorder stopped.");
-                }
-                mediaRecorderRef.current = null;
+        
+        setPublicStreamStatus('starting');
+        
+        const config = playoutPolicyRef.current.streamingConfig;
+        console.log('[Broadcast] Wysyłam streamStart do serwera:', config);
+        wsRef.current.send(JSON.stringify({ type: 'streamStart', payload: config }));
+        
+        try {
+          const stream = destinationNodeRef.current.stream;
+          console.log('[Broadcast] Stream pobrany:', stream, 'tracks:', stream.getTracks().length);
+          
+          const options = { mimeType: 'audio/webm; codecs=opus' };
+          
+          if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+            console.error('[Broadcast] Opus codec not supported');
+            throw new Error('Opus codec not supported');
+          }
+          
+          mediaRecorderRef.current = new MediaRecorder(stream, options);
+          console.log('[Broadcast] MediaRecorder created, state:', mediaRecorderRef.current.state);
+          
+          mediaRecorderRef.current.ondataavailable = (event) => {
+            if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(event.data);
+              console.log('[Broadcast] Sent chunk:', event.data.size, 'bytes');
             }
-        } else {
-            console.error(`[handleTogglePublicStream] Action failed. Conditions not met. Studio mode: ${isStudio}, WS ready state: ${wsRef.current?.readyState}`);
-            setIsPublicStreamEnabled(!enabled);
+          };
+          
+          mediaRecorderRef.current.onerror = (event) => {
+            console.error('[Broadcast] MediaRecorder error:', event);
+            setPublicStreamStatus('error');
+            setPublicStreamError('Błąd nagrywania audio');
+          };
+          
+          mediaRecorderRef.current.onstart = () => {
+            console.log('[Broadcast] MediaRecorder started');
+            setPublicStreamStatus('broadcasting');
+            setIsPublicStreamEnabled(true);
+          };
+          
+          mediaRecorderRef.current.start(250);
+          console.log('[Broadcast] MediaRecorder.start(250) called');
+          
+        } catch (e: any) {
+          console.error('[Broadcast] Failed to start MediaRecorder:', e);
+          setPublicStreamStatus('error');
+          setPublicStreamError('Nie udało się uruchomić nagrywania: ' + e.message);
+          setIsPublicStreamEnabled(false);
+          wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
         }
-    };
+      } else {
+        console.log('[Broadcast] Stopping stream...');
+        setPublicStreamStatus('stopping');
+        
+        wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
+        
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+          console.log('[Broadcast] MediaRecorder stopped');
+        }
+        mediaRecorderRef.current = null;
+        
+        setPublicStreamStatus('inactive');
+        setIsPublicStreamEnabled(false);
+      }
+    }, [isStudio, setPublicStreamError, setPublicStreamStatus, setIsPublicStreamEnabled]);
 
     // Effect for metadata updates
     useEffect(() => {
@@ -2766,3 +2845,12 @@ const AppInternal: React.FC = () => {
 
 const App = React.memo(AppInternal);
 export default App;
+// COMMIT: playlist start reliability & broadcast error logging fixes
+// - Dodano szczegółowe logi dla handleTogglePlay
+// - Dodano blokadę podwójnego startu playlisty
+// - Dodano obsługę suspended AudioContext
+// - Dodano retry strategy dla play()
+// - Dodano szczegółowe logi dla handleTogglePublicStream
+// - Dodano walidację secure context, studio mode, WebSocket
+// - Dodano sprawdzenie destinationNode przed startem
+// - Dodano obsługę błędów MediaRecorder
