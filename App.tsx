@@ -403,10 +403,15 @@ const AppInternal: React.FC = () => {
     // --- NEW REFS & STATE FOR STREAMING DIAGNOSTICS ---
     const destinationAnalyserRef = useRef<AnalyserNode | null>(null);
     const dataTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const handshakeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [publicStreamDiagnostics, setPublicStreamDiagnostics] = useState({
         mediaRecorderState: 'inactive' as RecordingState,
         sentBlobs: 0,
         hasAudioSignal: false,
+        wsReadyState: wsRef.current?.readyState ?? 3,
+        lastStatusChange: Date.now(),
+        lastError: null as { message: string; code?: number; reason?: string } | null,
+        connectionAttempts: 0,
     });
 
 
@@ -607,7 +612,12 @@ const AppInternal: React.FC = () => {
             } catch (e) {
                 console.error("Failed to create AudioContext:", e);
                 setIsPublicStreamEnabled(false);
-                setPublicStreamError("Audio engine could not be initialized.");
+                setPublicStreamStatus('error');
+                 setPublicStreamDiagnostics(prev => ({
+                    ...prev,
+                    lastError: { message: "Audio engine could not be initialized." },
+                    lastStatusChange: Date.now(),
+                }));
                 return;
             }
         }
@@ -2140,6 +2150,12 @@ const AppInternal: React.FC = () => {
         return savedTrack;
     }, []);
 
+    // --- NEW: Public Stream State & Logic ---
+    const [isPublicStreamEnabled, setIsPublicStreamEnabled] = useState(false);
+    const [publicStreamStatus, setPublicStreamStatus] = useState<StreamStatus>('inactive');
+    const publicStreamStatusRef = useRef(publicStreamStatus);
+    publicStreamStatusRef.current = publicStreamStatus;
+
     // --- NEW: WebSocket Logic for HOST mode ---
     useEffect(() => {
         if (!currentUser) {
@@ -2147,6 +2163,7 @@ const AppInternal: React.FC = () => {
             return;
         }
 
+        console.log('[Broadcast] Creating WebSocket to:', `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/socket?email=${currentUser.email}`);
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/socket?email=${currentUser.email}`;
         
@@ -2155,8 +2172,10 @@ const AppInternal: React.FC = () => {
         wsRef.current = ws;
 
         ws.onopen = () => {
-            console.log('[WebSocket] Connected');
+            console.log('[Broadcast] WebSocket OPEN, readyState:', ws.readyState);
             setWsStatus('connected');
+            setPublicStreamDiagnostics(prev => ({ ...prev, wsReadyState: ws.readyState, lastStatusChange: Date.now() }));
+
             if (playoutPolicyRef.current.playoutMode === 'studio') {
                 ws.send(JSON.stringify({ type: 'configUpdate', payload: { logoSrc: logoSrcRef.current } }));
             }
@@ -2265,26 +2284,57 @@ const AppInternal: React.FC = () => {
                 console.log('[WebSocket] Received presenters update:', data.payload.presenters);
                 setOnlinePresenters(data.payload.presenters);
             } else if (data.type === 'icecastStatusUpdate') {
+                 if (handshakeTimeoutRef.current) {
+                    clearTimeout(handshakeTimeoutRef.current);
+                    handshakeTimeoutRef.current = null;
+                }
                 const newStatus = data.payload.status;
                 setPublicStreamStatus(newStatus);
                 setIsPublicStreamEnabled(newStatus === 'starting' || newStatus === 'broadcasting' || newStatus === 'stopping');
                 if (data.payload.error) {
-                    setPublicStreamError(data.payload.error);
+                    setPublicStreamDiagnostics(prev => ({
+                        ...prev,
+                        lastError: { message: data.payload.error },
+                        lastStatusChange: Date.now(),
+                    }));
+                    setTimeout(() => {
+                        setPublicStreamStatus('inactive');
+                        setIsPublicStreamEnabled(false);
+                    }, 3000);
                 } else {
-                    setPublicStreamError(null);
+                     setPublicStreamDiagnostics(prev => ({ ...prev, lastError: null, lastStatusChange: Date.now() }));
                 }
             }
         };
 
-        ws.onclose = () => {
-            console.log('[WebSocket] Disconnected');
+        ws.onclose = (event) => {
+            console.log('[Broadcast] WebSocket CLOSED, code:', event.code, 'reason:', event.reason);
             setWsStatus('disconnected');
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+            const wasStreaming = publicStreamStatusRef.current !== 'inactive' && publicStreamStatusRef.current !== 'stopping';
+            
+            if (wasStreaming || publicStreamStatusRef.current === 'starting') {
+                setPublicStreamStatus('error');
+            }
+            
+            setPublicStreamDiagnostics(prev => ({
+                ...prev,
+                wsReadyState: ws.readyState,
+                lastStatusChange: Date.now(),
+                lastError: wasStreaming ? { message: 'WebSocket connection closed unexpectedly.', code: event.code, reason: event.reason } : prev.lastError,
+            }));
         };
-        ws.onerror = (error) => {
-            console.error('[WebSocket] Error:', error);
+        ws.onerror = (event) => {
+            console.error('[Broadcast] WebSocket ERROR:', event);
             setWsStatus('disconnected');
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+            setPublicStreamStatus('error');
+             setPublicStreamDiagnostics(prev => ({
+                ...prev,
+                wsReadyState: ws.readyState,
+                lastStatusChange: Date.now(),
+                lastError: { message: 'A WebSocket error occurred. Check the server connection.' }
+            }));
         };
 
         return () => {
@@ -2335,40 +2385,66 @@ const AppInternal: React.FC = () => {
         }
     }, [logoSrc, isStudio, wsStatus]);
     
-    // --- Public Stream State & Logic ---
-    const [isPublicStreamEnabled, setIsPublicStreamEnabled] = useState(false);
-    const [publicStreamStatus, setPublicStreamStatus] = useState<StreamStatus>('inactive');
-    const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
+    const stopStreamOnServer = useCallback(() => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
+        }
+    }, []);
 
     const handleTogglePublicStream = useCallback(async (enabled: boolean) => {
-      console.log('[App] handleTogglePublicStream called with enabled:', enabled);
-      
-      setPublicStreamDiagnostics({ mediaRecorderState: 'inactive', sentBlobs: 0, hasAudioSignal: false });
-      
-      if (!window.isSecureContext) {
-        setPublicStreamError('Broadcasting is only available over HTTPS/localhost');
-        setPublicStreamStatus('error');
-        return;
-      }
-      
-      if (!isStudio) {
-        setPublicStreamError('Broadcasting is only available in Studio mode');
-        return;
-      }
-      
-      if (wsRef.current?.readyState !== WebSocket.OPEN) {
-        setPublicStreamError('WebSocket connection is not open');
-        return;
-      }
+      console.log(`[Broadcast] handleTogglePublicStream called with enabled: ${enabled}. Current status: ${publicStreamStatusRef.current}`);
       
       if (enabled) {
+        setPublicStreamDiagnostics(prev => ({
+            ...prev,
+            connectionAttempts: prev.connectionAttempts + 1,
+            lastError: null,
+            lastStatusChange: Date.now(),
+        }));
+
+        if (!isSecureContext) {
+            setPublicStreamStatus('error');
+            setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Broadcasting is only available over HTTPS/localhost' }}));
+            return;
+        }
+        
+        if (!isStudio) {
+            setPublicStreamStatus('error');
+            setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Broadcasting is only available in Studio mode' }}));
+            return;
+        }
+        
+        if (wsRef.current?.readyState !== WebSocket.OPEN) {
+            console.error('[Broadcast] Cannot start stream: WebSocket is not open. State:', wsRef.current?.readyState);
+            setPublicStreamStatus('error');
+            setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Cannot start stream: WebSocket is not connected.' }}));
+            setTimeout(() => {
+                setPublicStreamStatus('inactive');
+                setIsPublicStreamEnabled(false);
+            }, 3000);
+            return;
+        }
+        
         setPublicStreamStatus('starting');
         console.log('[Broadcast] Starting stream...');
+
+        handshakeTimeoutRef.current = setTimeout(() => {
+            if (publicStreamStatusRef.current === 'starting') {
+                console.error('[Broadcast] WebSocket connection timeout after 5s');
+                setPublicStreamStatus('error');
+                setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Timeout: No response from streaming server.' }}));
+                stopStreamOnServer();
+                setTimeout(() => {
+                    setPublicStreamStatus('inactive');
+                    setIsPublicStreamEnabled(false);
+                }, 3000);
+            }
+        }, 5000);
         
         if (!destinationNodeRef.current) {
           console.error('[Broadcast] destinationNode not initialized');
           setPublicStreamStatus('error');
-          setPublicStreamError('Audio engine not initialized. Please refresh.');
+          setPublicStreamDiagnostics(prev => ({...prev, lastError: { message: 'Audio engine not initialized. Please refresh.' }}));
           setIsPublicStreamEnabled(false);
           return;
         }
@@ -2416,8 +2492,7 @@ const AppInternal: React.FC = () => {
               mediaRecorderRef.current.onstart = () => {
                 console.log('[Broadcast] MediaRecorder started, state:', mediaRecorderRef.current?.state);
                 setPublicStreamDiagnostics(prev => ({ ...prev, mediaRecorderState: mediaRecorderRef.current?.state || 'inactive' }));
-                setPublicStreamStatus('broadcasting');
-                setIsPublicStreamEnabled(true);
+                // The server will confirm the status
               };
               
               mediaRecorderRef.current.ondataavailable = (event) => {
@@ -2427,11 +2502,7 @@ const AppInternal: React.FC = () => {
 
                   if (wsRef.current?.readyState === WebSocket.OPEN) {
                     wsRef.current.send(event.data);
-                    console.log('[Broadcast] Sending audio blob to server, size:', event.data.size, 'bytes');
-                    setPublicStreamDiagnostics(prev => ({
-                        ...prev,
-                        sentBlobs: prev.sentBlobs + 1,
-                    }));
+                    setPublicStreamDiagnostics(prev => ({ ...prev, sentBlobs: prev.sentBlobs + 1 }));
                   } else {
                       console.error('[Broadcast] WebSocket not OPEN, cannot send data. State:', wsRef.current?.readyState);
                   }
@@ -2446,7 +2517,7 @@ const AppInternal: React.FC = () => {
               mediaRecorderRef.current.onerror = (event) => {
                 console.error('[Broadcast] MediaRecorder error:', event);
                 setPublicStreamStatus('error');
-                setPublicStreamError('Audio recording error.');
+                setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Audio recording error.' }}));
               };
               
               mediaRecorderRef.current.onstop = () => {
@@ -2466,9 +2537,9 @@ const AppInternal: React.FC = () => {
             } catch (e: any) {
               console.error('[Broadcast] Failed to start MediaRecorder:', e);
               setPublicStreamStatus('error');
-              setPublicStreamError('Failed to start recorder: ' + e.message);
+              setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Failed to start recorder: ' + e.message }}));
               setIsPublicStreamEnabled(false);
-              wsRef.current?.send(JSON.stringify({ type: 'streamStop' }));
+              stopStreamOnServer();
             }
         };
         startRecorder();
@@ -2477,31 +2548,42 @@ const AppInternal: React.FC = () => {
         console.log('[Broadcast] Stopping stream...');
         setPublicStreamStatus('stopping');
         
+        if (handshakeTimeoutRef.current) clearTimeout(handshakeTimeoutRef.current);
         if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
         
-        wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
+        stopStreamOnServer();
         
         if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
           mediaRecorderRef.current.stop();
         }
         mediaRecorderRef.current = null;
         
-        setPublicStreamStatus('inactive');
-        setIsPublicStreamEnabled(false);
+        // Server will confirm with 'inactive' status
       }
-    }, [isStudio]);
+    }, [isStudio, isSecureContext, stopStreamOnServer]);
 
     useEffect(() => {
-        if (!isPublicStreamEnabled) return;
         const intervalId = setInterval(() => {
-            const recorder = mediaRecorderRef.current;
-            if (recorder) {
-                console.log(`[Broadcast Diagnostics] Recorder state: ${recorder.state}, WS state: ${wsRef.current?.readyState}`);
-                setPublicStreamDiagnostics(prev => ({ ...prev, mediaRecorderState: recorder.state }));
-            }
+            const wsState = wsRef.current?.readyState;
+            const recState = mediaRecorderRef.current?.state;
+            
+            setPublicStreamDiagnostics(prev => {
+                const newState = { ...prev };
+                let changed = false;
+                if (wsState !== undefined && wsState !== prev.wsReadyState) {
+                    newState.wsReadyState = wsState;
+                    changed = true;
+                }
+                if (recState && recState !== prev.mediaRecorderState) {
+                    newState.mediaRecorderState = recState;
+                    changed = true;
+                }
+                return changed ? newState : prev;
+            });
+
         }, 1000);
         return () => clearInterval(intervalId);
-    }, [isPublicStreamEnabled]);
+    }, []);
 
     // Effect for metadata updates
     useEffect(() => {
@@ -2815,7 +2897,6 @@ const AppInternal: React.FC = () => {
                                     {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
                                         isPublicStreamEnabled={isPublicStreamEnabled}
                                         publicStreamStatus={publicStreamStatus}
-                                        publicStreamError={publicStreamError}
                                         onTogglePublicStream={handleTogglePublicStream}
                                         isAudioEngineReady={true}
                                         isAudioEngineInitializing={publicStreamStatus === 'starting'}
@@ -2931,3 +3012,7 @@ export default App;
 // - Klient teraz sprawdza sygnał audio przed startem i posiada samonaprawiający się MediaRecorder.
 // - Serwer loguje otrzymane dane, status FFmpeg i błędy połączenia z Icecast.
 // - UI wyświetla szczegółowe informacje diagnostyczne, w tym stan nagrywania, liczbę wysłanych paczek i ostrzeżenie o nadawaniu ciszy.
+// COMMIT: broadcast websocket handshake/status diagnostics & retry
+// - Wprowadzono kompleksową diagnostykę połączenia WebSocket dla broadcastu, w tym 5-sekundowy timeout, automatyczne resetowanie po błędzie i rozbudowane logowanie.
+// - UI teraz wyświetla szczegółowy status połączenia, liczbę prób i ostatnie błędy, co pozwala na szybką diagnozę i ponowienie próby bez odświeżania strony.
+// - Serwer loguje nawiązanie połączenia, co ułatwia weryfikację handshake'u.

@@ -10,7 +10,6 @@ type StreamStatus = 'inactive' | 'starting' | 'broadcasting' | 'error' | 'stoppi
 interface PublicStreamProps {
     isPublicStreamEnabled: boolean;
     publicStreamStatus: StreamStatus;
-    publicStreamError: string | null;
     onTogglePublicStream: (enabled: boolean) => void;
     isAudioEngineReady: boolean;
     isAudioEngineInitializing: boolean;
@@ -21,13 +20,16 @@ interface PublicStreamProps {
         mediaRecorderState: string;
         sentBlobs: number;
         hasAudioSignal: boolean;
+        wsReadyState: number | undefined;
+        lastStatusChange: number;
+        lastError: { message: string; code?: number; reason?: string } | null;
+        connectionAttempts: number;
     };
 }
 
 const PublicStream: React.FC<PublicStreamProps> = ({ 
     isPublicStreamEnabled, 
     publicStreamStatus, 
-    publicStreamError, 
     onTogglePublicStream, 
     isAudioEngineReady,
     isAudioEngineInitializing,
@@ -87,7 +89,6 @@ const PublicStream: React.FC<PublicStreamProps> = ({
     }, [publicStreamStatus]);
 
     const { isToggleDisabled, disabledReason } = useMemo(() => {
-        console.log('[PublicStream] Toggle disabled reason check:', {isSecureContext, publicStreamStatus});
         if (!isSecureContext) {
             return { isToggleDisabled: true, disabledReason: 'Broadcast disabled: Requires a secure (HTTPS) connection.' };
         }
@@ -101,6 +102,15 @@ const PublicStream: React.FC<PublicStreamProps> = ({
     }, [isSecureContext, publicStreamStatus]);
 
     const isSettingsDisabled = publicStreamStatus !== 'inactive' && publicStreamStatus !== 'error';
+
+    const { mediaRecorderState, sentBlobs, hasAudioSignal, wsReadyState, lastStatusChange, lastError, connectionAttempts } = publicStreamDiagnostics;
+
+    const wsReadyStateText: {[key: number]: string} = {
+        0: 'CONNECTING',
+        1: 'OPEN',
+        2: 'CLOSING',
+        3: 'CLOSED',
+    };
 
     return (
         <div className="p-4 space-y-4 h-full flex flex-col">
@@ -125,24 +135,38 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                     )}
                 </div>
 
-                {isPublicStreamEnabled && (
+                {(publicStreamStatus !== 'inactive' || connectionAttempts > 0) && (
                     <div className="space-y-2">
                         <div className="text-center p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
                             <div className={`text-xl font-bold ${statusInfo.color}`}>{statusInfo.text}</div>
-                            {publicStreamError && <p className="text-xs text-red-500 mt-2 break-words">{publicStreamError}</p>}
                         </div>
 
-                        {publicStreamStatus === 'broadcasting' && !publicStreamDiagnostics.hasAudioSignal && (
+                        {publicStreamStatus === 'broadcasting' && !hasAudioSignal && (
                             <WarningBox>
                                 No audio signal is detected on the main output. Your stream might be silent. Ensure a track is playing or a microphone is live.
                             </WarningBox>
                         )}
                         
                         <div className="text-xs text-neutral-500 dark:text-neutral-400 space-y-1 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                            <h4 className="font-bold text-sm text-neutral-600 dark:text-neutral-400 mb-2">Diagnostics</h4>
-                            <div className="flex justify-between"><span>Recorder State:</span> <span className="font-mono">{publicStreamDiagnostics.mediaRecorderState}</span></div>
-                            <div className="flex justify-between"><span>Audio Signal:</span> <span className="font-mono">{publicStreamDiagnostics.hasAudioSignal ? 'Detected' : 'None'}</span></div>
-                            <div className="flex justify-between"><span>Data Packets Sent:</span> <span className="font-mono">{publicStreamDiagnostics.sentBlobs}</span></div>
+                            <h4 className="font-bold text-sm text-neutral-600 dark:text-neutral-400 mb-2">Connection Status</h4>
+                            <div className="flex justify-between"><span>WebSocket State:</span> <span className="font-mono">{wsReadyStateText[wsReadyState ?? 3] ?? 'UNKNOWN'} ({wsReadyState ?? 'N/A'})</span></div>
+                            <div className="flex justify-between"><span>Connection Attempts:</span> <span className="font-mono">{connectionAttempts}</span></div>
+                            {lastError && (
+                                <div className="pt-1 mt-1 border-t border-neutral-300 dark:border-neutral-700">
+                                    <div className="flex justify-between text-red-500">
+                                        <span>Last Error:</span>
+                                        <span className="font-mono text-right">{lastError.message}</span>
+                                    </div>
+                                    {lastError.reason && <div className="flex justify-between text-red-500"><span/><span className="font-mono text-right">Reason: {lastError.reason} (Code: {lastError.code})</span></div>}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="text-xs text-neutral-500 dark:text-neutral-400 space-y-1 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                            <h4 className="font-bold text-sm text-neutral-600 dark:text-neutral-400 mb-2">Stream Diagnostics</h4>
+                            <div className="flex justify-between"><span>Recorder State:</span> <span className="font-mono">{mediaRecorderState}</span></div>
+                            <div className="flex justify-between"><span>Audio Signal:</span> <span className="font-mono">{hasAudioSignal ? 'Detected' : 'None'}</span></div>
+                            <div className="flex justify-between"><span>Data Packets Sent:</span> <span className="font-mono">{sentBlobs}</span></div>
                         </div>
                     </div>
                 )}

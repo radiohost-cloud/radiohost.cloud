@@ -363,12 +363,13 @@ wss.on('connection', async (ws, req) => {
     const email = url.searchParams.get('email');
 
     if (!email) return ws.close();
-
+    
+    console.log(`[Server] WebSocket connection established for: ${email}`);
+    
     await db.read();
     const user = db.data.users.find(u => u.email === email);
     if (!user) return ws.close();
 
-    console.log(`[WebSocket] Client connected: ${email} (Role: ${user.role})`);
     clients.set(email, ws);
 
     if (user.role === 'studio') {
