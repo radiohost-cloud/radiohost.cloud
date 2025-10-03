@@ -142,14 +142,6 @@ const startFfmpegStream = (ws) => {
         broadcastIcecastStatus('error', 'Streaming is not enabled in the studio settings.');
         return;
     }
-
-    // Immediately send handshake confirmation
-    try {
-        ws.send(JSON.stringify({type: 'streamStarted', success: true}));
-        console.log('[Server] Sent streamStarted confirmation to client');
-    } catch (err) {
-        console.error('[Server] Error sending streamStarted confirmation:', err);
-    }
     
     broadcastIcecastStatus('starting');
     const icecastUrl = `icecast://${config.username}:${config.password}@${config.serverUrl.replace(/^https?:\/\//, '')}:${config.port}${config.mountPoint.startsWith('/') ? config.mountPoint : `/${config.mountPoint}`}`;
@@ -376,7 +368,6 @@ wss.on('connection', async (ws, req) => {
 
     if (!email) return ws.close();
     
-    console.log('[Server] WebSocket connection opened');
     console.log(`[Server] WebSocket connection established for: ${email}`);
     
     await db.read();
@@ -394,42 +385,43 @@ wss.on('connection', async (ws, req) => {
     broadcastPresenterList();
     
     ws.on('message', async (message, isBinary) => {
-        console.log('[Server] ws.on(message) handler triggered');
-        const messageType = isBinary ? 'binary' : 'string';
-        console.log('[Server] Message received, type:', messageType, 'length:', message.length);
-        if(!isBinary) {
-            console.log('[Server] Message content:', message.toString());
-        }
+        // 1) Log immediately
+        console.log('[Server] MSG:', message.toString().substring(0, 100), typeof message, 'isBinary:', isBinary);
 
-        if (Buffer.isBuffer(message)) {
-            console.log('[Server] Message is Buffer');
-        } else if (typeof message === 'string' || message instanceof String) {
-            console.log('[Server] Message is string');
-        }
-
+        // 2) Immediate echo response
         try {
-          ws.send('pong');
-          console.log('[Server] Sent pong response');
+            safeSend(ws, 'pong', email); // Raw pong
+            const echoPayload = { type: 'pong', echo: message.toString().substring(0, 100) }; // JSON pong with truncated echo
+            safeSend(ws, JSON.stringify(echoPayload), email);
         } catch (error) {
-          console.error('[Server] Error sending pong:', error);
+            console.error('[Server] Error sending pong/echo:', error);
         }
-
+        
+        // Handle binary data (audio stream)
         if (isBinary) {
-            console.log(`[Server] Audio data received: ${message.length} bytes`);
             if (streamProcess.ffmpeg && streamProcess.ws === ws) {
                 streamProcess.ffmpeg.stdin.write(message);
             }
             return;
         }
 
+        // Handle string data (commands)
         try {
             const data = JSON.parse(message.toString());
-            if (data.type === 'ping') {
-                safeSend(ws, JSON.stringify({ type: 'pong' }), email);
-                return;
+
+            // 3) CRITICAL: Handle streamStart immediately and before anything else
+            if (data.type === 'streamStart') {
+                console.log(`[Server] streamStart received, sending confirmation immediately.`);
+                safeSend(ws, JSON.stringify({type: 'streamStarted', success: true}), email);
+                
+                await updatePlayoutPolicy();
+                startFfmpegStream(ws); // This will now send 'starting' status
+                return; // IMPORTANT: End processing for this message here.
             }
+
+            if (data.type === 'ping') return;
             
-            console.log(`[WebSocket] Processing message from ${email}:`, data.type);
+            console.log(`[WebSocket] Processing command from ${email}:`, data.type);
 
             if (data.type.startsWith('stream') && email !== studioClientEmail) return;
             if ((data.type === 'studio-action' || data.type === 'libraryAction') && email !== studioClientEmail) return;
@@ -453,12 +445,6 @@ wss.on('connection', async (ws, req) => {
                 
                 case 'libraryAction':
                     await libraryActionHandler(data.payload.action, data.payload.payload);
-                    break;
-                
-                case 'streamStart':
-                    console.log(`[Server] streamStart received, config:`, data.payload);
-                    await updatePlayoutPolicy();
-                    startFfmpegStream(ws);
                     break;
 
                 case 'streamStop':
@@ -510,14 +496,16 @@ wss.on('connection', async (ws, req) => {
                     break;
             }
         } catch (e) {
-            if (message.toString() !== 'pong') {
-                console.error('[WebSocket] Error processing JSON message:', e); 
-            }
+            console.error('[WebSocket] Error processing non-binary message:', e.message);
         }
     });
 
-    ws.on('close', () => {
-        console.log(`[WebSocket] Client disconnected: ${email}`);
+    ws.on('error', (error) => {
+        console.error(`[WebSocket] Error on connection for ${email}:`, error);
+    });
+
+    ws.on('close', (code, reason) => {
+        console.log(`[WebSocket] Client disconnected: ${email}. Code: ${code}, Reason: ${reason.toString()}`);
         if (streamProcess.ws === ws) {
             stopFfmpegStream();
         }

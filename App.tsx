@@ -2195,7 +2195,13 @@ const AppInternal: React.FC = () => {
             const data = JSON.parse(event.data);
             if (data.type === 'pong') return; // Ignore pong messages from server
 
-            if (data.type === 'state-update') {
+            if (data.type === 'streamStarted') {
+                if (handshakeTimeoutRef.current) {
+                    clearTimeout(handshakeTimeoutRef.current);
+                    handshakeTimeoutRef.current = null;
+                    console.log('[Broadcast] streamStarted message received, handshake confirmed.');
+                }
+            } else if (data.type === 'state-update') {
                 const { playlist: serverPlaylist, playerState: serverPlayerState } = data.payload;
                 if (serverPlaylist) {
                     if (JSON.stringify(serverPlaylist) !== JSON.stringify(playlistRef.current)) {
@@ -2284,10 +2290,6 @@ const AppInternal: React.FC = () => {
                 console.log('[WebSocket] Received presenters update:', data.payload.presenters);
                 setOnlinePresenters(data.payload.presenters);
             } else if (data.type === 'icecastStatusUpdate') {
-                 if (handshakeTimeoutRef.current) {
-                    clearTimeout(handshakeTimeoutRef.current);
-                    handshakeTimeoutRef.current = null;
-                }
                 const newStatus = data.payload.status;
                 setPublicStreamStatus(newStatus);
                 setIsPublicStreamEnabled(newStatus === 'starting' || newStatus === 'broadcasting' || newStatus === 'stopping');
@@ -2308,7 +2310,7 @@ const AppInternal: React.FC = () => {
         };
 
         ws.onclose = (event) => {
-            console.log('[Broadcast] WebSocket CLOSED, code:', event.code, 'reason:', event.reason);
+            console.log('[Broadcast] WebSocket CLOSED, code:', event.code, 'reason:', event.reason.toString());
             setWsStatus('disconnected');
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
             const wasStreaming = publicStreamStatusRef.current !== 'inactive' && publicStreamStatusRef.current !== 'stopping';
@@ -2321,7 +2323,7 @@ const AppInternal: React.FC = () => {
                 ...prev,
                 wsReadyState: ws.readyState,
                 lastStatusChange: Date.now(),
-                lastError: wasStreaming ? { message: 'WebSocket connection closed unexpectedly.', code: event.code, reason: event.reason } : prev.lastError,
+                lastError: wasStreaming ? { message: 'WebSocket connection closed unexpectedly.', code: event.code, reason: event.reason.toString() } : prev.lastError,
             }));
         };
         ws.onerror = (event) => {
@@ -2430,9 +2432,9 @@ const AppInternal: React.FC = () => {
 
         handshakeTimeoutRef.current = setTimeout(() => {
             if (publicStreamStatusRef.current === 'starting') {
-                console.error('[Broadcast] WebSocket connection timeout after 5s');
+                console.error('[Broadcast] WebSocket handshake timeout after 5s');
                 setPublicStreamStatus('error');
-                setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Timeout: No response from streaming server.' }}));
+                setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'No echo/start confirmation from backend. Check server and network.' }}));
                 stopStreamOnServer();
                 setTimeout(() => {
                     setPublicStreamStatus('inactive');
