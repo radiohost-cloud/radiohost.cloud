@@ -411,6 +411,7 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'streamStart':
+                    console.log(`[Broadcast] Received streamStart from ${email}`);
                     await updatePlayoutPolicy();
                     startFfmpegStream(ws);
                     break;

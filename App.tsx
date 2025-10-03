@@ -400,6 +400,15 @@ const AppInternal: React.FC = () => {
         analysers: Map<AudioSourceId, AnalyserNode>;
     }>({ sources: new Map(), gains: new Map(), analysers: new Map() });
 
+    // --- NEW REFS & STATE FOR STREAMING DIAGNOSTICS ---
+    const destinationAnalyserRef = useRef<AnalyserNode | null>(null);
+    const dataTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [publicStreamDiagnostics, setPublicStreamDiagnostics] = useState({
+        mediaRecorderState: 'inactive' as RecordingState,
+        sentBlobs: 0,
+        hasAudioSignal: false,
+    });
+
 
     const currentTrack = useMemo(() => {
         const item = playlist[currentTrackIndex];
@@ -2331,10 +2340,11 @@ const AppInternal: React.FC = () => {
     const [publicStreamStatus, setPublicStreamStatus] = useState<StreamStatus>('inactive');
     const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
 
-    const handleTogglePublicStream = useCallback((enabled: boolean) => {
+    const handleTogglePublicStream = useCallback(async (enabled: boolean) => {
       console.log('[Broadcast] Toggle called - enabled:', enabled, 'isSecureContext:', window.isSecureContext, 'isStudio:', isStudio, 'wsState:', wsRef.current?.readyState);
       
-      // Check secure context first
+      setPublicStreamDiagnostics({ mediaRecorderState: 'inactive', sentBlobs: 0, hasAudioSignal: false });
+      
       if (!window.isSecureContext) {
         console.error('[Broadcast] Cannot start - insecure context detected');
         setPublicStreamError('Broadcasting dostępne wyłącznie przez HTTPS/localhost');
@@ -2355,6 +2365,7 @@ const AppInternal: React.FC = () => {
       }
       
       if (enabled) {
+        setPublicStreamStatus('starting');
         console.log('[Broadcast] Starting stream...');
         console.log('[Broadcast] destinationNode:', destinationNodeRef.current);
         
@@ -2365,59 +2376,115 @@ const AppInternal: React.FC = () => {
           setIsPublicStreamEnabled(false);
           return;
         }
+
+        if (!destinationAnalyserRef.current && audioContextRef.current) {
+            const analyser = audioContextRef.current.createAnalyser();
+            analyser.fftSize = 256;
+            destinationNodeRef.current.connect(analyser);
+            destinationAnalyserRef.current = analyser;
+            console.log('[Broadcast] Diagnostic analyser connected to destination node.');
+        }
         
-        setPublicStreamStatus('starting');
+        let hasSignal = false;
+        if (destinationAnalyserRef.current) {
+            const dataArray = new Uint8Array(destinationAnalyserRef.current.frequencyBinCount);
+            destinationAnalyserRef.current.getByteTimeDomainData(dataArray);
+            hasSignal = dataArray.some(v => v !== 128);
+        }
+        
+        setPublicStreamDiagnostics(prev => ({ ...prev, hasAudioSignal: hasSignal }));
+        if (!hasSignal) console.warn('[Broadcast] No audio signal detected on the main bus. The stream may be silent.');
         
         const config = playoutPolicyRef.current.streamingConfig;
         console.log('[Broadcast] Wysyłam streamStart do serwera:', config);
         wsRef.current.send(JSON.stringify({ type: 'streamStart', payload: config }));
         
-        try {
-          const stream = destinationNodeRef.current.stream;
-          console.log('[Broadcast] Stream pobrany:', stream, 'tracks:', stream.getTracks().length);
-          
-          const options = { mimeType: 'audio/webm; codecs=opus' };
-          
-          if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-            console.error('[Broadcast] Opus codec not supported');
-            throw new Error('Opus codec not supported');
-          }
-          
-          mediaRecorderRef.current = new MediaRecorder(stream, options);
-          console.log('[Broadcast] MediaRecorder created, state:', mediaRecorderRef.current.state);
-          
-          mediaRecorderRef.current.ondataavailable = (event) => {
-            if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(event.data);
-              console.log('[Broadcast] Sent chunk:', event.data.size, 'bytes');
+        const startRecorder = () => {
+            if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                mediaRecorderRef.current.stop();
             }
-          };
-          
-          mediaRecorderRef.current.onerror = (event) => {
-            console.error('[Broadcast] MediaRecorder error:', event);
-            setPublicStreamStatus('error');
-            setPublicStreamError('Błąd nagrywania audio');
-          };
-          
-          mediaRecorderRef.current.onstart = () => {
-            console.log('[Broadcast] MediaRecorder started');
-            setPublicStreamStatus('broadcasting');
-            setIsPublicStreamEnabled(true);
-          };
-          
-          mediaRecorderRef.current.start(250);
-          console.log('[Broadcast] MediaRecorder.start(250) called');
-          
-        } catch (e: any) {
-          console.error('[Broadcast] Failed to start MediaRecorder:', e);
-          setPublicStreamStatus('error');
-          setPublicStreamError('Nie udało się uruchomić nagrywania: ' + e.message);
-          setIsPublicStreamEnabled(false);
-          wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
-        }
+
+            try {
+              const stream = destinationNodeRef.current!.stream;
+              console.log('[Broadcast] Stream pobrany:', stream, 'tracks:', stream.getTracks().length);
+              
+              const options = { mimeType: 'audio/webm; codecs=opus' };
+              if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                console.error('[Broadcast] Opus codec not supported');
+                throw new Error('Opus codec not supported');
+              }
+              
+              mediaRecorderRef.current = new MediaRecorder(stream, options);
+              console.log('[Broadcast] MediaRecorder created, state:', mediaRecorderRef.current.state);
+              
+              let dataSentSinceStart = false;
+
+              mediaRecorderRef.current.onstart = () => {
+                console.log('[Broadcast] MediaRecorder started, state:', mediaRecorderRef.current?.state);
+                setPublicStreamDiagnostics(prev => ({ ...prev, mediaRecorderState: mediaRecorderRef.current?.state || 'inactive' }));
+                setPublicStreamStatus('broadcasting');
+                setIsPublicStreamEnabled(true);
+              };
+              
+              mediaRecorderRef.current.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                  dataSentSinceStart = true;
+                  if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
+                  console.log('[Broadcast] ondataavailable, blob size:', event.data.size, 'bytes');
+
+                  if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(event.data);
+                    console.log('[Broadcast] Sending audio blob to server:', event.data.size, 'bytes');
+                    setPublicStreamDiagnostics(prev => ({
+                        ...prev,
+                        sentBlobs: prev.sentBlobs + 1,
+                    }));
+                  }
+                  
+                  dataTimeoutRef.current = setTimeout(() => {
+                      console.log('[Broadcast] No ondataavailable for 2s, restarting MediaRecorder');
+                      startRecorder();
+                  }, 2000);
+                }
+              };
+
+              mediaRecorderRef.current.onerror = (event) => {
+                console.error('[Broadcast] MediaRecorder error:', event);
+                setPublicStreamStatus('error');
+                setPublicStreamError('Błąd nagrywania audio');
+              };
+              
+              mediaRecorderRef.current.onstop = () => {
+                  if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
+                  console.log('[Broadcast] MediaRecorder onstop event fired.');
+              };
+              
+              dataTimeoutRef.current = setTimeout(() => {
+                  if (!dataSentSinceStart) {
+                      console.log('[Broadcast] MediaRecorder did not produce data within 2s, restarting...');
+                      startRecorder();
+                  }
+              }, 2000);
+
+              mediaRecorderRef.current.start(250);
+              console.log('[Broadcast] MediaRecorder.start(250) called');
+              
+            } catch (e: any) {
+              console.error('[Broadcast] Failed to start MediaRecorder:', e);
+              setPublicStreamStatus('error');
+              setPublicStreamError('Nie udało się uruchomić nagrywania: ' + e.message);
+              setIsPublicStreamEnabled(false);
+              wsRef.current?.send(JSON.stringify({ type: 'streamStop' }));
+            }
+        };
+        startRecorder();
+
       } else {
         console.log('[Broadcast] Stopping stream...');
         setPublicStreamStatus('stopping');
+        
+        if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
         
         wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
         
@@ -2431,6 +2498,18 @@ const AppInternal: React.FC = () => {
         setIsPublicStreamEnabled(false);
       }
     }, [isStudio, setPublicStreamError, setPublicStreamStatus, setIsPublicStreamEnabled]);
+
+    useEffect(() => {
+        if (!isPublicStreamEnabled) return;
+        const intervalId = setInterval(() => {
+            const recorder = mediaRecorderRef.current;
+            if (recorder) {
+                console.log(`[Broadcast Diagnostics] Recorder state: ${recorder.state}, WS state: ${wsRef.current?.readyState}`);
+                setPublicStreamDiagnostics(prev => ({ ...prev, mediaRecorderState: recorder.state }));
+            }
+        }, 1000);
+        return () => clearInterval(intervalId);
+    }, [isPublicStreamEnabled]);
 
     // Effect for metadata updates
     useEffect(() => {
@@ -2751,6 +2830,7 @@ const AppInternal: React.FC = () => {
                                         isSecureContext={isSecureContext}
                                         policy={playoutPolicy}
                                         onUpdatePolicy={setPlayoutPolicy}
+                                        publicStreamDiagnostics={publicStreamDiagnostics}
                                     />}
                                     {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} allFolders={allFolders} allTags={allTags} />}
                                 </div>

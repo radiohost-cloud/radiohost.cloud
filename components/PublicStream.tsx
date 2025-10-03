@@ -3,6 +3,7 @@ import { Toggle } from './Toggle';
 import { BroadcastIcon } from './icons/BroadcastIcon';
 import { ShareIcon } from './icons/ShareIcon';
 import { type PlayoutPolicy, type StreamingConfig } from '../types';
+import WarningBox from './WarningBox';
 
 type StreamStatus = 'inactive' | 'starting' | 'broadcasting' | 'error' | 'stopping';
 
@@ -16,6 +17,11 @@ interface PublicStreamProps {
     isSecureContext: boolean;
     policy: PlayoutPolicy;
     onUpdatePolicy: (policy: PlayoutPolicy) => void;
+    publicStreamDiagnostics: {
+        mediaRecorderState: string;
+        sentBlobs: number;
+        hasAudioSignal: boolean;
+    };
 }
 
 const PublicStream: React.FC<PublicStreamProps> = ({ 
@@ -27,7 +33,8 @@ const PublicStream: React.FC<PublicStreamProps> = ({
     isAudioEngineInitializing,
     isSecureContext,
     policy,
-    onUpdatePolicy
+    onUpdatePolicy,
+    publicStreamDiagnostics
 }) => {
     const [directStreamUrl, setDirectStreamUrl] = useState('');
     const [isCopied, setIsCopied] = useState(false);
@@ -89,6 +96,12 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                 Icecast Stream
             </h3>
 
+            {!isSecureContext && (
+                <WarningBox>
+                    Broadcasting requires a secure connection (HTTPS or localhost). Current protocol: <strong>{window.location.protocol}</strong>
+                </WarningBox>
+            )}
+
             <div className="flex-shrink-0 space-y-3">
                 <div className="flex items-center justify-between p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
                     <div>
@@ -101,9 +114,24 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                 </div>
 
                 {isPublicStreamEnabled && (
-                    <div className="text-center p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                        <div className={`text-xl font-bold ${statusInfo.color}`}>{statusInfo.text}</div>
-                        {publicStreamError && <p className="text-xs text-red-500 mt-2 break-words">{publicStreamError}</p>}
+                    <div className="space-y-2">
+                        <div className="text-center p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                            <div className={`text-xl font-bold ${statusInfo.color}`}>{statusInfo.text}</div>
+                            {publicStreamError && <p className="text-xs text-red-500 mt-2 break-words">{publicStreamError}</p>}
+                        </div>
+
+                        {publicStreamStatus === 'broadcasting' && !publicStreamDiagnostics.hasAudioSignal && (
+                            <WarningBox>
+                                No audio signal is detected on the main output. Your stream might be silent. Ensure a track is playing or a microphone is live.
+                            </WarningBox>
+                        )}
+                        
+                        <div className="text-xs text-neutral-500 dark:text-neutral-400 space-y-1 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                            <h4 className="font-bold text-sm text-neutral-600 dark:text-neutral-400 mb-2">Diagnostics</h4>
+                            <div className="flex justify-between"><span>Recorder State:</span> <span className="font-mono">{publicStreamDiagnostics.mediaRecorderState}</span></div>
+                            <div className="flex justify-between"><span>Audio Signal:</span> <span className="font-mono">{publicStreamDiagnostics.hasAudioSignal ? 'Detected' : 'None'}</span></div>
+                            <div className="flex justify-between"><span>Data Packets Sent:</span> <span className="font-mono">{publicStreamDiagnostics.sentBlobs}</span></div>
+                        </div>
                     </div>
                 )}
             </div>
