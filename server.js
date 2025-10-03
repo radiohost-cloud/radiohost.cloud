@@ -136,10 +136,10 @@ const startFfmpegStream = (ws) => {
     const config = state.playoutPolicy?.streamingConfig;
     if (!config || !config.isEnabled) {
         console.log('[FFmpeg] Streaming not enabled in settings.');
+        broadcastIcecastStatus('error', 'Streaming is not enabled on the server.');
         return;
     }
-
-    broadcastIcecastStatus('starting');
+    
     const icecastUrl = `icecast://${config.username}:${config.password}@${config.serverUrl.replace(/^https?:\/\//, '')}:${config.port}${config.mountPoint.startsWith('/') ? config.mountPoint : `/${config.mountPoint}`}`;
     
     console.log('[Server] Starting FFmpeg with Icecast config:', {
@@ -364,7 +364,8 @@ wss.on('connection', async (ws, req) => {
 
     if (!email) return ws.close();
     
-    console.log(`[Server] WebSocket connection established for: ${email}`);
+    console.log('[Server] New WebSocket connection established');
+    console.log(`[Server] Client identified as: ${email}`);
     
     await db.read();
     const user = db.data.users.find(u => u.email === email);
@@ -382,7 +383,7 @@ wss.on('connection', async (ws, req) => {
     
     ws.on('message', async (message, isBinary) => {
         if (isBinary) {
-            console.log(`[Server] Binary audio data received, size: ${message.length} bytes`);
+            console.log(`[Server] Audio data received: ${message.length} bytes`);
             if (streamProcess.ffmpeg && streamProcess.ws === ws) {
                 streamProcess.ffmpeg.stdin.write(message);
             }
@@ -420,8 +421,12 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'streamStart':
-                    console.log(`[Server] streamStart received, config:`, data.payload);
+                    console.log(`[Server] streamStart received:`, data.payload);
                     await updatePlayoutPolicy();
+                    
+                    ws.send(JSON.stringify({ type: 'streamStarted', success: true }));
+                    console.log('[Server] Sent streamStarted confirmation to client');
+
                     startFfmpegStream(ws);
                     break;
 

@@ -2195,7 +2195,27 @@ const AppInternal: React.FC = () => {
             const data = JSON.parse(event.data);
             if (data.type === 'pong') return; // Ignore pong messages from server
 
-            if (data.type === 'state-update') {
+            if (data.type === 'streamStarted') {
+                if (data.success) {
+                    console.log('[Broadcast] Server acknowledged stream start, handshake complete.');
+                    if (handshakeTimeoutRef.current) {
+                        clearTimeout(handshakeTimeoutRef.current);
+                        handshakeTimeoutRef.current = null;
+                    }
+                } else {
+                    console.error('[Broadcast] Server rejected stream start.');
+                    if (handshakeTimeoutRef.current) {
+                        clearTimeout(handshakeTimeoutRef.current);
+                        handshakeTimeoutRef.current = null;
+                    }
+                    setPublicStreamStatus('error');
+                    setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Server rejected stream request.' }}));
+                    setTimeout(() => {
+                        setPublicStreamStatus('inactive');
+                        setIsPublicStreamEnabled(false);
+                    }, 3000);
+                }
+            } else if (data.type === 'state-update') {
                 const { playlist: serverPlaylist, playerState: serverPlayerState } = data.payload;
                 if (serverPlaylist) {
                     if (JSON.stringify(serverPlaylist) !== JSON.stringify(playlistRef.current)) {
@@ -2284,10 +2304,6 @@ const AppInternal: React.FC = () => {
                 console.log('[WebSocket] Received presenters update:', data.payload.presenters);
                 setOnlinePresenters(data.payload.presenters);
             } else if (data.type === 'icecastStatusUpdate') {
-                 if (handshakeTimeoutRef.current) {
-                    clearTimeout(handshakeTimeoutRef.current);
-                    handshakeTimeoutRef.current = null;
-                }
                 const newStatus = data.payload.status;
                 setPublicStreamStatus(newStatus);
                 setIsPublicStreamEnabled(newStatus === 'starting' || newStatus === 'broadcasting' || newStatus === 'stopping');
@@ -2426,6 +2442,7 @@ const AppInternal: React.FC = () => {
         }
         
         setPublicStreamStatus('starting');
+        setIsPublicStreamEnabled(true);
         console.log('[Broadcast] Starting stream...');
 
         handshakeTimeoutRef.current = setTimeout(() => {
@@ -2492,7 +2509,6 @@ const AppInternal: React.FC = () => {
               mediaRecorderRef.current.onstart = () => {
                 console.log('[Broadcast] MediaRecorder started, state:', mediaRecorderRef.current?.state);
                 setPublicStreamDiagnostics(prev => ({ ...prev, mediaRecorderState: mediaRecorderRef.current?.state || 'inactive' }));
-                // The server will confirm the status
               };
               
               mediaRecorderRef.current.ondataavailable = (event) => {
@@ -2547,6 +2563,7 @@ const AppInternal: React.FC = () => {
       } else {
         console.log('[Broadcast] Stopping stream...');
         setPublicStreamStatus('stopping');
+        setIsPublicStreamEnabled(false);
         
         if (handshakeTimeoutRef.current) clearTimeout(handshakeTimeoutRef.current);
         if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
@@ -3016,3 +3033,7 @@ export default App;
 // - Wprowadzono kompleksową diagnostykę połączenia WebSocket dla broadcastu, w tym 5-sekundowy timeout, automatyczne resetowanie po błędzie i rozbudowane logowanie.
 // - UI teraz wyświetla szczegółowy status połączenia, liczbę prób i ostatnie błędy, co pozwala na szybką diagnozę i ponowienie próby bez odświeżania strony.
 // - Serwer loguje nawiązanie połączenia, co ułatwia weryfikację handshake'u.
+// COMMIT: broadcast websocket handshake/server endpoint fix
+// - Naprawiono błąd timeoutu poprzez wprowadzenie natychmiastowej odpowiedzi serwera (`streamStarted`) na żądanie `streamStart` od klienta.
+// - Klient teraz czeka na to potwierdzenie przed anulowaniem timeoutu, co zapewnia niezawodny handshake.
+// - Usprawniono logowanie po stronie serwera w celu lepszej diagnostyki procesu połączenia.
