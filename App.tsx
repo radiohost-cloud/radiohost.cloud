@@ -2342,38 +2342,33 @@ const AppInternal: React.FC = () => {
 
     const handleTogglePublicStream = useCallback(async (enabled: boolean) => {
       console.log('[App] handleTogglePublicStream called with enabled:', enabled);
-      console.log('[Broadcast] Toggle called - enabled:', enabled, 'isSecureContext:', window.isSecureContext, 'isStudio:', isStudio, 'wsState:', wsRef.current?.readyState);
       
       setPublicStreamDiagnostics({ mediaRecorderState: 'inactive', sentBlobs: 0, hasAudioSignal: false });
       
       if (!window.isSecureContext) {
-        console.error('[Broadcast] Cannot start - insecure context detected');
-        setPublicStreamError('Broadcasting dostępne wyłącznie przez HTTPS/localhost');
+        setPublicStreamError('Broadcasting is only available over HTTPS/localhost');
         setPublicStreamStatus('error');
         return;
       }
       
       if (!isStudio) {
-        console.error('[Broadcast] Cannot start - not in studio mode');
-        setPublicStreamError('Broadcasting dostępne tylko w trybie studio');
+        setPublicStreamError('Broadcasting is only available in Studio mode');
         return;
       }
       
       if (wsRef.current?.readyState !== WebSocket.OPEN) {
-        console.error('[Broadcast] Cannot start - WebSocket not open, state:', wsRef.current?.readyState);
-        setPublicStreamError('Brak połączenia z serwerem');
+        setPublicStreamError('WebSocket connection is not open');
         return;
       }
       
       if (enabled) {
         setPublicStreamStatus('starting');
         console.log('[Broadcast] Starting stream...');
-        console.log('[Broadcast] destinationNode:', destinationNodeRef.current);
         
         if (!destinationNodeRef.current) {
           console.error('[Broadcast] destinationNode not initialized');
           setPublicStreamStatus('error');
-          setPublicStreamError('Audio engine nie zainicjowany. Odśwież stronę.');
+          setPublicStreamError('Audio engine not initialized. Please refresh.');
           setIsPublicStreamEnabled(false);
           return;
         }
@@ -2397,7 +2392,6 @@ const AppInternal: React.FC = () => {
         if (!hasSignal) console.warn('[Broadcast] No audio signal detected on the main bus. The stream may be silent.');
         
         const config = playoutPolicyRef.current.streamingConfig;
-        console.log('[Broadcast] Wysyłam streamStart do serwera:', config);
         wsRef.current.send(JSON.stringify({ type: 'streamStart', payload: config }));
         
         const startRecorder = () => {
@@ -2408,11 +2402,9 @@ const AppInternal: React.FC = () => {
 
             try {
               const stream = destinationNodeRef.current!.stream;
-              console.log('[Broadcast] Stream pobrany:', stream, 'tracks:', stream.getTracks().length);
               
               const options = { mimeType: 'audio/webm; codecs=opus' };
               if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                console.error('[Broadcast] Opus codec not supported');
                 throw new Error('Opus codec not supported');
               }
               
@@ -2432,19 +2424,20 @@ const AppInternal: React.FC = () => {
                 if (event.data.size > 0) {
                   dataSentSinceStart = true;
                   if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
-                  console.log('[Broadcast] ondataavailable, blob size:', event.data.size, 'bytes');
 
                   if (wsRef.current?.readyState === WebSocket.OPEN) {
                     wsRef.current.send(event.data);
-                    console.log('[Broadcast] Sending audio blob to server:', event.data.size, 'bytes');
+                    console.log('[Broadcast] Sending audio blob to server, size:', event.data.size, 'bytes');
                     setPublicStreamDiagnostics(prev => ({
                         ...prev,
                         sentBlobs: prev.sentBlobs + 1,
                     }));
+                  } else {
+                      console.error('[Broadcast] WebSocket not OPEN, cannot send data. State:', wsRef.current?.readyState);
                   }
                   
                   dataTimeoutRef.current = setTimeout(() => {
-                      console.log('[Broadcast] No ondataavailable for 2s, restarting MediaRecorder');
+                      console.warn('[Broadcast] No ondataavailable for 2s, restarting MediaRecorder');
                       startRecorder();
                   }, 2000);
                 }
@@ -2453,7 +2446,7 @@ const AppInternal: React.FC = () => {
               mediaRecorderRef.current.onerror = (event) => {
                 console.error('[Broadcast] MediaRecorder error:', event);
                 setPublicStreamStatus('error');
-                setPublicStreamError('Błąd nagrywania audio');
+                setPublicStreamError('Audio recording error.');
               };
               
               mediaRecorderRef.current.onstop = () => {
@@ -2463,18 +2456,17 @@ const AppInternal: React.FC = () => {
               
               dataTimeoutRef.current = setTimeout(() => {
                   if (!dataSentSinceStart) {
-                      console.log('[Broadcast] MediaRecorder did not produce data within 2s, restarting...');
+                      console.warn('[Broadcast] MediaRecorder did not produce data within 2s, restarting...');
                       startRecorder();
                   }
               }, 2000);
 
-              mediaRecorderRef.current.start(250);
-              console.log('[Broadcast] MediaRecorder.start(250) called');
+              mediaRecorderRef.current.start(250); // Send data every 250ms
               
             } catch (e: any) {
               console.error('[Broadcast] Failed to start MediaRecorder:', e);
               setPublicStreamStatus('error');
-              setPublicStreamError('Nie udało się uruchomić nagrywania: ' + e.message);
+              setPublicStreamError('Failed to start recorder: ' + e.message);
               setIsPublicStreamEnabled(false);
               wsRef.current?.send(JSON.stringify({ type: 'streamStop' }));
             }
@@ -2491,14 +2483,13 @@ const AppInternal: React.FC = () => {
         
         if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
           mediaRecorderRef.current.stop();
-          console.log('[Broadcast] MediaRecorder stopped');
         }
         mediaRecorderRef.current = null;
         
         setPublicStreamStatus('inactive');
         setIsPublicStreamEnabled(false);
       }
-    }, [isStudio, setPublicStreamError, setPublicStreamStatus, setIsPublicStreamEnabled]);
+    }, [isStudio]);
 
     useEffect(() => {
         if (!isPublicStreamEnabled) return;
@@ -2935,3 +2926,8 @@ export default App;
 // - Dodano walidację secure context, studio mode, WebSocket
 // - Dodano sprawdzenie destinationNode przed startem
 // - Dodano obsługę błędów MediaRecorder
+// COMMIT: icecast connection chain: full streaming diagnostics & fix
+// - Wprowadzono szczegółową diagnostykę po stronie klienta i serwera dla łańcucha streamowania.
+// - Klient teraz sprawdza sygnał audio przed startem i posiada samonaprawiający się MediaRecorder.
+// - Serwer loguje otrzymane dane, status FFmpeg i błędy połączenia z Icecast.
+// - UI wyświetla szczegółowe informacje diagnostyczne, w tym stan nagrywania, liczbę wysłanych paczek i ostrzeżenie o nadawaniu ciszy.

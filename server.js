@@ -142,6 +142,12 @@ const startFfmpegStream = (ws) => {
     broadcastIcecastStatus('starting');
     const icecastUrl = `icecast://${config.username}:${config.password}@${config.serverUrl.replace(/^https?:\/\//, '')}:${config.port}${config.mountPoint.startsWith('/') ? config.mountPoint : `/${config.mountPoint}`}`;
     
+    console.log('[Server] Starting FFmpeg with Icecast config:', {
+        url: `${config.serverUrl}:${config.port}`,
+        mountPoint: config.mountPoint,
+        username: config.username
+    });
+    
     // These args expect a WebM container with Opus audio from the client's MediaRecorder
     const ffmpegArgs = [
         '-re',
@@ -165,6 +171,7 @@ const startFfmpegStream = (ws) => {
 
     streamProcess.ffmpeg.stderr.on('data', (data) => {
         const output = data.toString();
+        // Log verbose FFmpeg output for debugging but avoid spamming with time updates
         if (!output.includes('time=')) console.log(`[FFmpeg] stderr: ${output}`);
         
         if (!streamingStarted && output.includes('speed=')) {
@@ -172,7 +179,7 @@ const startFfmpegStream = (ws) => {
             broadcastIcecastStatus('broadcasting');
         }
         if (output.toLowerCase().includes('failed to connect')) {
-            broadcastIcecastStatus('error', 'Failed to connect to Icecast server.');
+            broadcastIcecastStatus('error', 'Failed to connect to Icecast server. Check URL, port, and credentials.');
             stopFfmpegStream();
         }
     });
@@ -180,7 +187,7 @@ const startFfmpegStream = (ws) => {
     streamProcess.ffmpeg.on('close', (code) => {
         console.log(`[FFmpeg] process exited with code ${code}`);
         if (!isStoppingIntentionally) {
-            broadcastIcecastStatus('error', `FFmpeg process exited unexpectedly with code ${code}.`);
+            broadcastIcecastStatus('error', `FFmpeg process exited unexpectedly with code ${code}. Check server logs.`);
         } else {
             broadcastIcecastStatus('inactive');
         }
@@ -374,6 +381,7 @@ wss.on('connection', async (ws, req) => {
     
     ws.on('message', async (message, isBinary) => {
         if (isBinary) {
+            console.log(`[Server] Binary audio data received, size: ${message.length} bytes`);
             if (streamProcess.ffmpeg && streamProcess.ws === ws) {
                 streamProcess.ffmpeg.stdin.write(message);
             }
@@ -411,7 +419,7 @@ wss.on('connection', async (ws, req) => {
                     break;
                 
                 case 'streamStart':
-                    console.log(`[Broadcast] Received streamStart from ${email}, config:`, data.payload);
+                    console.log(`[Server] streamStart received, config:`, data.payload);
                     await updatePlayoutPolicy();
                     startFfmpegStream(ws);
                     break;

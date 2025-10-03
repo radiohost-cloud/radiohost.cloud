@@ -60,6 +60,11 @@ const PublicStream: React.FC<PublicStreamProps> = ({
             setTimeout(() => setCopiedState(false), 2000);
         });
     };
+    
+    const handleToggle = (newValue: boolean) => {
+        console.log('[PublicStream] Toggle clicked, value:', newValue);
+        onTogglePublicStream(newValue);
+    };
 
     const handleConfigChange = (field: keyof StreamingConfig, value: string | number | boolean) => {
         onUpdatePolicy({
@@ -81,13 +86,21 @@ const PublicStream: React.FC<PublicStreamProps> = ({
         }
     }, [publicStreamStatus]);
 
-    const isToggleDisabled = publicStreamStatus === 'starting' || publicStreamStatus === 'stopping' || !isSecureContext;
-    const isSettingsDisabled = publicStreamStatus !== 'inactive' || isToggleDisabled;
+    const { isToggleDisabled, disabledReason } = useMemo(() => {
+        console.log('[PublicStream] Toggle disabled reason check:', {isSecureContext, publicStreamStatus});
+        if (!isSecureContext) {
+            return { isToggleDisabled: true, disabledReason: 'Broadcast disabled: Requires a secure (HTTPS) connection.' };
+        }
+        if (publicStreamStatus === 'starting') {
+            return { isToggleDisabled: true, disabledReason: 'Connecting to server...' };
+        }
+        if (publicStreamStatus === 'stopping') {
+            return { isToggleDisabled: true, disabledReason: 'Stopping stream...' };
+        }
+        return { isToggleDisabled: false, disabledReason: '' };
+    }, [isSecureContext, publicStreamStatus]);
 
-    const helperText = useMemo(() => {
-        if (!isSecureContext) return "Requires a secure (HTTPS) connection.";
-        return "Broadcast your main output to an Icecast server.";
-    }, [isSecureContext]);
+    const isSettingsDisabled = publicStreamStatus !== 'inactive' && publicStreamStatus !== 'error';
 
     return (
         <div className="p-4 space-y-4 h-full flex flex-col">
@@ -95,22 +108,21 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                 <BroadcastIcon className="w-6 h-6" />
                 Icecast Stream
             </h3>
-
-            {!isSecureContext && (
-                <WarningBox>
-                    Broadcasting requires a secure connection (HTTPS or localhost). Current protocol: <strong>{window.location.protocol}</strong>
-                </WarningBox>
-            )}
-
+            
             <div className="flex-shrink-0 space-y-3">
-                <div className="flex items-center justify-between p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                    <div>
+                 <div
+                    className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg"
+                    title={isToggleDisabled ? disabledReason : 'Click to start or stop broadcasting'}
+                >
+                    <div className="flex items-center justify-between">
                         <label htmlFor="public-stream-enabled" className={`text-sm font-medium block ${isToggleDisabled ? 'cursor-not-allowed text-neutral-500' : 'cursor-pointer'}`}>
                             Start Broadcasting
                         </label>
-                        <p className="text-xs text-neutral-500">{helperText}</p>
+                        <Toggle id="public-stream-enabled" checked={isPublicStreamEnabled} onChange={handleToggle} disabled={isToggleDisabled}/>
                     </div>
-                    <Toggle id="public-stream-enabled" checked={isPublicStreamEnabled} onChange={onTogglePublicStream} disabled={isToggleDisabled}/>
+                    {isToggleDisabled && (
+                        <p className="text-xs text-yellow-600 dark:text-yellow-500 mt-2">{disabledReason}</p>
+                    )}
                 </div>
 
                 {isPublicStreamEnabled && (
