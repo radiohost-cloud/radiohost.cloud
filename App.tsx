@@ -2341,6 +2341,7 @@ const AppInternal: React.FC = () => {
     const [publicStreamError, setPublicStreamError] = useState<string | null>(null);
 
     const handleTogglePublicStream = useCallback(async (enabled: boolean) => {
+      console.log('[App] handleTogglePublicStream called with enabled:', enabled);
       console.log('[Broadcast] Toggle called - enabled:', enabled, 'isSecureContext:', window.isSecureContext, 'isStudio:', isStudio, 'wsState:', wsRef.current?.readyState);
       
       setPublicStreamDiagnostics({ mediaRecorderState: 'inactive', sentBlobs: 0, hasAudioSignal: false });

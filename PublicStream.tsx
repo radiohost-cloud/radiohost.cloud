@@ -17,6 +17,11 @@ interface PublicStreamProps {
     isSecureContext: boolean;
     policy: PlayoutPolicy;
     onUpdatePolicy: (policy: PlayoutPolicy) => void;
+    publicStreamDiagnostics: {
+        mediaRecorderState: string;
+        sentBlobs: number;
+        hasAudioSignal: boolean;
+    };
 }
 
 const PublicStream: React.FC<PublicStreamProps> = ({ 
@@ -28,7 +33,8 @@ const PublicStream: React.FC<PublicStreamProps> = ({
     isAudioEngineInitializing,
     isSecureContext,
     policy,
-    onUpdatePolicy
+    onUpdatePolicy,
+    publicStreamDiagnostics
 }) => {
     const [directStreamUrl, setDirectStreamUrl] = useState('');
     const [isCopied, setIsCopied] = useState(false);
@@ -54,6 +60,11 @@ const PublicStream: React.FC<PublicStreamProps> = ({
             setTimeout(() => setCopiedState(false), 2000);
         });
     };
+    
+    const handleToggle = (newValue: boolean) => {
+        console.log('[PublicStream] Toggle clicked, value:', newValue);
+        onTogglePublicStream(newValue);
+    };
 
     const handleConfigChange = (field: keyof StreamingConfig, value: string | number | boolean) => {
         onUpdatePolicy({
@@ -75,13 +86,21 @@ const PublicStream: React.FC<PublicStreamProps> = ({
         }
     }, [publicStreamStatus]);
 
-    const isToggleDisabled = publicStreamStatus === 'starting' || publicStreamStatus === 'stopping' || !isSecureContext;
-    const isSettingsDisabled = publicStreamStatus !== 'inactive' || isToggleDisabled;
+    const { isToggleDisabled, disabledReason } = useMemo(() => {
+        console.log('[PublicStream] Toggle disabled reason check:', {isSecureContext, publicStreamStatus});
+        if (!isSecureContext) {
+            return { isToggleDisabled: true, disabledReason: 'Broadcast disabled: Requires a secure (HTTPS) connection.' };
+        }
+        if (publicStreamStatus === 'starting') {
+            return { isToggleDisabled: true, disabledReason: 'Connecting to server...' };
+        }
+        if (publicStreamStatus === 'stopping') {
+            return { isToggleDisabled: true, disabledReason: 'Stopping stream...' };
+        }
+        return { isToggleDisabled: false, disabledReason: '' };
+    }, [isSecureContext, publicStreamStatus]);
 
-    const helperText = useMemo(() => {
-        if (!isSecureContext) return "Requires a secure (HTTPS) connection.";
-        return "Broadcast your main output to an Icecast server.";
-    }, [isSecureContext]);
+    const isSettingsDisabled = publicStreamStatus !== 'inactive' && publicStreamStatus !== 'error';
 
     return (
         <div className="p-4 space-y-4 h-full flex flex-col">
@@ -89,28 +108,42 @@ const PublicStream: React.FC<PublicStreamProps> = ({
                 <BroadcastIcon className="w-6 h-6" />
                 Icecast Stream
             </h3>
-
-            {!isSecureContext && (
-                <WarningBox>
-                    Broadcasting wymaga bezpiecznego połączenia (HTTPS lub localhost). Obecne połączenie: <strong>{window.location.protocol}</strong>
-                </WarningBox>
-            )}
-
+            
             <div className="flex-shrink-0 space-y-3">
-                <div className="flex items-center justify-between p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                    <div>
+                 <div
+                    className="p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg"
+                    title={isToggleDisabled ? disabledReason : 'Click to start or stop broadcasting'}
+                >
+                    <div className="flex items-center justify-between">
                         <label htmlFor="public-stream-enabled" className={`text-sm font-medium block ${isToggleDisabled ? 'cursor-not-allowed text-neutral-500' : 'cursor-pointer'}`}>
                             Start Broadcasting
                         </label>
-                        <p className="text-xs text-neutral-500">{helperText}</p>
+                        <Toggle id="public-stream-enabled" checked={isPublicStreamEnabled} onChange={handleToggle} disabled={isToggleDisabled}/>
                     </div>
-                    <Toggle id="public-stream-enabled" checked={isPublicStreamEnabled} onChange={onTogglePublicStream} disabled={isToggleDisabled}/>
+                    {isToggleDisabled && (
+                        <p className="text-xs text-yellow-600 dark:text-yellow-500 mt-2">{disabledReason}</p>
+                    )}
                 </div>
 
                 {isPublicStreamEnabled && (
-                    <div className="text-center p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
-                        <div className={`text-xl font-bold ${statusInfo.color}`}>{statusInfo.text}</div>
-                        {publicStreamError && <p className="text-xs text-red-500 mt-2 break-words">{publicStreamError}</p>}
+                    <div className="space-y-2">
+                        <div className="text-center p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                            <div className={`text-xl font-bold ${statusInfo.color}`}>{statusInfo.text}</div>
+                            {publicStreamError && <p className="text-xs text-red-500 mt-2 break-words">{publicStreamError}</p>}
+                        </div>
+
+                        {publicStreamStatus === 'broadcasting' && !publicStreamDiagnostics.hasAudioSignal && (
+                            <WarningBox>
+                                No audio signal is detected on the main output. Your stream might be silent. Ensure a track is playing or a microphone is live.
+                            </WarningBox>
+                        )}
+                        
+                        <div className="text-xs text-neutral-500 dark:text-neutral-400 space-y-1 p-3 bg-neutral-200/50 dark:bg-neutral-800/50 rounded-lg">
+                            <h4 className="font-bold text-sm text-neutral-600 dark:text-neutral-400 mb-2">Diagnostics</h4>
+                            <div className="flex justify-between"><span>Recorder State:</span> <span className="font-mono">{publicStreamDiagnostics.mediaRecorderState}</span></div>
+                            <div className="flex justify-between"><span>Audio Signal:</span> <span className="font-mono">{publicStreamDiagnostics.hasAudioSignal ? 'Detected' : 'None'}</span></div>
+                            <div className="flex justify-between"><span>Data Packets Sent:</span> <span className="font-mono">{publicStreamDiagnostics.sentBlobs}</span></div>
+                        </div>
                     </div>
                 )}
             </div>
