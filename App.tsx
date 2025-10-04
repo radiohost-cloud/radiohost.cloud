@@ -308,7 +308,7 @@ const AppInternal: React.FC = () => {
     
     // --- Audio Mixer State ---
     const [mixerConfig, setMixerConfig] = useState<MixerConfig>(initialMixerConfig);
-    const [audioLevels, setAudioLevels] = useState<Partial<Record<AudioSourceId, number>>>({});
+    const [audioLevels, setAudioLevels] = useState<Partial<Record<AudioSourceId | 'streamOutput', number>>>({});
 
     // --- Cartwall State ---
     const [activeCartPlayers, setActiveCartPlayers] = useState(new Map<number, { progress: number; duration: number }>());
@@ -652,6 +652,16 @@ const AppInternal: React.FC = () => {
                  console.error("Error connecting media element source:", e);
             }
         }
+
+        if (destinationNodeRef.current && !destinationAnalyserRef.current) {
+            if (audioCtx) {
+                const analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                destinationNodeRef.current.connect(analyser);
+                destinationAnalyserRef.current = analyser;
+                console.log("[Audio Capture] Stream destination analyser connected.");
+            }
+        }
     }, [isSecureContext, isStudio]);
 
     useEffect(() => {
@@ -659,7 +669,7 @@ const AppInternal: React.FC = () => {
         let animationFrameId: number;
 
         const updateLevels = () => {
-            const newLevels: Partial<Record<AudioSourceId, number>> = {};
+            const newLevels: Partial<Record<AudioSourceId | 'streamOutput', number>> = {};
             const { analysers } = audioNodesRef.current;
             
             analysers.forEach((analyser, sourceId) => {
@@ -701,10 +711,25 @@ const AppInternal: React.FC = () => {
             
             newLevels.cartwall = cartwallLevel;
 
+            if (destinationAnalyserRef.current) {
+                const analyser = destinationAnalyserRef.current;
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                analyser.getByteTimeDomainData(dataArray);
+
+                let sumSquares = 0.0;
+                for (const amplitude of dataArray) {
+                    const normalized = (amplitude / 128.0) - 1.0;
+                    sumSquares += normalized * normalized;
+                }
+                const rms = Math.sqrt(sumSquares / bufferLength);
+                newLevels.streamOutput = Math.min(100, rms * 300);
+            }
+
             setAudioLevels(currentLevels => {
                  // Prevent unnecessary re-renders if levels are very similar
                 const changed = Object.keys(newLevels).some(key => 
-                    Math.abs((newLevels[key as AudioSourceId] || 0) - (currentLevels[key as AudioSourceId] || 0)) > 0.5
+                    Math.abs((newLevels[key as keyof typeof newLevels] || 0) - (currentLevels[key as keyof typeof currentLevels] || 0)) > 0.5
                 );
                 return changed ? newLevels : currentLevels;
             });
@@ -2484,14 +2509,6 @@ const AppInternal: React.FC = () => {
           return;
         }
 
-        if (!destinationAnalyserRef.current && audioContextRef.current) {
-            const analyser = audioContextRef.current.createAnalyser();
-            analyser.fftSize = 256;
-            destinationNodeRef.current.connect(analyser);
-            destinationAnalyserRef.current = analyser;
-            console.log('[Broadcast] Diagnostic analyser connected to destination node.');
-        }
-        
         let hasSignal = false;
         if (destinationAnalyserRef.current) {
             const dataArray = new Uint8Array(destinationAnalyserRef.current.frequencyBinCount);
@@ -2938,6 +2955,7 @@ const AppInternal: React.FC = () => {
                                         onUpdatePolicy={setPlayoutPolicy}
                                         publicStreamDiagnostics={publicStreamDiagnostics}
                                         onTestEcho={handleTestEcho}
+                                        audioLevels={audioLevels}
                                     />}
                                     {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} allFolders={allFolders} allTags={allTags} />}
                                 </div>
