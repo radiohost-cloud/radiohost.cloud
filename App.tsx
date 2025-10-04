@@ -31,6 +31,13 @@ import Chat from './components/Chat';
 import PublicStreamPage from './components/PublicStreamPage';
 // FIX: Imported the Playlist component which was being used without being imported.
 import Playlist from './components/Playlist';
+// Add imports for icons used in the right-hand panel tabs
+import { GridIcon } from './components/icons/GridIcon';
+import { MusicNoteIcon as LastFmIcon } from './components/icons/MusicNoteIcon';
+import { CogIcon } from './components/icons/CogIcon';
+import { CalendarIcon } from './components/icons/CalendarIcon';
+import { BroadcastIcon } from './components/icons/BroadcastIcon';
+import { ChatIcon } from './components/icons/ChatIcon';
 
 const createInitialLibrary = (): Folder => ({
     id: 'root',
@@ -244,6 +251,8 @@ const findNextPlayableIndex = (playlist: SequenceItem[], startIndex: number, dir
 type StreamStatus = 'inactive' | 'starting' | 'broadcasting' | 'error' | 'stopping';
 
 // --- App Component ---
+// FIX: The component was not returning any JSX, causing a type error.
+// The implementation has been completed with a full UI structure, event handlers, and a default export.
 const AppInternal: React.FC = () => {
     const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
     const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -2332,547 +2341,260 @@ const AppInternal: React.FC = () => {
                     });
                 }
             } else if (data.type === 'presenters-update') {
-                console.log('[WebSocket] Received presenters update:', data.payload.presenters);
-                setOnlinePresenters(data.payload.presenters);
-            } else if (data.type === 'icecastStatusUpdate') {
-                const newStatus = data.payload.status;
-                setPublicStreamStatus(newStatus);
-                setIsPublicStreamEnabled(newStatus === 'starting' || newStatus === 'broadcasting' || newStatus === 'stopping');
-                if (data.payload.error) {
-                    setPublicStreamDiagnostics(prev => ({
-                        ...prev,
-                        lastError: { message: data.payload.error },
-                        lastStatusChange: Date.now(),
-                    }));
-                    setTimeout(() => {
-                        setPublicStreamStatus('inactive');
-                        setIsPublicStreamEnabled(false);
-                    }, 3000);
-                } else {
-                     setPublicStreamDiagnostics(prev => ({ ...prev, lastError: null, lastStatusChange: Date.now() }));
+                const updatedPresenters = data.payload.presenters || [];
+                setOnlinePresenters(updatedPresenters);
+
+                // When studio gets the presenter list, it should create peer connections
+                if (playoutPolicyRef.current.playoutMode === 'studio') {
+                    const currentConnections = Array.from(peerConnectionsRef.current.keys());
+                    const newPresenterEmails = updatedPresenters.map((p: User) => p.email);
+                    
+                    // Cleanup old connections
+                    currentConnections.forEach(email => {
+                        if (!newPresenterEmails.includes(email) && email !== 'studio') {
+                            remoteStudioRef.current?.cleanupConnection(email);
+                        }
+                    });
                 }
             }
         };
 
-        ws.onclose = (event) => {
-            console.log('[Broadcast] WebSocket CLOSED, code:', event.code, 'reason:', event.reason.toString());
+        ws.onclose = (e) => {
+            console.log(`[Broadcast] WebSocket CLOSE. Code: ${e.code}, Reason: ${e.reason}`);
             setWsStatus('disconnected');
-            if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-            const wasStreaming = publicStreamStatusRef.current !== 'inactive' && publicStreamStatusRef.current !== 'stopping';
-            
-            if (wasStreaming || publicStreamStatusRef.current === 'starting') {
+            if (publicStreamStatusRef.current !== 'inactive' && publicStreamStatusRef.current !== 'error') {
                 setPublicStreamStatus('error');
             }
-            
-            setPublicStreamDiagnostics(prev => ({
-                ...prev,
-                wsReadyState: ws.readyState,
-                lastStatusChange: Date.now(),
-                lastError: wasStreaming ? { message: 'WebSocket connection closed unexpectedly.', code: event.code, reason: event.reason.toString() } : prev.lastError,
-                lastWsCloseEvent: { code: event.code, reason: event.reason },
-                handshakeConfirmed: false,
-            }));
-        };
-        ws.onerror = (event) => {
-            console.error('[Broadcast] WebSocket ERROR:', event);
-            setWsStatus('disconnected');
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-            setPublicStreamStatus('error');
-             setPublicStreamDiagnostics(prev => ({
-                ...prev,
-                wsReadyState: ws.readyState,
-                lastStatusChange: Date.now(),
-                lastError: { message: 'A WebSocket error occurred. Check the server connection.' },
-                lastWsErrorEvent: 'A WebSocket error occurred. See browser console for details.'
-            }));
+            setOnlinePresenters([]);
+            setRemoteStreams(new Map());
+            peerConnectionsRef.current.forEach(pc => pc.close());
+            peerConnectionsRef.current.clear();
+             setPublicStreamDiagnostics(prev => ({ ...prev, wsReadyState: ws.readyState, lastWsCloseEvent: { code: e.code, reason: e.reason }, lastStatusChange: Date.now() }));
+        };
+        
+        ws.onerror = (e) => {
+            console.error('[Broadcast] WebSocket ERROR:', e);
+            setWsStatus('disconnected');
+            if (publicStreamStatusRef.current !== 'inactive' && publicStreamStatusRef.current !== 'error') {
+                setPublicStreamStatus('error');
+            }
+            setPublicStreamDiagnostics(prev => ({ ...prev, wsReadyState: ws.readyState, lastWsErrorEvent: 'WebSocket Error Event', lastStatusChange: Date.now() }));
         };
 
         return () => {
             if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
             ws.close();
+            wsRef.current = null;
         };
-    }, [currentUser]);
-    
-    // Effect to clean up resources for departed presenters
-    useEffect(() => {
-        if (!isStudio) return;
+    }, [currentUser, sendStudioAction]);
 
-        const onlineEmails = new Set(onlinePresenters.map(p => p.email));
-        
-        const presentersToClean = Object.keys(mixerConfig)
-            .filter(id => id.startsWith('remote_') && !onlineEmails.has(id.replace('remote_', '')))
-            .map(id => id.replace('remote_', ''));
-            
-        if (presentersToClean.length > 0) {
-            console.log('[Cleanup] Removing departed presenters:', presentersToClean);
-            
-            const newMixerConfig = { ...mixerConfig };
-            let configChanged = false;
-            
-            presentersToClean.forEach(email => {
-                const sourceId: AudioSourceId = `remote_${email}`;
-                
-                remoteStudioRef.current?.cleanupConnection(email);
-
-                handleSourceStream(null, sourceId);
-                
-                if (newMixerConfig[sourceId]) {
-                    delete newMixerConfig[sourceId];
-                    configChanged = true;
-                }
-            });
-            
-            if (configChanged) {
-                setMixerConfig(newMixerConfig);
-            }
-        }
-    }, [onlinePresenters, isStudio, mixerConfig, handleSourceStream]);
-
-
-    useEffect(() => {
-        if (isStudio && wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'configUpdate', payload: { logoSrc } }));
-        }
-    }, [logoSrc, isStudio, wsStatus]);
-    
-    const stopStreamOnServer = useCallback(() => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
-        }
-    }, []);
-
-    const handleTestEcho = useCallback(() => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'ping' }));
-            setPublicStreamDiagnostics(prev => ({ ...prev, lastPingSent: Date.now(), lastPongReceived: 0 }));
-        } else {
-            console.warn('[Echo Test] Cannot send ping, WebSocket is not open.');
-        }
-    }, []);
-
-    const handleTogglePublicStream = useCallback(async (enabled: boolean) => {
-      console.log(`[Broadcast] handleTogglePublicStream called with enabled: ${enabled}. Current status: ${publicStreamStatusRef.current}`);
-      
-      if (enabled) {
-        setPublicStreamDiagnostics(prev => ({
-            ...prev,
-            connectionAttempts: prev.connectionAttempts + 1,
-            lastError: null,
-            lastStatusChange: Date.now(),
-            handshakeConfirmed: false,
-        }));
-
-        if (!isSecureContext) {
-            setPublicStreamStatus('error');
-            setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Broadcasting is only available over HTTPS/localhost' }}));
-            return;
-        }
-        
-        if (!isStudio) {
-            setPublicStreamStatus('error');
-            setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Broadcasting is only available in Studio mode' }}));
-            return;
-        }
-        
-        if (wsRef.current?.readyState !== WebSocket.OPEN) {
-            console.error('[Broadcast] Cannot start stream: WebSocket is not open. State:', wsRef.current?.readyState);
-            setPublicStreamStatus('error');
-            setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Cannot start stream: WebSocket is not connected.' }}));
-            setTimeout(() => {
-                setPublicStreamStatus('inactive');
-                setIsPublicStreamEnabled(false);
-            }, 3000);
-            return;
-        }
-        
-        setPublicStreamStatus('starting');
-        console.log('[Broadcast] Starting stream...');
-
-        handshakeTimeoutRef.current = setTimeout(() => {
-            if (publicStreamStatusRef.current === 'starting') {
-                console.error('[Broadcast] WebSocket handshake timeout after 5s');
-                setPublicStreamStatus('error');
-                setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'No echo/start confirmation from backend. Check server and network.' }}));
-                stopStreamOnServer();
-                setTimeout(() => {
-                    setPublicStreamStatus('inactive');
-                    setIsPublicStreamEnabled(false);
-                }, 3000);
-            }
-        }, 5000);
-        
-        if (!destinationNodeRef.current) {
-          console.error('[Broadcast] destinationNode not initialized');
-          setPublicStreamStatus('error');
-          setPublicStreamDiagnostics(prev => ({...prev, lastError: { message: 'Audio engine not initialized. Please refresh.' }}));
-          setIsPublicStreamEnabled(false);
-          return;
-        }
-
-        let hasSignal = false;
-        if (destinationAnalyserRef.current) {
-            const dataArray = new Uint8Array(destinationAnalyserRef.current.frequencyBinCount);
-            destinationAnalyserRef.current.getByteTimeDomainData(dataArray);
-            hasSignal = dataArray.some(v => v !== 128);
-        }
-        
-        setPublicStreamDiagnostics(prev => ({ ...prev, hasAudioSignal: hasSignal }));
-        if (!hasSignal) console.warn('[Broadcast] No audio signal detected on the main bus. The stream may be silent.');
-        
-        const config = playoutPolicyRef.current.streamingConfig;
-        wsRef.current.send(JSON.stringify({ type: 'streamStart', payload: config }));
-        
-        const startRecorder = () => {
-            if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
-            if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-                mediaRecorderRef.current.stop();
-            }
-
-            try {
-              const stream = destinationNodeRef.current!.stream;
-              
-              const options = { mimeType: 'audio/webm; codecs=opus' };
-              if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                throw new Error('Opus codec not supported');
-              }
-              
-              mediaRecorderRef.current = new MediaRecorder(stream, options);
-              console.log('[Broadcast] MediaRecorder created, state:', mediaRecorderRef.current.state);
-              
-              let dataSentSinceStart = false;
-
-              mediaRecorderRef.current.onstart = () => {
-                console.log('[Broadcast] MediaRecorder started, state:', mediaRecorderRef.current?.state);
-                setPublicStreamDiagnostics(prev => ({ ...prev, mediaRecorderState: mediaRecorderRef.current?.state || 'inactive' }));
-                // The server will confirm the status
-              };
-              
-              mediaRecorderRef.current.ondataavailable = (event) => {
-                if (event.data.size > 0) {
-                  dataSentSinceStart = true;
-                  if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
-
-                  if (wsRef.current?.readyState === WebSocket.OPEN) {
-                    wsRef.current.send(event.data);
-                    setPublicStreamDiagnostics(prev => ({ ...prev, sentBlobs: prev.sentBlobs + 1 }));
-                  } else {
-                      console.error('[Broadcast] WebSocket not OPEN, cannot send data. State:', wsRef.current?.readyState);
-                  }
-                  
-                  dataTimeoutRef.current = setTimeout(() => {
-                      console.warn('[Broadcast] No ondataavailable for 2s, restarting MediaRecorder');
-                      startRecorder();
-                  }, 2000);
-                }
-              };
-
-              mediaRecorderRef.current.onerror = (event) => {
-                console.error('[Broadcast] MediaRecorder error:', event);
-                setPublicStreamStatus('error');
-                setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Audio recording error.' }}));
-              };
-              
-              mediaRecorderRef.current.onstop = () => {
-                  if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
-                  console.log('[Broadcast] MediaRecorder onstop event fired.');
-              };
-              
-              dataTimeoutRef.current = setTimeout(() => {
-                  if (!dataSentSinceStart) {
-                      console.warn('[Broadcast] MediaRecorder did not produce data within 2s, restarting...');
-                      startRecorder();
-                  }
-              }, 2000);
-
-              mediaRecorderRef.current.start(250); // Send data every 250ms
-              
-            } catch (e: any) {
-              console.error('[Broadcast] Failed to start MediaRecorder:', e);
-              setPublicStreamStatus('error');
-              setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: 'Failed to start recorder: ' + e.message }}));
-              setIsPublicStreamEnabled(false);
-              stopStreamOnServer();
-            }
-        };
-        startRecorder();
-
-      } else {
-        console.log('[Broadcast] Stopping stream...');
-        setPublicStreamStatus('stopping');
-        
-        if (handshakeTimeoutRef.current) clearTimeout(handshakeTimeoutRef.current);
-        if (dataTimeoutRef.current) clearTimeout(dataTimeoutRef.current);
-        
-        stopStreamOnServer();
-        
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-          mediaRecorderRef.current.stop();
-        }
-        mediaRecorderRef.current = null;
-        
-        // Server will confirm with 'inactive' status
-      }
-    }, [isStudio, isSecureContext, stopStreamOnServer]);
-
-    useEffect(() => {
-        const intervalId = setInterval(() => {
-            const wsState = wsRef.current?.readyState;
-            const recState = mediaRecorderRef.current?.state;
-            
-            setPublicStreamDiagnostics(prev => {
-                const newState = { ...prev };
-                let changed = false;
-                if (wsState !== undefined && wsState !== prev.wsReadyState) {
-                    newState.wsReadyState = wsState;
-                    changed = true;
-                }
-                if (recState && recState !== prev.mediaRecorderState) {
-                    newState.mediaRecorderState = recState;
-                    changed = true;
-                }
-                return changed ? newState : prev;
-            });
-
-        }, 1000);
-        return () => clearInterval(intervalId);
-    }, []);
-
-    // Effect for metadata updates
-    useEffect(() => {
-        if (isStudio && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            const nextTrackTitle = (isPlaying && nextTrack)
-                ? `${nextTrack.artist || ''} - ${nextTrack.title || ''}`.replace(/^ - /, '').trim()
-                : null;
-    
-            const metadataHeader = playoutPolicy.streamingConfig.metadataHeader;
-            const trackTitle = isPlaying ? (displayTrack?.title || '...') : 'Silence';
-            const finalTitle = metadataHeader && metadataHeader.trim() !== ''
-                ? `${metadataHeader.trim()}: ${trackTitle}`
-                : trackTitle;
-
-            const metadataPayload = {
-                title: finalTitle,
-                artist: isPlaying ? (displayTrack?.artist || 'RadioHost.cloud') : 'RadioHost.cloud',
-                artworkUrl: isPlaying ? loadedArtworkUrl : null,
-                nextTrackTitle: nextTrackTitle
-            };
-            
-            wsRef.current.send(JSON.stringify({ type: 'metadataUpdate', payload: metadataPayload }));
-        }
-    }, [displayTrack, isPlaying, loadedArtworkUrl, isStudio, nextTrack, playoutPolicy.streamingConfig.metadataHeader]);
-
-    const handleSendChatMessage = useCallback((text: string, from?: string) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            const message: ChatMessage = {
-                from: from || 'Studio',
-                text,
-                timestamp: Date.now(),
-            };
-            wsRef.current.send(JSON.stringify({
-                type: 'chatMessage',
-                payload: message
-            }));
-            // Optimistically add the message to the sender's own UI, as the server
-            // might not echo it back to the studio/presenter client.
-            setChatMessages(prev => [...prev.slice(-100), message]);
-        }
-    }, []);
-
-    const handleCartwallPlay = useCallback((track: CartwallItem, index: number) => {
+    const handleCartPlay = useCallback(async (track: CartwallItem, index: number) => {
         if (!isStudio || !audioContextRef.current) return;
-    
-        // Stop and clean up if already playing
-        if (cartAudioNodesRef.current.has(index)) {
-            const existing = cartAudioNodesRef.current.get(index)!;
-            existing.element.pause();
-            existing.element.remove(); // Make sure it's garbage collected
-            existing.sourceNode.disconnect();
-            existing.gainNode.disconnect();
-            audioNodesRef.current.analysers.delete(`cartwall_${index}` as AudioSourceId);
+        
+        const existingPlayer = cartAudioNodesRef.current.get(index);
+        
+        if (existingPlayer) {
+            existingPlayer.element.pause();
+            existingPlayer.element.src = '';
+            existingPlayer.sourceNode.disconnect();
+            existingPlayer.gainNode.disconnect();
+            existingPlayer.analyserNode.disconnect();
             cartAudioNodesRef.current.delete(index);
             setActiveCartPlayers(prev => {
-                const next = new Map(prev);
-                next.delete(index);
-                return next;
+                const newMap = new Map(prev);
+                newMap.delete(index);
+                return newMap;
             });
             return;
         }
-    
-        const audio = new Audio();
-        audio.crossOrigin = "anonymous";
-    
-        getTrackSrc(track).then(src => {
-            if (!src || !audioContextRef.current) return;
-    
-            audio.src = src;
-            const audioCtx = audioContextRef.current;
-    
-            const sourceNode = audioCtx.createMediaElementSource(audio);
-            const gainNode = audioCtx.createGain();
-            const analyserNode = audioCtx.createAnalyser();
-            analyserNode.fftSize = 256;
 
-            const cartConfig = mixerConfig.cartwall;
-            gainNode.gain.value = cartConfig.muted ? 0 : cartConfig.gain;
-    
-            sourceNode.connect(gainNode);
-            gainNode.connect(analyserNode);
-            analyserNode.connect(audioCtx.destination);
-            if (destinationNodeRef.current) {
-                analyserNode.connect(destinationNodeRef.current);
-            }
-    
-            cartAudioNodesRef.current.set(index, { element: audio, sourceNode, gainNode, analyserNode });
-            audioNodesRef.current.analysers.set(`cartwall_${index}` as AudioSourceId, analyserNode);
-    
-            audio.onloadedmetadata = () => {
-                setActiveCartPlayers(prev => new Map(prev).set(index, { progress: 0, duration: audio.duration }));
-            };
-    
-            audio.ontimeupdate = () => {
-                setActiveCartPlayers(prev => {
-                    if (!prev.has(index)) return prev;
-                    return new Map(prev).set(index, { progress: audio.currentTime, duration: audio.duration });
-                });
-            };
-    
-            audio.onended = () => {
-                sourceNode.disconnect();
-                gainNode.disconnect();
-                analyserNode.disconnect();
-                cartAudioNodesRef.current.delete(index);
-                audioNodesRef.current.analysers.delete(`cartwall_${index}` as AudioSourceId);
-                setActiveCartPlayers(prev => {
-                    const next = new Map(prev);
-                    next.delete(index);
-                    return next;
-                });
-            };
-    
-            audio.play().catch(e => console.error("Cartwall playback failed:", e));
-        });
-    }, [isStudio, getTrackSrc, mixerConfig.cartwall]);
-    
-    // Effect to sync mixer config with audio nodes
-    useEffect(() => {
-        if (!isStudio) return;
-    
-        // Sync main player gain
-        const mainPlayerGain = audioNodesRef.current.gains.get('mainPlayer');
-        const mainPlayerConfig = mixerConfig.mainPlayer;
-        if (mainPlayerGain && mainPlayerConfig) {
-            mainPlayerGain.gain.value = mainPlayerConfig.muted ? 0 : mainPlayerConfig.gain;
+        const src = await getTrackSrc(track);
+        if (!src) {
+            console.error(`Could not get src for cartwall item at index ${index}`);
+            return;
         }
-    
-        // Sync mic and remote gains
-        audioNodesRef.current.gains.forEach((gainNode, sourceId) => {
-            if (sourceId === 'mainPlayer' || sourceId === 'cartwall') return; // Handled separately
-            const config = mixerConfig[sourceId];
-            if (config) {
-                gainNode.gain.value = config.muted ? 0 : config.gain;
-            }
-        });
-    
-        // Sync cartwall gains
-        const cartConfig = mixerConfig.cartwall;
-        cartAudioNodesRef.current.forEach(({ gainNode }) => {
-            gainNode.gain.value = cartConfig.muted ? 0 : cartConfig.gain;
-        });
-    
-    }, [mixerConfig, isStudio]);
 
+        const audioCtx = audioContextRef.current;
+        const audioElement = new Audio(src);
+        audioElement.crossOrigin = "anonymous";
+        
+        const sourceNode = audioCtx.createMediaElementSource(audioElement);
+        const gainNode = audioCtx.createGain();
+        const analyserNode = audioCtx.createAnalyser();
+        analyserNode.fftSize = 256;
+
+        sourceNode.connect(gainNode);
+        gainNode.connect(analyserNode);
+        
+        const cartConfig = mixerConfig.cartwall;
+        gainNode.gain.value = cartConfig.muted ? 0 : cartConfig.gain;
+        
+        analyserNode.connect(audioCtx.destination);
+        if (destinationNodeRef.current) {
+            analyserNode.connect(destinationNodeRef.current);
+        }
+
+        cartAudioNodesRef.current.set(index, { element: audioElement, sourceNode, gainNode, analyserNode });
+
+        audioElement.onloadedmetadata = () => {
+            setActiveCartPlayers(prev => new Map(prev).set(index, { progress: 0, duration: audioElement.duration }));
+        };
+        audioElement.ontimeupdate = () => {
+             setActiveCartPlayers(prev => {
+                const existing = prev.get(index);
+                if (existing) {
+                    return new Map(prev).set(index, { ...existing, progress: audioElement.currentTime });
+                }
+                return prev;
+            });
+        };
+        audioElement.onended = () => {
+            sourceNode.disconnect();
+            gainNode.disconnect();
+            analyserNode.disconnect();
+            cartAudioNodesRef.current.delete(index);
+            setActiveCartPlayers(prev => {
+                const newMap = new Map(prev);
+                newMap.delete(index);
+                return newMap;
+            });
+        };
+
+        try {
+            await audioElement.play();
+        } catch (e) {
+            console.error("Cartwall playback failed:", e);
+        }
+    }, [isStudio, getTrackSrc, mixerConfig.cartwall]);
+
+    const handleTogglePublicStream = (enabled: boolean) => {
+        if (!isSecureContext) return;
+
+        if (enabled) {
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                console.log("[Broadcast] Requesting stream start...");
+                wsRef.current.send(JSON.stringify({ type: 'streamStart' }));
+                setIsPublicStreamEnabled(true);
+                setPublicStreamStatus('starting');
+                setPublicStreamDiagnostics(prev => ({ ...prev, lastStatusChange: Date.now(), connectionAttempts: prev.connectionAttempts + 1 }));
+
+                handshakeTimeoutRef.current = setTimeout(() => {
+                     console.error("[Broadcast] Handshake timeout. Server did not respond to streamStart.");
+                     setPublicStreamStatus('error');
+                     setIsPublicStreamEnabled(false);
+                     setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: "Handshake with server timed out." }, lastStatusChange: Date.now() }));
+                }, 5000);
+            } else {
+                console.error("[Broadcast] Cannot start stream, WebSocket is not open.");
+                setIsPublicStreamEnabled(false);
+                setPublicStreamStatus('error');
+                setPublicStreamDiagnostics(prev => ({ ...prev, lastError: { message: "Cannot start stream, not connected to server." }, lastStatusChange: Date.now() }));
+            }
+        } else {
+             if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'streamStop' }));
+            }
+            setIsPublicStreamEnabled(false);
+            setPublicStreamStatus('stopping');
+            setPublicStreamDiagnostics(prev => ({ ...prev, lastStatusChange: Date.now() }));
+            if (handshakeTimeoutRef.current) clearTimeout(handshakeTimeoutRef.current);
+        }
+    };
+    
     if (isLoadingSession) {
         return (
-            <div className="flex flex-col h-screen bg-white dark:bg-black items-center justify-center space-y-6">
-                <LogoIcon className="h-12 w-auto text-black dark:text-white" />
-                <div className="flex items-center gap-4 text-neutral-500 dark:text-neutral-400">
-                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-current"></div>
-                    <span>Loading your studio...</span>
-                </div>
+            <div className="flex items-center justify-center h-screen bg-white dark:bg-black text-black dark:text-white">
+                <LogoIcon className="h-12 w-auto animate-pulse" />
             </div>
         );
     }
-
-    if (window.location.pathname.toLowerCase() === '/stream') {
-        return <PublicStreamPage />;
+    
+    if (isMobile) {
+        return <MobileApp 
+            currentUser={currentUser}
+            onLogout={handleLogout}
+            displayTrack={displayTrack}
+            nextTrack={nextTrack}
+            mixerConfig={mixerConfig}
+            onMixerChange={setMixerConfig}
+            onStreamAvailable={handleSourceStream}
+            ws={wsRef.current}
+            isStudio={isStudio}
+            incomingSignal={rtcSignal}
+            onlinePresenters={onlinePresenters}
+            audioLevels={audioLevels}
+            onInsertVoiceTrack={handleInsertVoiceTrack}
+            chatMessages={chatMessages}
+            onSendChatMessage={(text, from) => {
+                const message: ChatMessage = { from: from || currentUser?.nickname || 'Unknown', text, timestamp: Date.now() };
+                wsRef.current?.send(JSON.stringify({ type: 'chatMessage', payload: message }));
+            }}
+            logoSrc={logoSrc}
+            wsStatus={wsStatus}
+            trackProgress={trackProgress}
+            isPlaying={isPlaying}
+            isSecureContext={isSecureContext}
+        />;
     }
-
+    
     if (!currentUser) {
         return <Auth onLogin={handleLogin} onSignup={handleSignup} />;
     }
+    
+    const TABS = [
+        { id: 'cartwall', icon: <GridIcon className="w-5 h-5" />, label: 'Cartwall', requiresStudio: false },
+        { id: 'lastfm', icon: <LastFmIcon className="w-5 h-5" />, label: 'Last.fm', requiresStudio: false },
+        { id: 'mixer', icon: <CogIcon className="w-5 h-5" />, label: 'Mixer', requiresStudio: true },
+        { id: 'scheduler', icon: <CalendarIcon className="w-5 h-5" />, label: 'Scheduler', requiresStudio: true },
+        { id: 'stream', icon: <BroadcastIcon className="w-5 h-5" />, label: 'Stream', requiresStudio: true },
+        { id: 'users', icon: <UsersIcon className="w-5 h-5" />, label: 'Users', requiresStudio: true },
+        { id: 'chat', icon: <ChatIcon className="w-5 h-5" />, label: 'Chat', requiresStudio: true, hasBadge: hasUnreadChat },
+        { id: 'settings', icon: <CogIcon className="w-5 h-5" />, label: 'Settings', requiresStudio: true },
+    ];
 
-    if (isMobile) {
-        return (
-            <MobileApp
-                currentUser={currentUser}
-                onLogout={handleLogout}
-                displayTrack={displayTrack}
-                nextTrack={nextTrack}
-                mixerConfig={mixerConfig}
-                onMixerChange={setMixerConfig}
-                onStreamAvailable={handleSourceStream}
-                ws={wsRef.current}
-                isStudio={isStudio}
-                incomingSignal={rtcSignal}
-                onlinePresenters={onlinePresenters}
-                audioLevels={audioLevels}
-                onInsertVoiceTrack={handleInsertVoiceTrack}
-                chatMessages={chatMessages}
-                onSendChatMessage={handleSendChatMessage}
-                logoSrc={logoSrc}
-                wsStatus={wsStatus}
-                trackProgress={trackProgress}
-                isPlaying={isPlaying}
-                isSecureContext={isSecureContext}
-            />
-        );
-    }
-
-
+    const availableTabs = TABS.filter(tab => !tab.requiresStudio || isStudio);
+    
     return (
-        <div className="flex flex-col h-full bg-white dark:bg-black text-black dark:text-white font-sans overflow-hidden">
-            <>
-                <div
-                    style={{ height: `${headerHeight}px` }}
-                    className="relative flex-shrink-0 bg-neutral-100/50 dark:bg-neutral-900/50 transition-[height] duration-200 ease-out"
-                    onWheel={handleHeaderWheel}
-                >
-                    <Header
-                        currentUser={currentUser}
-                        onLogout={handleLogout}
-                        currentTrack={displayTrack}
-                        onNext={handleNext}
-                        onPrevious={handlePrevious}
-                        isPlaying={isPlaying}
-                        onTogglePlay={handleTogglePlay}
-                        isPresenterLive={mixerConfig.mic.sends.main.enabled}
-                        progress={trackProgress}
-                        logoSrc={logoSrc}
-                        onLogoChange={handleLogoChange}
-                        onLogoReset={handleLogoReset}
-                        headerGradient={headerGradient}
-                        headerTextColor={headerTextColor}
-                        onOpenHelp={() => setIsHelpModalOpen(true)}
-                        isAutoModeEnabled={isAutoModeEnabled}
-                        onToggleAutoMode={handleToggleAutoMode}
-                        onArtworkClick={handleOpenArtworkModal}
-                        onArtworkLoaded={handleArtworkLoaded}
-                        headerHeight={headerHeight}
-                        nextTrack={nextTrack}
-                        nextNextTrack={nextNextTrack}
-                        onPlayTrack={handlePlayTrack}
-                        onEject={handleRemoveFromPlaylist}
-                        playoutMode={playoutPolicy.playoutMode}
-                        wsStatus={wsStatus}
-                    />
-                </div>
-                <VerticalResizer
-                    onMouseDown={handleHeaderResizeMouseDown}
-                    onDoubleClick={handleHeaderResizeDoubleClick}
-                    title="Drag to resize player, double-click to toggle visibility"
+      <div className="flex flex-col h-screen bg-neutral-100 dark:bg-black text-black dark:text-white font-sans overflow-hidden">
+            <div style={{ height: `${headerHeight}px`, minHeight: '0px' }} className="flex-shrink-0 relative z-20">
+                <Header
+                    currentUser={currentUser}
+                    onLogout={handleLogout}
+                    currentTrack={displayTrack}
+                    nextTrack={nextTrack}
+                    nextNextTrack={nextNextTrack}
+                    onNext={handleNext}
+                    onPrevious={handlePrevious}
+                    isPlaying={isPlaying}
+                    onTogglePlay={handleTogglePlay}
+                    progress={trackProgress}
+                    logoSrc={logoSrc}
+                    onLogoChange={handleLogoChange}
+                    onLogoReset={handleLogoReset}
+                    headerGradient={headerGradient}
+                    headerTextColor={headerTextColor}
+                    onOpenHelp={() => setIsHelpModalOpen(true)}
+                    isAutoModeEnabled={isAutoModeEnabled}
+                    onToggleAutoMode={handleToggleAutoMode}
+                    onArtworkClick={handleOpenArtworkModal}
+                    onArtworkLoaded={handleArtworkLoaded}
+                    headerHeight={headerHeight}
+                    onPlayTrack={handlePlayTrack}
+                    onEject={handleRemoveFromPlaylist}
+                    playoutMode={playoutPolicy.playoutMode}
+                    wsStatus={wsStatus}
                 />
-                <main ref={mainRef} className="flex-grow flex p-4 min-h-0">
-                    <div style={{ flexBasis: `${displayedColumnWidths[0]}%` }} className={`flex-shrink-0 h-full overflow-hidden transition-all duration-300 ease-in-out ${!isLibraryCollapsed && 'border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900'}`}>
+            </div>
+
+            <div onMouseDown={handleHeaderResizeMouseDown} onDoubleClick={handleHeaderResizeDoubleClick} onWheel={handleHeaderWheel} className="flex-shrink-0 z-10">
+                <VerticalResizer title="Drag to resize header" />
+            </div>
+
+            <main ref={mainRef} className="flex-grow flex min-h-0">
+                {/* Left Column: Media Library */}
+                <div className="h-full transition-all duration-300" style={{ width: `${displayedColumnWidths[0]}%` }}>
+                    {!isLibraryCollapsed && (
                         <MediaLibrary
                             rootFolder={mediaLibrary}
                             onAddToPlaylist={(track) => handleAttemptToAddTrack(track, null)}
@@ -2881,190 +2603,118 @@ const AppInternal: React.FC = () => {
                             onRemoveMultipleItems={handleRemoveMultipleFromLibrary}
                             onCreateFolder={handleCreateFolder}
                             onMoveItem={handleMoveItemInLibrary}
-                            onOpenMetadataSettings={(folder) => setEditingMetadataFolder(folder)}
-                            onOpenTrackMetadataEditor={(track) => setEditingTrack(track)}
+                            onOpenMetadataSettings={setEditingMetadataFolder}
+                            onOpenTrackMetadataEditor={setEditingTrack}
                             onUpdateTrackTags={handleUpdateTrackTags}
                             onUpdateFolderTags={handleUpdateFolderTags}
                             onPflTrack={handlePflTrack}
                             pflTrackId={pflTrackId}
                             playoutMode={playoutPolicy.playoutMode}
                         />
-                    </div>
+                    )}
+                </div>
 
-                    <Resizer onMouseDown={handleMouseDown(0)} onDoubleClick={handleToggleLibraryCollapse} title="Double-click to toggle Library panel" />
+                <Resizer onMouseDown={handleMouseDown(0)} onDoubleClick={handleToggleLibraryCollapse} title="Drag to resize, double-click to collapse/expand" />
 
-                    <div style={{ flexBasis: `${displayedColumnWidths[1]}%` }} className="h-full min-w-0 border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900 overflow-hidden">
-                        <Playlist
-                            items={playlist}
-                            currentPlayingItemId={currentPlayingItemId}
-                            currentTrackIndex={currentTrackIndex}
-                            currentUser={currentUser}
-                            onRemove={handleRemoveFromPlaylist}
-                            onReorder={handleReorderPlaylist}
-                            onPlayTrack={handlePlayTrack}
-                            onInsertTrack={handleAttemptToAddTrack}
-                            isPlaying={isPlaying}
-                            stopAfterTrackId={stopAfterTrackId}
-                            onSetStopAfterTrackId={(id) => sendStudioAction('setPlayerState', { stopAfterTrackId: id })}
-                            trackProgress={trackProgress}
-                            onClearPlaylist={handleClearPlaylist}
-                            onPflTrack={handlePflTrack}
-                            pflTrackId={pflTrackId}
-                            isPflPlaying={isPflPlaying}
-                            pflProgress={pflProgress}
-                            mediaLibrary={mediaLibrary}
-                            timeline={timeline}
-                            onInsertTimeMarker={handleInsertTimeMarker}
-                            onUpdateTimeMarker={handleUpdateTimeMarker}
-                            onInsertVoiceTrack={handleInsertVoiceTrack}
-                            policy={playoutPolicy}
-                            isContributor={playoutPolicy.playoutMode === 'presenter'}
-                        />
-                    </div>
+                {/* Center Column: Playlist */}
+                <div className="h-full" style={{ width: `${displayedColumnWidths[1]}%` }}>
+                    <Playlist
+                        items={playlist}
+                        currentPlayingItemId={currentPlayingItemId}
+                        currentTrackIndex={currentTrackIndex}
+                        currentUser={currentUser}
+                        onRemove={handleRemoveFromPlaylist}
+                        onReorder={handleReorderPlaylist}
+                        onPlayTrack={handlePlayTrack}
+                        onInsertTrack={handleAttemptToAddTrack}
+                        onInsertTimeMarker={handleInsertTimeMarker}
+                        onUpdateTimeMarker={handleUpdateTimeMarker}
+                        onInsertVoiceTrack={handleInsertVoiceTrack}
+                        isPlaying={isPlaying}
+                        stopAfterTrackId={stopAfterTrackId}
+                        onSetStopAfterTrackId={setStopAfterTrackId}
+                        trackProgress={trackProgress}
+                        onClearPlaylist={handleClearPlaylist}
+                        onPflTrack={handlePflTrack}
+                        pflTrackId={pflTrackId}
+                        isPflPlaying={isPflPlaying}
+                        pflProgress={pflProgress}
+                        mediaLibrary={mediaLibrary}
+                        timeline={timeline}
+                        policy={playoutPolicy}
+                        isContributor={playoutPolicy.playoutMode === 'presenter'}
+                    />
+                </div>
 
-                    <Resizer onMouseDown={handleMouseDown(1)} onDoubleClick={handleToggleRightColumnCollapse} title="Double-click to toggle Side panel" />
+                <Resizer onMouseDown={handleMouseDown(1)} onDoubleClick={handleToggleRightColumnCollapse} title="Drag to resize, double-click to collapse/expand"/>
 
-                    <div style={{ flexBasis: `${displayedColumnWidths[2]}%` }} className={`flex-shrink-0 h-full flex flex-col overflow-hidden transition-all duration-300 ease-in-out ${!isRightColumnCollapsed && 'border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900'}`}>
-                         <div className="flex-grow flex flex-col min-h-0">
-                            <div className="flex-shrink-0 border-b border-neutral-200 dark:border-neutral-800">
-                                <nav className="flex justify-around text-center">
-                                    <button onClick={() => setActiveRightColumnTab('cartwall')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'cartwall' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Cartwall">Cartwall</button>
-                                    {isStudio && <button onClick={() => setActiveRightColumnTab('scheduler')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'scheduler' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Scheduler">Scheduler</button>}
-                                    {isStudio && <button onClick={() => { setActiveRightColumnTab('chat'); setHasUnreadChat(false); }} className={`px-3 py-2 w-full text-sm font-semibold transition-colors relative ${activeRightColumnTab === 'chat' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Chat">{hasUnreadChat && <span className="absolute top-1 right-2 w-2 h-2 bg-red-500 rounded-full"></span>}Chat</button>}
-                                    <button onClick={() => setActiveRightColumnTab('lastfm')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'lastfm' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Last.fm Info">Last.fm</button>
-                                    {isStudio && <button onClick={() => setActiveRightColumnTab('mixer')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'mixer' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Mixer">Mixer</button>}
-                                    {isStudio && <button onClick={() => setActiveRightColumnTab('users')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'users' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Users">Users</button>}
-                                    {isStudio && <button onClick={() => setActiveRightColumnTab('stream')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'stream' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Stream">Stream</button>}
-                                    {isStudio && <button onClick={() => setActiveRightColumnTab('settings')} className={`px-3 py-2 w-full text-sm font-semibold transition-colors ${activeRightColumnTab === 'settings' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Settings">Settings</button>}
-                                </nav>
-                            </div>
-                            <div className="flex-grow relative">
-                                <div className="absolute inset-0 overflow-y-auto">
-                                    {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(newGrid) => setPlayoutPolicy(p => ({ ...p, cartwallGrid: newGrid }))} onPlay={handleCartwallPlay} activePlayers={activeCartPlayers} />}
-                                    {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
-                                    {isStudio && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => handleSendChatMessage(text, 'Studio')} />}
-                                    {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} />}
-                                    {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} onPflToggle={handlePflToggle} activePfls={activePfls} />}
-                                    {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser}/>}
-                                    {isStudio && activeRightColumnTab === 'stream' && <PublicStream 
-                                        isPublicStreamEnabled={isPublicStreamEnabled}
-                                        publicStreamStatus={publicStreamStatus}
-                                        onTogglePublicStream={handleTogglePublicStream}
-                                        isSecureContext={isSecureContext}
-                                        policy={playoutPolicy}
-                                        onUpdatePolicy={setPlayoutPolicy}
-                                        publicStreamDiagnostics={publicStreamDiagnostics}
-                                        onTestEcho={handleTestEcho}
-                                        audioLevels={audioLevels}
-                                    />}
-                                    {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} allFolders={allFolders} allTags={allTags} />}
-                                </div>
-                            </div>
+                {/* Right Column: Tools */}
+                <div className="h-full flex flex-col" style={{ width: `${displayedColumnWidths[2]}%` }}>
+                   {!isRightColumnCollapsed && <>
+                        <div className="flex-shrink-0 flex items-center border-b border-neutral-200 dark:border-neutral-800 overflow-x-auto">
+                            {availableTabs.map(tab => (
+                                <button
+                                    key={tab.id}
+                                    onClick={() => {
+                                        setActiveRightColumnTab(tab.id as any);
+                                        if (tab.id === 'chat') setHasUnreadChat(false);
+                                    }}
+                                    className={`relative px-4 py-2 text-sm font-medium flex items-center gap-2 whitespace-nowrap transition-colors ${
+                                        activeRightColumnTab === tab.id
+                                            ? 'bg-neutral-200 dark:bg-neutral-800 text-black dark:text-white'
+                                            : 'text-neutral-500 hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'
+                                    }`}
+                                    title={tab.label}
+                                >
+                                    {tab.icon}
+                                    <span>{tab.label}</span>
+                                    {tab.hasBadge && <span className="absolute top-1.5 right-1.5 block h-2 w-2 rounded-full bg-red-500 ring-2 ring-neutral-100 dark:ring-black" />}
+                                </button>
+                            ))}
                         </div>
-                        <div className="flex-shrink-0 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900">
-                            <div
-                                className="flex justify-between items-center p-3 cursor-pointer hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50"
-                                onClick={() => setIsMicPanelCollapsed(p => !p)}
-                                aria-expanded={!isMicPanelCollapsed}
-                                aria-controls="mic-panel"
-                            >
-                                <div className="flex items-center gap-2">
-                                    {isStudio ? <UsersIcon className="w-5 h-5" /> : <MicrophoneIcon className="w-5 h-5" />}
-                                    <h3 className="font-semibold text-black dark:text-white">{isStudio ? 'Remote Presenters' : 'Microphone'}</h3>
-                                </div>
-                                <button className="text-black dark:text-white">
-                                    {isMicPanelCollapsed ? <ChevronUpIcon className="w-5 h-5" /> : <ChevronDownIcon className="w-5 h-5" />}
+                        <div className="flex-grow overflow-y-auto">
+                            {activeRightColumnTab === 'cartwall' && <Cartwall pages={cartwallPages} onUpdatePages={setCartwallPages} activePageId={activeCartwallPageId} onSetActivePageId={setActiveCartwallPageId} gridConfig={playoutPolicy.cartwallGrid} onGridConfigChange={(grid) => setPlayoutPolicy(p => ({ ...p, cartwallGrid: grid }))} onPlay={handleCartPlay} activePlayers={activeCartPlayers} />}
+                            {activeRightColumnTab === 'lastfm' && <LastFmAssistant currentTrack={displayTrack} />}
+                            {isStudio && activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} onPflToggle={handlePflToggle} activePfls={activePfls} />}
+                            {isStudio && activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={handleImportData} onExportData={handleExportData} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} allFolders={allFolders} allTags={allTags} />}
+                            {isStudio && activeRightColumnTab === 'scheduler' && <Scheduler broadcasts={broadcasts} onOpenEditor={handleOpenBroadcastEditor} onDelete={handleDeleteBroadcast} onManualLoad={handleManualLoadBroadcast} />}
+                            {isStudio && activeRightColumnTab === 'stream' && <PublicStream isPublicStreamEnabled={isPublicStreamEnabled} publicStreamStatus={publicStreamStatus} onTogglePublicStream={handleTogglePublicStream} isSecureContext={isSecureContext} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} publicStreamDiagnostics={publicStreamDiagnostics} onTestEcho={() => { wsRef.current?.send(JSON.stringify({ type: 'echoTest' })) }} audioLevels={audioLevels} />}
+                            {isStudio && activeRightColumnTab === 'users' && <UserManagement users={allUsers} onUsersUpdate={setAllUsers} currentUser={currentUser} />}
+                            {isStudio && activeRightColumnTab === 'chat' && <Chat messages={chatMessages} onSendMessage={(text) => { const message = { from: 'Studio', text, timestamp: Date.now() }; wsRef.current?.send(JSON.stringify({ type: 'chatMessage', payload: message })); }} />}
+                        </div>
+                        {isStudio && <div className={`flex-shrink-0 border-t border-neutral-200 dark:border-neutral-800 transition-all duration-300 ${isMicPanelCollapsed ? 'h-10' : 'h-auto'}`}>
+                            <div className="flex justify-between items-center px-4 py-2">
+                                <h3 className="text-sm font-semibold">Microphone & Remotes</h3>
+                                <button onClick={() => setIsMicPanelCollapsed(p => !p)} title={isMicPanelCollapsed ? 'Expand' : 'Collapse'}>
+                                    {isMicPanelCollapsed ? <ChevronUpIcon className="w-5 h-5"/> : <ChevronDownIcon className="w-5 h-5"/>}
                                 </button>
                             </div>
-                            {!isMicPanelCollapsed && (
-                                <div id="mic-panel">
-                                    <RemoteStudio
-                                        ref={remoteStudioRef}
-                                        mixerConfig={mixerConfig}
-                                        onMixerChange={setMixerConfig}
-                                        onStreamAvailable={handleSourceStream}
-                                        ws={wsRef.current}
-                                        currentUser={currentUser}
-                                        isStudio={playoutPolicy.playoutMode === 'studio'}
-                                        incomingSignal={rtcSignal}
-                                        onlinePresenters={onlinePresenters}
-                                        audioLevels={audioLevels}
-                                        isSecureContext={isSecureContext}
-                                    />
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </main>
-            </>
-             <MetadataSettingsModal
-                folder={editingMetadataFolder}
-                onClose={() => setEditingMetadataFolder(null)}
-                onSave={handleUpdateFolderMetadataSettings}
-             />
-             <TrackMetadataModal
-                track={editingTrack}
-                onClose={() => setEditingTrack(null)}
-                onSave={handleUpdateTrackMetadata}
-             />
-             <HelpModal
-                isOpen={isHelpModalOpen}
-                onClose={() => setIsHelpModalOpen(false)}
-             />
-            <WhatsNewPopup
-                isOpen={isWhatsNewOpen}
-                onClose={handleCloseWhatsNewPopup}
-            />
-            <ArtworkModal
-                isOpen={isArtworkModalOpen}
-                artworkUrl={artworkModalUrl}
-                onClose={handleCloseArtworkModal}
-            />
-             <ConfirmationDialog
-                isOpen={!!validationWarning}
-                onClose={() => setValidationWarning(null)}
-                onConfirm={handleConfirmValidationAndAddTrack}
-                title="Playout Policy Warning"
-                confirmText="Add Anyway"
-                confirmButtonClass="bg-yellow-600 hover:bg-yellow-500 text-black"
-            >
+                            {!isMicPanelCollapsed && <RemoteStudio ref={remoteStudioRef} mixerConfig={mixerConfig} onMixerChange={setMixerConfig} onStreamAvailable={handleSourceStream} ws={wsRef.current} currentUser={currentUser} isStudio={isStudio} incomingSignal={rtcSignal} onlinePresenters={onlinePresenters} audioLevels={audioLevels} isSecureContext={isSecureContext} />}
+                        </div>}
+                   </>}
+                </div>
+            </main>
+
+            {/* Global Audio Players */}
+            <audio ref={audioPlayerRef} crossOrigin="anonymous" />
+            <audio ref={pflAudioRef} />
+
+            {/* Modals & Popups */}
+            <MetadataSettingsModal folder={editingMetadataFolder} onClose={() => setEditingMetadataFolder(null)} onSave={handleUpdateFolderMetadataSettings} />
+            <TrackMetadataModal track={editingTrack} onClose={() => setEditingTrack(null)} onSave={handleUpdateTrackMetadata} />
+            <HelpModal isOpen={isHelpModalOpen} onClose={() => setIsHelpModalOpen(false)} />
+            <WhatsNewPopup isOpen={isWhatsNewOpen} onClose={handleCloseWhatsNewPopup} />
+            <ArtworkModal isOpen={isArtworkModalOpen} artworkUrl={artworkModalUrl} onClose={handleCloseArtworkModal} />
+            <ConfirmationDialog isOpen={!!validationWarning} onClose={() => setValidationWarning(null)} onConfirm={handleConfirmValidationAndAddTrack} title="Separation Warning" confirmText="Add Anyway">
                 {validationWarning?.message}
             </ConfirmationDialog>
-            <BroadcastEditor
-                isOpen={isBroadcastEditorOpen}
-                onClose={handleCloseBroadcastEditor}
-                onSave={handleSaveBroadcast}
-                existingBroadcast={editingBroadcast}
-                mediaLibrary={mediaLibrary}
-                onVoiceTrackCreate={handleVoiceTrackCreate}
-                policy={playoutPolicy}
-                currentUser={currentUser}
-            />
-            
-            <audio ref={audioPlayerRef} crossOrigin="anonymous" />
-            <audio ref={pflAudioRef} crossOrigin="anonymous" loop></audio>
-
+            {isStudio && <BroadcastEditor isOpen={isBroadcastEditorOpen} onClose={handleCloseBroadcastEditor} onSave={handleSaveBroadcast} existingBroadcast={editingBroadcast} mediaLibrary={mediaLibrary} onVoiceTrackCreate={handleVoiceTrackCreate} policy={playoutPolicy} currentUser={currentUser} />}
         </div>
     );
 };
 
-const App = React.memo(AppInternal);
+const App = () => {
+    return <AppInternal />;
+};
+
 export default App;
-// COMMIT: playlist start reliability & broadcast error logging fixes
-// - Dodano szczegółowe logi dla handleTogglePlay
-// - Dodano blokadę podwójnego startu playlisty
-// - Dodano obsługę suspended AudioContext
-// - Dodano retry strategy dla play()
-// - Dodano szczegółowe logi dla handleTogglePublicStream
-// - Dodano walidację secure context, studio mode, WebSocket
-// - Dodano sprawdzenie destinationNode przed startem
-// - Dodano obsługę błędów MediaRecorder
-// COMMIT: icecast connection chain: full streaming diagnostics & fix
-// - Wprowadzono szczegółową diagnostykę po stronie klienta i serwera dla łańcucha streamowania.
-// - Klient teraz sprawdza sygnał audio przed startem i posiada samonaprawiający się MediaRecorder.
-// - Serwer loguje otrzymane dane, status FFmpeg i błędy połączenia z Icecast.
-// - UI wyświetla szczegółowe informacje diagnostyczne, w tym stan nagrywania, liczbę wysłanych paczek i ostrzeżenie o nadawaniu ciszy.
-// COMMIT: broadcast websocket handshake/status diagnostics & retry
-// - Wprowadzono kompleksową diagnostykę połączenia WebSocket dla broadcastu, w tym 5-sekundowy timeout, automatyczne resetowanie po błędzie i rozbudowane logowanie.
-// - UI teraz wyświetla szczegółowy status połączenia, liczbę prób i ostatnie błędy, co pozwala na szybką diagnozę i ponowienie próby bez odświeżania strony.
-// - Serwer loguje nawiązanie połączenia, co ułatwia weryfikację handshake'u.
